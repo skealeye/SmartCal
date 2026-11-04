@@ -14,6 +14,7 @@ from smartcal.logsetup import guarded, install_excepthooks, setup_logging
 from smartcal.settings import Settings
 from smartcal.ui.popup import AgendaPopup
 from smartcal.ui.tray import TrayController
+from smartcal.ui.window import CalendarWindow
 
 
 def main() -> int:
@@ -44,6 +45,14 @@ def main() -> int:
     popup = AgendaPopup(cache, settings)
     popup.set_no_accounts(not list_accounts())
     popup.refresh()
+    window = CalendarWindow(cache, settings)
+
+    @guarded
+    def open_window(view: str) -> None:
+        popup.hide()
+        window.show_view(view)
+
+    popup.view_requested.connect(open_window)
     tray = TrayController(popup, worker, cache, settings, on_accounts_changed=drop_clients)
     tray.show()
 
@@ -53,6 +62,7 @@ def main() -> int:
         popup.set_no_accounts(not accounts)
         popup.prune_accounts(accounts)
         popup.refresh()
+        window.refresh()
         tray.update_tooltip()
 
     worker.synced.connect(on_synced)
