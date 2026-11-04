@@ -60,3 +60,12 @@ def test_delete_event_removes_only_that_row(tmp_path):
     c.upsert_events("a", [mk("c1"), mk("c2")])
     c.delete_event("a", "c1", "e1")
     assert [e.calendar_id for e in c.events_by_id("e1")] == ["c2"]
+
+
+def test_busy_migration_tolerates_column_added_concurrently(tmp_path):
+    import sqlite3
+    from contextlib import closing
+    from smartcal.db import Cache
+    c = Cache(tmp_path / "m.db")            # already has the busy column
+    with closing(sqlite3.connect(c.path)) as con:
+        Cache._add_busy_column(con)         # ALTER hits "duplicate column name": no error

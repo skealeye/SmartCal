@@ -33,6 +33,7 @@ class Event:
     is_series_master: bool = False
     attendee_count: int = 0  # attendees other than the owner
     organizer_self: bool | None = None
+    raw_title: str | None = None  # Google summary as stored ("" if absent); None = not from Google
     busy: bool = True  # False when Google transparency is "transparent" (shown as Free)
 
 

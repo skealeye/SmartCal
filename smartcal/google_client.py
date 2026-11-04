@@ -123,6 +123,7 @@ class GoogleClient:
             attendee_count=sum(1 for a in raw.get("attendees", []) if not a.get("self")),
             organizer_self=(bool(raw["organizer"].get("self"))
                             if isinstance(raw.get("organizer"), dict) else None),
+            raw_title=raw.get("summary") or "",
             busy=raw.get("transparency") != "transparent")
 
     def list_events(self, start: datetime, end: datetime) -> list[Event]:

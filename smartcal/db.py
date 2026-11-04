@@ -75,7 +75,16 @@ class Cache:
             con.executescript(_SCHEMA)
             cols = {r["name"] for r in con.execute("PRAGMA table_info(events)")}
             if "busy" not in cols:  # database created before v0.1.18
-                con.execute("ALTER TABLE events ADD COLUMN busy INTEGER NOT NULL DEFAULT 1")
+                self._add_busy_column(con)
+
+    @staticmethod
+    def _add_busy_column(con) -> None:
+        try:
+            con.execute("ALTER TABLE events ADD COLUMN busy INTEGER NOT NULL DEFAULT 1")
+        except sqlite3.OperationalError as exc:
+            # Another process migrated between our check and the ALTER: that is fine.
+            if "duplicate column name" not in str(exc).lower():
+                raise
 
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(self.path, timeout=30)

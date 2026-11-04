@@ -15,7 +15,8 @@ import json
 import logging
 import os
 import threading
-from dataclasses import asdict, dataclass
+import uuid
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -41,6 +42,7 @@ class Change:
     at: str                        # ISO time of the write
     before_updated: str | None = None  # Google `updated` right before the write
     pending: bool = False          # True until the write finished and was finalized
+    uid: str = field(default_factory=lambda: uuid.uuid4().hex)  # unique entry id
 
 
 def snapshot(ev: Event) -> dict:
@@ -49,7 +51,11 @@ def snapshot(ev: Event) -> dict:
     The client's "(no title)" placeholder is stored as "" (what Google holds), so
     restoring never writes the placeholder into the calendar.
     """
-    return {"title": "" if ev.title == _PLACEHOLDER else ev.title,
+    if ev.raw_title is not None:
+        title = ev.raw_title            # exactly what Google holds
+    else:
+        title = "" if ev.title == _PLACEHOLDER else ev.title
+    return {"title": title,
             "start": ev.start.isoformat(), "end": ev.end.isoformat(),
             "all_day": ev.all_day, "location": ev.location, "description": ev.description,
             "recurring_id": ev.recurring_id, "recurrence": ev.recurrence}
@@ -84,6 +90,8 @@ def _valid(d) -> bool:
                 return False
         if not isinstance(d.get("pending", False), bool):
             return False
+        if not isinstance(d.get("uid", ""), str):
+            return False
         b = d["before"]
         if b is None:
             return d["kind"] == "create"
@@ -91,6 +99,11 @@ def _valid(d) -> bool:
             return False
         datetime.fromisoformat(b["start"])
         datetime.fromisoformat(b["end"])
+        rec = b.get("recurrence")
+        if not (rec is None or (isinstance(rec, list) and all(isinstance(r, str) for r in rec))):
+            return False
+        if not (b.get("recurring_id") is None or isinstance(b["recurring_id"], str)):
+            return False
         return (isinstance(b["title"], str) and isinstance(b["all_day"], bool)
                 and isinstance(b["location"], str) and isinstance(b["description"], str))
     except (KeyError, TypeError, ValueError):
@@ -177,15 +190,23 @@ class UndoStore:
             return len(self._items)
 
     def _carry_updated(self, done: Change, updated: str | None) -> None:
-        """After undoing `done`, the next older entry for the same event now expects
-        the event at `updated`, so a second undo in a row does not falsely warn."""
+        """After undoing `done`, let the next older entry for the same event expect
+        the event at `updated`, so a second undo in a row does not falsely warn.
+
+        Only when nothing external happened between the two SmartCal writes: the
+        older entry must be finalized and its after_updated must equal
+        done.before_updated. Otherwise it is left alone and its undo will warn."""
         if updated is None:
             return
         key = (done.account, done.calendar_id, done.event_id)
-        for c in reversed(self._items):
-            if c is not done and (c.account, c.calendar_id, c.event_id) == key \
-                    and self._items.index(c) < self._items.index(done):
-                c.after_updated, c.pending = updated, False
+        pos = next((i for i, c in enumerate(self._items) if c is done), None)
+        if pos is None:
+            return
+        for older in reversed(self._items[:pos]):
+            if (older.account, older.calendar_id, older.event_id) == key:
+                if (not older.pending and older.after_updated is not None
+                        and older.after_updated == done.before_updated):
+                    older.after_updated = updated
                 return
 
     def undo_last(self, actions, force: bool = False) -> str:
@@ -239,7 +260,13 @@ class UndoStore:
                 cache.delete_event(c.account, c.calendar_id, c.event_id)
                 line = f"Undone: removed {c.summary}"
             elif c.kind == "delete":
-                restored = client.restore_event(_event_from(c))
+                try:
+                    restored = client.restore_event(_event_from(c))
+                except Exception as exc:  # noqa: BLE001
+                    if not _gone(exc):
+                        raise
+                    self.discard(c)     # Google purged it; do not block older entries
+                    return "Can't undo: Google no longer has that event."
                 cache.upsert_events(c.account, [restored])
                 line = f"Undone: restored {c.summary}"
             else:
