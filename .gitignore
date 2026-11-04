@@ -1,0 +1,15 @@
+.env
+*.token.json
+token*.json
+client_secret*.json
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+dist/
+build/
+.superpowers/
+Thumbs.db
+*.png
+.playwright-mcp/
+.claude/worktrees/
