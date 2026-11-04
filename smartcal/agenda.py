@@ -2,23 +2,40 @@
 from __future__ import annotations
 
 import math
-from datetime import date, datetime, time, timedelta
-from zoneinfo import ZoneInfo
+import os
+from datetime import date, datetime, time, timedelta, tzinfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .models import Event
 
 
+def _local_zone() -> tzinfo | None:
+    """The system zone as a ZoneInfo when it can be determined (TZ env var),
+    else None. None means: resolve each boundary with naive.astimezone(), which
+    uses the OS rules for that specific date and so stays DST-correct."""
+    name = os.environ.get("TZ")
+    if name:
+        try:
+            return ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    return None
+
+
+def _zone(now: datetime) -> tzinfo | None:
+    return now.tzinfo if isinstance(now.tzinfo, ZoneInfo) else _local_zone()
+
+
 def _midnight(d: date, now: datetime) -> datetime:
-    """Local midnight of `d`. DST-safe: uses now's zone if it is a real zone,
-    else the system local zone."""
+    """Local midnight of `d`, resolved per boundary so 23/25-hour days work."""
     naive = datetime.combine(d, time())
-    if isinstance(now.tzinfo, ZoneInfo):
-        return naive.replace(tzinfo=now.tzinfo)
-    return naive.astimezone()
+    zone = _zone(now)
+    return naive.replace(tzinfo=zone) if zone else naive.astimezone()
 
 
 def _local_date(now: datetime) -> date:
-    return now.date() if isinstance(now.tzinfo, ZoneInfo) else now.astimezone().date()
+    zone = _zone(now)
+    return now.astimezone(zone).date() if zone else now.astimezone().date()
 
 
 def _primary_ids(cache) -> set[str]:

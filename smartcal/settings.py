@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from .config import data_dir
@@ -21,14 +22,22 @@ class Settings:
             return
         if not isinstance(data, dict):
             return
-        self.hidden_calendars = set(data.get("hidden_calendars", []))
-        self.shown_calendars = set(data.get("shown_calendars", []))
+        self.hidden_calendars = self._str_set(data.get("hidden_calendars"))
+        self.shown_calendars = self._str_set(data.get("shown_calendars"))
+
+    @staticmethod
+    def _str_set(value) -> set[str]:
+        if not isinstance(value, list):
+            return set()
+        return {v for v in value if isinstance(v, str)}
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         data = {"hidden_calendars": sorted(self.hidden_calendars),
                 "shown_calendars": sorted(self.shown_calendars)}
-        self.path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, self.path)
 
     def is_hidden(self, calendar_id: str, primary: bool) -> bool:
         """Explicit hide wins, then explicit show; otherwise only primary calendars show."""

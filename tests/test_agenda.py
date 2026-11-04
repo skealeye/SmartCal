@@ -110,3 +110,26 @@ def test_events_display_in_local_time_across_dst(tmp_path):
         ev("2", "Mon", datetime(2026, 3, 9, 0, 30, tzinfo=e4), datetime(2026, 3, 9, 1, 0, tzinfo=e4))])
     got = agenda.today(cache2, st2, datetime(2026, 3, 8, 12, 0, tzinfo=NY))
     assert [e.title for e in got] == ["Eve"]
+
+
+def test_dst_day_boundaries_with_fixed_offset_now(tmp_path, monkeypatch):
+    # Production passes datetime.now().astimezone(): a fixed-offset tzinfo.
+    monkeypatch.setattr(agenda, "_local_zone", lambda: NY)
+    edt, est = timezone(timedelta(hours=-4)), timezone(timedelta(hours=-5))
+    # Fall back (25-hour day), now is EST late in the day.
+    cache, st = make(tmp_path, [
+        ev("0", "Prev", datetime(2026, 10, 31, 23, 30, tzinfo=edt), datetime(2026, 11, 1, 0, 0, tzinfo=edt)),
+        ev("1", "Early", datetime(2026, 11, 1, 0, 30, tzinfo=edt), datetime(2026, 11, 1, 1, 0, tzinfo=edt)),
+        ev("2", "Late", datetime(2026, 11, 1, 23, 30, tzinfo=est), datetime(2026, 11, 2, 0, 0, tzinfo=est)),
+        ev("3", "Next", datetime(2026, 11, 2, 0, 30, tzinfo=est), datetime(2026, 11, 2, 1, 0, tzinfo=est))],
+        cals=[CalendarInfo("primary", "Me", "#111", True)])
+    now = datetime(2026, 11, 1, 23, 45, tzinfo=est)
+    assert [e.title for e in agenda.today(cache, st, now)] == ["Early", "Late"]
+    # Spring forward (23-hour day), now is EDT.
+    (tmp_path / "x").mkdir()
+    cache2, st2 = make(tmp_path / "x", [
+        ev("1", "Eve", datetime(2026, 3, 8, 23, 30, tzinfo=edt), datetime(2026, 3, 9, 0, 0, tzinfo=edt)),
+        ev("2", "Mon", datetime(2026, 3, 9, 0, 30, tzinfo=edt), datetime(2026, 3, 9, 1, 0, tzinfo=edt)),
+        ev("3", "Sat", datetime(2026, 3, 7, 23, 30, tzinfo=est), datetime(2026, 3, 8, 0, 0, tzinfo=est))])
+    now2 = datetime(2026, 3, 8, 12, 0, tzinfo=edt)
+    assert [e.title for e in agenda.today(cache2, st2, now2)] == ["Eve"]

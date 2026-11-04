@@ -49,7 +49,7 @@ def test_sync_ok_stores_events_and_calendars(cache, tmp_path):
     w = worker(cache, FakeClient([_ev("1"), _ev("2", "ooo")]), tmp_path)
     assert w.sync_account("a") == "ok"
     assert sorted(c.id for c in cache.calendars()) == ["ooo", "p"]
-    assert _cached(cache) == ["1"]  # hidden non-primary calendar not stored
+    assert _cached(cache) == ["1", "2"]  # hidden calendars are stored too
 
 
 def test_sync_offline_keeps_cached_events_and_reports_status(cache, tmp_path):
@@ -77,3 +77,48 @@ def test_worker_emits_signals(qtbot, cache, tmp_path):
     w.stop()
     w.wait(5000)
     assert seen[0] == ("a", "ok")
+
+
+def test_unhiding_calendar_shows_cached_events_without_resync(cache, tmp_path):
+    from smartcal import agenda
+    st = Settings(tmp_path / "s.json")
+    w = SyncWorker(cache, {"a": FakeClient([_ev("1"), _ev("2", "ooo")])}, st)
+    assert w.sync_account("a") == "ok"
+    now = datetime.now().astimezone()
+    assert agenda.next_event(cache, st, now).id == "1"
+    st.set_hidden("p", True)
+    st.set_hidden("ooo", False)
+    assert agenda.next_event(cache, st, now).id == "2"
+
+
+def test_dns_failure_is_offline(cache, tmp_path):
+    import httplib2
+    for err in (httplib2.ServerNotFoundError("dns"), TimeoutError("t")):
+        assert worker(cache, FakeClient(error=err), tmp_path).sync_account("a") == "offline"
+
+
+def test_http_401_is_reauth(cache, tmp_path):
+    resp = type("R", (), {"status": 401, "reason": "x"})()
+    assert worker(cache, FakeClient(error=HttpError(resp, b"")), tmp_path).sync_account("a") == "reauth"
+
+
+def test_unexpected_exception_is_error_status_and_logged(cache, tmp_path, caplog):
+    cache.upsert_events("a", [_ev("old")])
+    resp = type("R", (), {"status": 403, "reason": "x"})()
+    with caplog.at_level("WARNING"):
+        assert worker(cache, FakeClient(error=ValueError("boom")), tmp_path).sync_account("a") == "error"
+        assert worker(cache, FakeClient(error=HttpError(resp, b"")), tmp_path).sync_account("a") == "error"
+    assert "boom" in caplog.text
+    assert _cached(cache) == ["old"]
+
+
+def test_worker_can_restart_after_stop(qtbot, cache, tmp_path):
+    w = worker(cache, FakeClient([_ev("1")]), tmp_path)
+    with qtbot.waitSignal(w.synced, timeout=5000):
+        w.start()
+    w.stop()
+    w.wait(5000)
+    with qtbot.waitSignal(w.synced, timeout=5000):
+        w.start()
+    w.stop()
+    w.wait(5000)
