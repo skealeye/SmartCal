@@ -127,7 +127,6 @@ def test_hostile_text_cannot_alter_the_real_winotify_script(monkeypatch):
 
 def test_xml_invalid_characters_removed():
     t = clean_text("a\x00b\x0bc\x1fd￾e￿ f\ud800g\udfffh i j")
-    assert t == "abcd e fghi j".replace("abcd", "abcd") or "\x00" not in t
     for bad in ("\x00", "\x0b", "\x1f", "￾", "￿", "\ud800", "\udfff", " ", " "):
         assert bad not in t
     assert clean_text("café \U0001F600 ok") == "café \U0001F600 ok"
