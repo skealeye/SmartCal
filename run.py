@@ -13,6 +13,7 @@ from smartcal.google_client import GoogleClient
 from smartcal.live_sync import LiveSyncWorker
 from smartcal.logsetup import guarded, install_excepthooks, setup_logging
 from smartcal.notifier import Notifier
+from smartcal.reminders import ReminderFirer, Reminders
 from smartcal.settings import Settings
 from smartcal.toast import ToastSender, register_app_id
 from smartcal.ui.popup import AgendaPopup
@@ -64,6 +65,9 @@ def main() -> int:
     popup.view_requested.connect(open_window)
     toast = ToastSender()
     notifier = Notifier(cache, settings, toast)
+    reminders = Reminders()  # shared with the tray; Task 9's assistant gets the same instance
+    app.reminders = reminders
+    reminder_firer = ReminderFirer(reminders, toast)
     dialog_ref: list[SettingsDialog] = []
 
     @guarded
@@ -102,7 +106,7 @@ def main() -> int:
         dlg.activateWindow()
 
     tray = TrayController(popup, worker, cache, settings, on_accounts_changed=drop_clients,
-                          on_open_settings=open_settings)
+                          on_open_settings=open_settings, reminders=reminders)
     toast.tray = tray
     tray.show()
 
@@ -137,7 +141,9 @@ def main() -> int:
     notify_timer.setInterval(30_000)
     notify_timer.timeout.connect(guarded(notifier.check))
     notify_timer.start()
+    notify_timer.timeout.connect(guarded(reminder_firer.check))
     QTimer.singleShot(2000, guarded(notifier.check))
+    QTimer.singleShot(2000, guarded(reminder_firer.check))
 
     worker.start()
     code = app.exec()

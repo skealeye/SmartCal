@@ -41,13 +41,15 @@ class TrayController(QSystemTrayIcon):
     _add_done = pyqtSignal(str)
 
     def __init__(self, popup, worker, cache, settings, parent=None,
-                 on_accounts_changed=None, add_account_fn=None, on_open_settings=None):
+                 on_accounts_changed=None, add_account_fn=None, on_open_settings=None, reminders=None):
         super().__init__(parent)
         self.popup, self.worker = popup, worker
         self.cache, self.settings = cache, settings
         self._on_accounts_changed = on_accounts_changed
         self._add_account_fn = add_account_fn or google_auth.add_account
         self._on_open_settings = on_open_settings
+        self.reminders = reminders
+        self._reminders_dialog = None
         self._adding = False
         self._icon_day = 0
         self.setIcon(make_icon(datetime.now().day))
@@ -58,10 +60,13 @@ class TrayController(QSystemTrayIcon):
         self._sync_action.triggered.connect(lambda _checked=False: self.worker.sync_now())
         self._settings_action = QAction("Settings…", menu)
         self._settings_action.triggered.connect(lambda _checked=False: self.open_settings())
+        self._reminders_action = QAction("Reminders…", menu)
+        self._reminders_action.triggered.connect(lambda _checked=False: self.open_reminders())
         quit_action = QAction("Quit", menu)
         quit_action.triggered.connect(lambda _checked=False: self.quit())
         menu.addAction(self._add_action)
         menu.addAction(self._sync_action)
+        menu.addAction(self._reminders_action)
         menu.addAction(self._settings_action)
         menu.addSeparator()
         menu.addAction(quit_action)
@@ -100,6 +105,21 @@ class TrayController(QSystemTrayIcon):
     def open_settings(self) -> None:
         if self._on_open_settings:
             self._on_open_settings()
+
+    def open_reminders(self) -> None:
+        if self.reminders is None:
+            return
+        from .reminders_dialog import RemindersDialog
+        dlg = self._reminders_dialog
+        if dlg is not None and dlg.isVisible():
+            dlg.refresh()
+            dlg.raise_()
+            dlg.activateWindow()
+            return
+        dlg = RemindersDialog(self.reminders)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._reminders_dialog = dlg
+        dlg.show()
 
     def add_account(self) -> None:
         if self._adding:
