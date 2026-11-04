@@ -18,7 +18,7 @@ from smartcal.settings import Settings
 from smartcal.toast import ToastSender, register_app_id
 from smartcal.ui.popup import AgendaPopup
 from smartcal.ui.settings_dialog import SettingsDialog
-from smartcal.ui.tray import TrayController
+from smartcal.ui.tray import TrayController, dialog_visible
 from smartcal.ui.window import CalendarWindow
 
 
@@ -67,7 +67,8 @@ def main() -> int:
     notifier = Notifier(cache, settings, toast)
     reminders = Reminders()  # shared with the tray; Task 9's assistant gets the same instance
     app.reminders = reminders
-    reminder_firer = ReminderFirer(reminders, toast)
+    reminder_firer = ReminderFirer(reminders, toast,
+                                   on_fired=lambda: tray.refresh_reminders())
     dialog_ref: list[SettingsDialog] = []
 
     @guarded
@@ -92,7 +93,7 @@ def main() -> int:
 
     @guarded
     def open_settings() -> None:
-        if dialog_ref and dialog_ref[0].isVisible():
+        if dialog_ref and dialog_visible(dialog_ref[0]):
             dialog_ref[0].raise_()
             dialog_ref[0].activateWindow()
             return
@@ -101,6 +102,7 @@ def main() -> int:
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.applied.connect(on_settings_applied)
         dialog_ref[:] = [dlg]
+        dlg.destroyed.connect(lambda *_: dialog_ref.clear())
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()
@@ -118,7 +120,7 @@ def main() -> int:
         popup.refresh()
         window.refresh()
         tray.update_tooltip()
-        if dialog_ref and dialog_ref[0].isVisible():
+        if dialog_ref and dialog_visible(dialog_ref[0]):
             dialog_ref[0].refresh_accounts()
 
     worker.synced.connect(on_synced)

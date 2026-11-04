@@ -17,6 +17,10 @@ class RemindersDialog(QDialog):
         self._layout.addWidget(self._rows)
         self.refresh()
 
+    def showEvent(self, event) -> None:
+        self.refresh()
+        super().showEvent(event)
+
     def refresh(self) -> None:
         while self._rows_layout.count():
             w = self._rows_layout.takeAt(0).widget()
@@ -32,7 +36,7 @@ class RemindersDialog(QDialog):
             row = QWidget()
             h = QHBoxLayout(row)
             h.setContentsMargins(0, 0, 0, 0)
-            label = QLabel(f"{r.fire_at.astimezone():%a %b %d, %H:%M}  {r.text}")
+            label = QLabel(f"{r.fire_at.astimezone():%Y-%m-%d %H:%M}  {r.text}")
             label.setTextFormat(Qt.TextFormat.PlainText)
             label.setWordWrap(True)
             btn = QPushButton("Cancel")

@@ -14,6 +14,16 @@ from .. import agenda, google_auth
 log = logging.getLogger(__name__)
 
 
+def dialog_visible(dlg) -> bool:
+    """True if `dlg` is a live, visible widget (False for None or a deleted wrapper)."""
+    if dlg is None:
+        return False
+    try:
+        return bool(dlg.isVisible())
+    except RuntimeError:  # underlying C++ object already deleted
+        return False
+
+
 def make_icon(day: int) -> QIcon:
     """A small calendar-style icon showing the day number (drawn, no image files)."""
     size = 64
@@ -111,7 +121,7 @@ class TrayController(QSystemTrayIcon):
             return
         from .reminders_dialog import RemindersDialog
         dlg = self._reminders_dialog
-        if dlg is not None and dlg.isVisible():
+        if dialog_visible(dlg):
             dlg.refresh()
             dlg.raise_()
             dlg.activateWindow()
@@ -119,7 +129,12 @@ class TrayController(QSystemTrayIcon):
         dlg = RemindersDialog(self.reminders)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._reminders_dialog = dlg
+        dlg.destroyed.connect(lambda *_: setattr(self, "_reminders_dialog", None))
         dlg.show()
+
+    def refresh_reminders(self) -> None:
+        if dialog_visible(self._reminders_dialog):
+            self._reminders_dialog.refresh()
 
     def add_account(self) -> None:
         if self._adding:
