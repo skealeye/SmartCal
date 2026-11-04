@@ -1,6 +1,8 @@
 """Dark palette and color helpers for SmartCal's UI."""
 from __future__ import annotations
 
+import re
+
 from PyQt6.QtGui import QColor
 
 BG = "#1f2023"
@@ -13,8 +15,11 @@ WARN = "#fdd663"
 DEFAULT_STRIPE = "#4285f4"
 
 
+_HEX = re.compile(r"#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})")
+
+
 def stripe_color(color: str | None) -> str:
     """A valid CSS hex color for an event's calendar, falling back to blue."""
-    if color and QColor(color).isValid():
+    if color and _HEX.fullmatch(color) and QColor(color).isValid():
         return QColor(color).name()
     return DEFAULT_STRIPE

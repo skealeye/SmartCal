@@ -68,3 +68,16 @@ def test_titles():
     assert layout.title_for("week", date(2026, 12, 1)) == "Nov 29 – Dec 5, 2026"
     assert layout.title_for("day", date(2026, 11, 4)) == "Wed, Nov 4, 2026"
     assert layout.shift_month(date(2026, 1, 31), 1) == date(2026, 2, 28)
+
+
+def test_cross_midnight_event_clipped_on_second_day():
+    e = ev("1", datetime(2026, 11, 4, 22, tzinfo=NY), datetime(2026, 11, 5, 2, tzinfo=NY))
+    b = layout.day_blocks([e], date(2026, 11, 5), REF)
+    assert [(x.start_min, x.end_min) for x in b] == [(0, 120)]
+    assert layout.event_days(e, REF) == [date(2026, 11, 4), date(2026, 11, 5)]
+
+
+def test_zero_duration_event_gets_min_height():
+    t = datetime(2026, 11, 4, 10, tzinfo=NY)
+    b = layout.day_blocks([ev("1", t, t)], date(2026, 11, 4), REF)
+    assert b[0].end_min - b[0].start_min == layout.MIN_BLOCK_MIN

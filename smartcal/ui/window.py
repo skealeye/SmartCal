@@ -1,10 +1,11 @@
 """Day / Week / Month window. Read-only; reads only from the cache."""
 from __future__ import annotations
 
+import html
 from datetime import date, datetime, timedelta
 
-from PyQt6.QtCore import QPoint, QRect, QSettings, Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QDesktopServices, QPainter
+from PyQt6.QtCore import QByteArray, QRect, QSettings, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QDesktopServices, QGuiApplication, QPainter
 from PyQt6.QtWidgets import (QButtonGroup, QDialog, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QLabel,
                              QMainWindow, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
                              QStackedWidget, QVBoxLayout, QWidget)
@@ -26,6 +27,11 @@ def _text_on(color: str) -> str:
     c = QColor(color)
     lum = 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
     return "#202124" if lum > 150 else "#ffffff"
+
+
+def plain_tip(text: str) -> str:
+    """A tooltip string Qt will not interpret as rich text markup."""
+    return f"<p style='white-space:pre'>{html.escape(text)}</p>"
 
 
 def _clear(lay) -> None:
@@ -53,7 +59,7 @@ class EventChip(QLabel):
                            f"padding:1px 4px;font-size:11px;")
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip(event.title)
+        self.setToolTip(plain_tip(event.title))
 
     def mousePressEvent(self, e):
         e.accept()
@@ -76,9 +82,13 @@ class DayHeader(QLabel):
                            f"color:{theme.LINK if is_today else theme.TEXT};")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
+    def mousePressEvent(self, e):
+        e.accept()
+
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.day)
+        e.accept()
 
 
 class HourGutter(QWidget):
@@ -275,10 +285,10 @@ class DayCell(QFrame):
         self._lay.addWidget(self.number)
         self.dimmed = not in_month
 
-    def set_events(self, events: list, on_click) -> None:
+    def set_events(self, events: list, on_click, ref: datetime) -> None:
         shown, more = layout.split_for_month(events)
         for ev in shown:
-            text = ev.title if ev.all_day else f"{layout.short_time(ev.start)} {ev.title}"
+            text = ev.title if ev.all_day else f"{layout.short_time(layout.to_local(ev.start, ref))} {ev.title}"
             chip = EventChip(ev, text)
             if self.dimmed:
                 effect = QGraphicsOpacityEffect(chip)
@@ -294,9 +304,13 @@ class DayCell(QFrame):
             self._lay.addWidget(self.more_label)
         self._lay.addStretch(1)
 
+    def mousePressEvent(self, e):
+        e.accept()
+
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.day)
+        e.accept()
 
 
 class MonthView(QWidget):
@@ -322,7 +336,7 @@ class MonthView(QWidget):
             self._grid.setColumnStretch(c, 1)
         for i, d in enumerate(dates):
             cell = DayCell(d, d.month == month, d == today)
-            cell.set_events(by_day.get(d, []), self.event_clicked.emit)
+            cell.set_events(by_day.get(d, []), self.event_clicked.emit, ref)
             cell.clicked.connect(self.day_clicked)
             self._grid.addWidget(cell, 1 + i // 7, i % 7)
             self.cells[d] = cell
@@ -368,7 +382,7 @@ class EventDetails(QDialog):
             self.link_label = QLabel(
                 f'<a href="{_esc(url)}" style="color:{theme.LINK};">Join meeting</a>')
             self.link_label.setTextFormat(Qt.TextFormat.RichText)
-            self.link_label.setToolTip(url)
+            self.link_label.setToolTip(plain_tip(url))
             self.link_label.linkActivated.connect(self.open_link)
             lay.addWidget(self.link_label)
         self.description_box = None
@@ -444,14 +458,35 @@ class CalendarWindow(QMainWindow):
             v.event_clicked.connect(self.show_details)
             v.day_clicked.connect(self._open_day)
 
-        geom = self._qs.value("window/geometry")
-        if geom is not None:
-            self.restoreGeometry(geom)
+        self._restore_geometry()
+        self._pending_reset = True
+        self._stale = True
         self._timer = QTimer(self)
         self._timer.setInterval(60_000)
         self._timer.timeout.connect(self._tick)
         self._timer.start()
-        self.refresh(reset_scroll=True)
+
+    # -- geometry -----------------------------------------------------------------
+    def _restore_geometry(self) -> None:
+        geom = self._qs.value("window/geometry")
+        ok = isinstance(geom, (QByteArray, bytes)) and self.restoreGeometry(geom)
+        if not ok or not self._on_a_screen():
+            self._center_default()
+
+    def _on_a_screen(self) -> bool:
+        frame = self.frameGeometry()
+        return any(s.availableGeometry().intersects(frame) for s in QGuiApplication.screens())
+
+    def _center_default(self) -> None:
+        self.resize(1000, 700)
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            self.move(area.center() - self.rect().center())
+
+    def _save_geometry(self) -> None:
+        self._qs.setValue("window/geometry", self.saveGeometry())
+        self._qs.sync()
 
     # -- navigation -----------------------------------------------------------
     def set_view(self, view: str) -> None:
@@ -502,6 +537,17 @@ class CalendarWindow(QMainWindow):
                 if not agenda._is_hidden(e, self.settings, primary)]
 
     def refresh(self, reset_scroll: bool = False) -> None:
+        """Re-read and rebuild. While hidden, just remember to do it on show."""
+        if reset_scroll:
+            self._pending_reset = True
+        self.title_label.setText(layout.title_for(self.view, self.anchor))
+        self.view_buttons[self.view].setChecked(True)
+        if not self.isVisible():
+            self._stale = True
+            return
+        self._stale = False
+        reset_scroll = reset_scroll or self._pending_reset
+        self._pending_reset = False
         ref = self.now()
         dates = self.visible_dates()
         by_day = layout.events_by_day(self._load(dates, ref), dates, ref)
@@ -527,7 +573,20 @@ class CalendarWindow(QMainWindow):
         self.details.show()
         self.details.raise_()
 
+    def showEvent(self, e):
+        super().showEvent(e)
+        self.refresh()
+
+    def _close_details(self) -> None:
+        if self.details is not None:
+            self.details.close()
+
+    def hideEvent(self, e):
+        self._save_geometry()
+        self._close_details()
+        super().hideEvent(e)
+
     def closeEvent(self, e):
-        self._qs.setValue("window/geometry", self.saveGeometry())
-        self._qs.sync()
+        self._save_geometry()
+        self._close_details()
         super().closeEvent(e)
