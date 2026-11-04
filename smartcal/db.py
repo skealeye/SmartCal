@@ -96,6 +96,22 @@ class Cache:
                 "SELECT * FROM calendars ORDER BY account, is_primary DESC, name, id").fetchall()
         return [CalendarInfo(r["id"], r["name"], r["color"], bool(r["is_primary"])) for r in rows]
 
+    def delete_account(self, account: str) -> None:
+        """Purge every event and calendar row belonging to `account`."""
+        with closing(self._connect()) as con, con:
+            con.execute("DELETE FROM events WHERE account = ?", (account,))
+            con.execute("DELETE FROM calendars WHERE account = ?", (account,))
+
+    def calendars_by_account(self) -> dict[str, list[CalendarInfo]]:
+        with closing(self._connect()) as con:
+            rows = con.execute(
+                "SELECT * FROM calendars ORDER BY account, is_primary DESC, name, id").fetchall()
+        out: dict[str, list[CalendarInfo]] = {}
+        for r in rows:
+            out.setdefault(r["account"], []).append(
+                CalendarInfo(r["id"], r["name"], r["color"], bool(r["is_primary"])))
+        return out
+
     def events_between(self, start: datetime, end: datetime) -> list[Event]:
         """Events overlapping [start, end), sorted by start then title."""
         with closing(self._connect()) as con:

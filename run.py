@@ -1,18 +1,21 @@
 import sys
 import threading
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QApplication
 
-from smartcal import __version__
+from smartcal import __version__, autostart
 from smartcal.config import data_dir
 from smartcal.db import Cache
-from smartcal.google_auth import list_accounts
+from smartcal.google_auth import list_accounts, remove_account
 from smartcal.google_client import GoogleClient
 from smartcal.live_sync import LiveSyncWorker
 from smartcal.logsetup import guarded, install_excepthooks, setup_logging
+from smartcal.notifier import Notifier
 from smartcal.settings import Settings
+from smartcal.toast import ToastSender
 from smartcal.ui.popup import AgendaPopup
+from smartcal.ui.settings_dialog import SettingsDialog
 from smartcal.ui.tray import TrayController
 from smartcal.ui.window import CalendarWindow
 
@@ -26,6 +29,10 @@ def main() -> int:
 
     cache = Cache(data_dir() / "cache.db")
     settings = Settings()
+    if not settings.first_run_done:  # start with Windows is on by default
+        settings.first_run_done = True
+        settings.save()
+    autostart.apply(settings.autostart)
 
     clients: dict[str, GoogleClient] = {}
     clients_lock = threading.Lock()
@@ -53,7 +60,48 @@ def main() -> int:
         window.show_view(view)
 
     popup.view_requested.connect(open_window)
-    tray = TrayController(popup, worker, cache, settings, on_accounts_changed=drop_clients)
+    toast = ToastSender()
+    notifier = Notifier(cache, settings, toast)
+    dialog_ref: list[SettingsDialog] = []
+
+    @guarded
+    def refresh_views() -> None:
+        popup.refresh()
+        window.refresh()
+        tray.update_tooltip()
+
+    @guarded
+    def on_settings_applied() -> None:
+        autostart.apply(settings.autostart)
+        refresh_views()
+        notifier.check()
+
+    @guarded
+    def remove_account_and_refresh(account: str) -> None:
+        remove_account(account, cache)
+        drop_clients()
+        popup.set_no_accounts(not list_accounts())
+        popup.prune_accounts(list_accounts())
+        refresh_views()
+
+    @guarded
+    def open_settings() -> None:
+        if dialog_ref and dialog_ref[0].isVisible():
+            dialog_ref[0].raise_()
+            dialog_ref[0].activateWindow()
+            return
+        dlg = SettingsDialog(settings, cache, list_accounts, tray.add_account,
+                             remove_account_and_refresh)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.applied.connect(on_settings_applied)
+        dialog_ref[:] = [dlg]
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    tray = TrayController(popup, worker, cache, settings, on_accounts_changed=drop_clients,
+                          on_open_settings=open_settings)
+    toast.tray = tray
     tray.show()
 
     @guarded
@@ -64,6 +112,8 @@ def main() -> int:
         popup.refresh()
         window.refresh()
         tray.update_tooltip()
+        if dialog_ref and dialog_ref[0].isVisible():
+            dialog_ref[0].refresh_accounts()
 
     worker.synced.connect(on_synced)
     worker.status.connect(guarded(popup.set_account_status))
@@ -80,6 +130,12 @@ def main() -> int:
 
     timer.timeout.connect(tick)
     timer.start()
+
+    notify_timer = QTimer()
+    notify_timer.setInterval(30_000)
+    notify_timer.timeout.connect(guarded(notifier.check))
+    notify_timer.start()
+    QTimer.singleShot(2000, guarded(notifier.check))
 
     worker.start()
     code = app.exec()

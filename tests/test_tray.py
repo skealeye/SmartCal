@@ -134,3 +134,16 @@ def test_sync_now_action_passes_no_args(qtbot, tmp_path):
     tray, _ = build(qtbot, tmp_path, worker)
     tray._sync_action.trigger()
     assert worker.syncs == 1
+
+
+def test_settings_menu_action_opens_settings(qtbot, tmp_path):
+    opened = []
+    cache = Cache(tmp_path / "c.db")
+    settings = Settings(tmp_path / "s.json")
+    popup = AgendaPopup(cache, settings)
+    qtbot.addWidget(popup)
+    tray = TrayController(popup, FakeWorker(), cache, settings,
+                          on_open_settings=lambda: opened.append(1))
+    action = next(a for a in tray.contextMenu().actions() if a.text() == "Settings…")
+    action.trigger()
+    assert opened == [1]

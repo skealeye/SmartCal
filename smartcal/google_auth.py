@@ -52,6 +52,13 @@ def add_account(label: str) -> str:
     return email
 
 
+def remove_account(account: str, cache=None) -> None:
+    """Forget an account: delete its token file and purge its cached data."""
+    token_path(account).unlink(missing_ok=True)
+    if cache is not None:
+        cache.delete_account(account)
+
+
 def load_credentials(account: str):
     """Return valid credentials, refreshing if needed; raise ReauthRequired otherwise."""
     from google.auth.exceptions import RefreshError

@@ -41,12 +41,13 @@ class TrayController(QSystemTrayIcon):
     _add_done = pyqtSignal(str)
 
     def __init__(self, popup, worker, cache, settings, parent=None,
-                 on_accounts_changed=None, add_account_fn=None):
+                 on_accounts_changed=None, add_account_fn=None, on_open_settings=None):
         super().__init__(parent)
         self.popup, self.worker = popup, worker
         self.cache, self.settings = cache, settings
         self._on_accounts_changed = on_accounts_changed
         self._add_account_fn = add_account_fn or google_auth.add_account
+        self._on_open_settings = on_open_settings
         self._adding = False
         self._icon_day = 0
         self.setIcon(make_icon(datetime.now().day))
@@ -55,10 +56,13 @@ class TrayController(QSystemTrayIcon):
         self._add_action.triggered.connect(lambda _checked=False: self.add_account())
         self._sync_action = QAction("Sync now", menu)
         self._sync_action.triggered.connect(lambda _checked=False: self.worker.sync_now())
+        self._settings_action = QAction("Settings…", menu)
+        self._settings_action.triggered.connect(lambda _checked=False: self.open_settings())
         quit_action = QAction("Quit", menu)
         quit_action.triggered.connect(lambda _checked=False: self.quit())
         menu.addAction(self._add_action)
         menu.addAction(self._sync_action)
+        menu.addAction(self._settings_action)
         menu.addSeparator()
         menu.addAction(quit_action)
         self._menu = menu  # keep a reference
@@ -92,6 +96,10 @@ class TrayController(QSystemTrayIcon):
             self.setIcon(make_icon(now.day))
         nxt = agenda.next_event(self.cache, self.settings, now)
         self.setToolTip(f"Next: {agenda.describe_next(nxt, now)}" if nxt else "SmartCal")
+
+    def open_settings(self) -> None:
+        if self._on_open_settings:
+            self._on_open_settings()
 
     def add_account(self) -> None:
         if self._adding:
