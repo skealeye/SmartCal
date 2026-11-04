@@ -26,6 +26,21 @@ class FakeService:
     def events(self):
         return self
 
+    def insert(self, **kw):
+        self.calls.append(("insert", kw))
+        return _Req({"id": "new1", **kw["body"]})
+
+    def patch(self, **kw):
+        self.calls.append(("patch", kw))
+        return _Req(_ev(id=kw["eventId"], **kw["body"]))
+
+    def get(self, **kw):
+        return _Req(_ev(id=kw["eventId"]))
+
+    def delete(self, **kw):
+        self.calls.append(("delete", kw))
+        return _Req({})
+
     def list(self, **kw):
         self.calls.append(kw)
         if "calendarId" in kw:
@@ -96,7 +111,7 @@ def test_list_events_pages_and_uses_single_events():
     svc = FakeService([_ev(id="a"), _ev(id="b")])
     got = GoogleClient("me@x.com", service=svc).list_events(*_range())
     assert [e.id for e in got] == ["a", "b"]
-    assert all(c["singleEvents"] for c in svc.calls if "calendarId" in c)
+    assert all(c["singleEvents"] for c in svc.calls if isinstance(c, dict) and "calendarId" in c)
 
 
 def test_reauth_required_when_no_token(tmp_path, monkeypatch):
@@ -104,3 +119,98 @@ def test_reauth_required_when_no_token(tmp_path, monkeypatch):
     monkeypatch.setenv("APPDATA", str(tmp_path))
     with pytest.raises(ReauthRequired):
         GoogleClient("nobody@x.com").list_calendars()
+
+
+def _writes(svc, name):
+    return [c[1] for c in svc.calls if isinstance(c, tuple) and c[0] == name]
+
+
+def _local(*a):
+    return datetime(*a).astimezone()
+
+
+def test_create_event_timed_body():
+    svc = FakeService([])
+    c = GoogleClient("me@x.com", service=svc)
+    e = c.create_event("me@x.com", "Lunch", _local(2026, 11, 4, 12), _local(2026, 11, 4, 13),
+                       location="Cafe")
+    body = _writes(svc, "insert")[0]["body"]
+    assert body["summary"] == "Lunch" and body["location"] == "Cafe"
+    assert "dateTime" in body["start"] and "date" not in body["start"]
+    assert e.title == "Lunch" and not e.all_day
+
+
+def test_create_event_all_day_uses_date_fields():
+    svc = FakeService([])
+    c = GoogleClient("me@x.com", service=svc)
+    e = c.create_event("me@x.com", "Trip", _local(2026, 11, 5), _local(2026, 11, 6), all_day=True)
+    body = _writes(svc, "insert")[0]["body"]
+    assert body["start"] == {"date": "2026-11-05"} and body["end"] == {"date": "2026-11-06"}
+    assert e.all_day
+
+
+def test_update_recurring_instance_patches_instance_id_only():
+    svc = FakeService([])
+    c = GoogleClient("me@x.com", service=svc)
+    c.update_event("e1_20261104", calendar_id="me@x.com", title="Moved")
+    [p] = _writes(svc, "patch")
+    assert p["eventId"] == "e1_20261104" and p["body"] == {"summary": "Moved"}
+
+
+def test_update_start_without_all_day_raises():
+    c = GoogleClient("me@x.com", service=FakeService([]))
+    with pytest.raises(ValueError):
+        c.update_event("e1", calendar_id="me@x.com", start=_local(2026, 11, 4, 9))
+    with pytest.raises(ValueError):
+        c.update_event("e1", calendar_id="me@x.com", end=_local(2026, 11, 4, 9))
+
+
+def test_delete_event_calls_service():
+    svc = FakeService([])
+    GoogleClient("me@x.com", service=svc).delete_event("e1", calendar_id="me@x.com")
+    assert _writes(svc, "delete") == [{"calendarId": "me@x.com", "eventId": "e1"}]
+
+
+def test_cancelled_events_are_skipped():
+    got = _client([_ev(id="a"), _ev(id="b", status="cancelled")]).list_events(*_range())
+    assert [e.id for e in got] == ["a"]
+
+
+class _Boom:
+    def __init__(self, exc):
+        self.exc = exc
+
+    def execute(self):
+        raise self.exc
+
+
+def _failing(exc):
+    svc = FakeService([])
+    svc.list = lambda **kw: _Boom(exc)
+    return GoogleClient("me@x.com", service=svc)
+
+
+def test_refresh_error_at_execute_maps_to_reauth_required():
+    from google.auth.exceptions import RefreshError
+    from smartcal.google_auth import ReauthRequired
+    with pytest.raises(ReauthRequired):
+        _failing(RefreshError("expired")).list_calendars()
+
+
+def test_http_401_maps_to_reauth_required():
+    import httplib2
+    from googleapiclient.errors import HttpError
+    from smartcal.google_auth import ReauthRequired
+    with pytest.raises(ReauthRequired):
+        _failing(HttpError(httplib2.Response({"status": 401}), b"")).list_calendars()
+    with pytest.raises(HttpError):
+        _failing(HttpError(httplib2.Response({"status": 500}), b"")).list_calendars()
+    with pytest.raises(ConnectionError):
+        _failing(ConnectionError("down")).list_calendars()
+
+
+def test_zoom_lookalike_host_not_matched():
+    evs = [_ev(id="a", location="https://evilzoom.us/j/1"),
+           _ev(id="b", location="join https://us02web.zoom.us/j/9.")]
+    got = {e.id: e.meeting_url for e in _client(evs).list_events(*_range())}
+    assert got == {"a": None, "b": "https://us02web.zoom.us/j/9"}

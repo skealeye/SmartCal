@@ -4,9 +4,10 @@ from __future__ import annotations
 import re
 from datetime import date, datetime, time
 
+from smartcal.google_auth import ReauthRequired
 from smartcal.models import CalendarInfo, Event
 
-_ZOOM_RE = re.compile(r"https?://[\w.-]*zoom\.us/[^\s<>\"')]+")
+_ZOOM_RE = re.compile(r"https?://(?:[\w-]+\.)?zoom\.us/[^\s<>\"')]+")
 _TEAMS_RE = re.compile(r"https?://teams\.(?:microsoft|live)\.com/[^\s<>\"')]+")
 
 
@@ -17,7 +18,7 @@ def _meeting_url(raw: dict) -> str | None:
     for rx in (_ZOOM_RE, _TEAMS_RE):
         m = rx.search(text)
         if m:
-            return m.group(0)
+            return m.group(0).rstrip(".,;")
     return None
 
 
@@ -38,6 +39,20 @@ def _time_body(value: datetime, all_day: bool) -> dict:
     if value.tzinfo is None:
         value = value.astimezone()
     return {"dateTime": value.isoformat()}
+
+
+def _exec(request):
+    """Execute an API request, mapping auth failures to ReauthRequired."""
+    from google.auth.exceptions import RefreshError
+    from googleapiclient.errors import HttpError
+    try:
+        return request.execute()
+    except RefreshError as exc:
+        raise ReauthRequired(str(exc)) from exc
+    except HttpError as exc:
+        if getattr(exc.resp, "status", None) == 401:
+            raise ReauthRequired(str(exc)) from exc
+        raise
 
 
 class GoogleClient:
@@ -64,7 +79,7 @@ class GoogleClient:
     def list_calendars(self) -> list[CalendarInfo]:
         out, page = [], None
         while True:
-            resp = self.service.calendarList().list(pageToken=page).execute()
+            resp = _exec(self.service.calendarList().list(pageToken=page))
             for c in resp.get("items", []):
                 out.append(CalendarInfo(
                     id=c["id"],
@@ -100,9 +115,9 @@ class GoogleClient:
         for cal in self.list_calendars():
             page = None
             while True:
-                resp = self.service.events().list(
+                resp = _exec(self.service.events().list(
                     calendarId=cal.id, timeMin=start.isoformat(), timeMax=end.isoformat(),
-                    singleEvents=True, orderBy="startTime", pageToken=page).execute()
+                    singleEvents=True, orderBy="startTime", pageToken=page))
                 for raw in resp.get("items", []):
                     if raw.get("status") == "cancelled":
                         continue
@@ -113,7 +128,7 @@ class GoogleClient:
         return events
 
     def get_event(self, event_id: str, *, calendar_id: str) -> Event:
-        raw = self.service.events().get(calendarId=calendar_id, eventId=event_id).execute()
+        raw = _exec(self.service.events().get(calendarId=calendar_id, eventId=event_id))
         return self._to_event(raw, calendar_id)
 
     def create_event(self, calendar_id: str, title: str, start: datetime, end: datetime,
@@ -122,14 +137,17 @@ class GoogleClient:
         body = {"summary": title, "start": _time_body(start, all_day),
                 "end": _time_body(end, all_day), "location": location,
                 "description": description}
-        raw = self.service.events().insert(calendarId=calendar_id, body=body).execute()
+        raw = _exec(self.service.events().insert(calendarId=calendar_id, body=body))
         return self._to_event(raw, calendar_id)
 
     def update_event(self, event_id: str, *, calendar_id: str, **fields) -> Event:
         """Patch an event. Fields: title, start, end, all_day, location, description.
 
-        When start or end is given, pass all_day too if the event is all-day.
+        If start or end is given, all_day must be given too (ValueError otherwise).
+        Pass the instance id (not the recurring id) to change a single occurrence.
         """
+        if ("start" in fields or "end" in fields) and "all_day" not in fields:
+            raise ValueError("all_day is required when updating start or end")
         all_day = fields.get("all_day", False)
         body: dict = {}
         if "title" in fields:
@@ -140,9 +158,9 @@ class GoogleClient:
         for k in ("start", "end"):
             if k in fields:
                 body[k] = _time_body(fields[k], all_day)
-        raw = self.service.events().patch(
-            calendarId=calendar_id, eventId=event_id, body=body).execute()
+        raw = _exec(self.service.events().patch(
+            calendarId=calendar_id, eventId=event_id, body=body))
         return self._to_event(raw, calendar_id)
 
     def delete_event(self, event_id: str, *, calendar_id: str) -> None:
-        self.service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
+        _exec(self.service.events().delete(calendarId=calendar_id, eventId=event_id))
