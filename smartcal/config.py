@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 def data_dir() -> Path:
-    """Return %APPDATA%\SmartCal, creating it if needed."""
+    r"""Return %APPDATA%\SmartCal, creating it if needed."""
     base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
     path = Path(base) / "SmartCal"
     path.mkdir(parents=True, exist_ok=True)

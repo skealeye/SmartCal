@@ -15,7 +15,7 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
-from .models import Event
+from .models import CalendarInfo, Event
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -37,6 +37,14 @@ CREATE TABLE IF NOT EXISTS events (
     PRIMARY KEY (account, calendar_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_events_start ON events (start_ts);
+CREATE TABLE IF NOT EXISTS calendars (
+    account TEXT NOT NULL,
+    id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    color TEXT NOT NULL,
+    is_primary INTEGER NOT NULL,
+    PRIMARY KEY (account, id)
+);
 """
 
 _INSERT = """
@@ -62,7 +70,7 @@ class Cache:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as con:
+        with closing(self._connect()) as con, con:
             con.executescript(_SCHEMA)
 
     def _connect(self) -> sqlite3.Connection:
@@ -73,6 +81,20 @@ class Cache:
     def upsert_events(self, account: str, events: list[Event]) -> None:
         with closing(self._connect()) as con, con:
             con.executemany(_INSERT, [_row(account, e) for e in events])
+
+    def upsert_calendars(self, account: str, calendars: list[CalendarInfo]) -> None:
+        """Replace the account's stored calendar list."""
+        with closing(self._connect()) as con, con:
+            con.execute("DELETE FROM calendars WHERE account = ?", (account,))
+            con.executemany(
+                "INSERT INTO calendars (account, id, name, color, is_primary) VALUES (?,?,?,?,?)",
+                [(account, c.id, c.name, c.color, int(c.primary)) for c in calendars])
+
+    def calendars(self) -> list[CalendarInfo]:
+        with closing(self._connect()) as con:
+            rows = con.execute(
+                "SELECT * FROM calendars ORDER BY account, is_primary DESC, name, id").fetchall()
+        return [CalendarInfo(r["id"], r["name"], r["color"], bool(r["is_primary"])) for r in rows]
 
     def events_between(self, start: datetime, end: datetime) -> list[Event]:
         """Events overlapping [start, end), sorted by start then title."""
