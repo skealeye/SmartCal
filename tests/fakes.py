@@ -78,3 +78,7 @@ def ev(account="a@x.com", id="e1", title="Dentist", start=None, end=None, cal="a
 
 def cal(id, primary=True, name=None):
     return CalendarInfo(id, name or id, "#123", primary)
+
+
+def http_err(status):
+    return HttpError(SimpleNamespace(status=status, reason="x"), b"")

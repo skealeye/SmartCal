@@ -15,6 +15,7 @@ import logging
 from datetime import date, datetime, time, timedelta, timezone
 
 from . import agenda
+from .google_client import http_status
 from .models import Event
 from .undo import Change, UndoStore, snapshot
 
@@ -31,6 +32,22 @@ class AmbiguousEventError(LookupError):
     def __init__(self, candidates: list[Event]):
         self.candidates = candidates
         super().__init__(f"event id matches {len(candidates)} calendars")
+
+
+class SeriesRefusedError(PermissionError):
+    """The event is a recurring-series master; changing it would change every occurrence."""
+
+    def __init__(self, event: Event):
+        self.event = event
+        super().__init__("event is a recurring series master")
+
+
+class AttendeesRequireConfirmationError(PermissionError):
+    """The event has other attendees; changing it affects other people."""
+
+    def __init__(self, event: Event):
+        self.event = event
+        super().__init__(f"event has {event.attendee_count} other attendee(s)")
 
 
 def _as_datetime(value, all_day: bool) -> datetime:
@@ -74,26 +91,48 @@ class Actions:
             raise AmbiguousEventError(found)
         return found[0].account, found[0].calendar_id
 
-    def _begin(self, event_id: str, account, calendar_id):
+    def _begin(self, event_id: str, account, calendar_id, allow_series: bool,
+               allow_attendees: bool):
+        """Locate the event and fetch its CURRENT Google state; refuse when unsafe."""
         account, calendar_id = self._locate(event_id, account, calendar_id)
         client = self.client(account)
-        before = client.get_event(event_id, calendar_id=calendar_id)  # current Google state
+        try:
+            before = client.get_event(event_id, calendar_id=calendar_id)
+        except Exception as exc:  # noqa: BLE001
+            if http_status(exc) in (404, 410):
+                self.cache.delete_event(account, calendar_id, event_id)
+                raise EventNotFoundError(event_id) from exc
+            raise
+        if before.status == "cancelled":
+            self.cache.delete_event(account, calendar_id, event_id)
+            raise EventNotFoundError(event_id)
+        if before.is_series_master and not allow_series:
+            raise SeriesRefusedError(before)
+        if before.attendee_count > 0 and not allow_attendees:
+            raise AttendeesRequireConfirmationError(before)
         return client, before
 
     def _journal(self, kind: str, before: Event) -> Change:
         return self.undo.record(Change(
             kind=kind, account=before.account, calendar_id=before.calendar_id,
             event_id=before.id, before=snapshot(before), after_updated=None,
-            summary=before.title, at=datetime.now(timezone.utc).isoformat()))
+            summary=before.title, at=datetime.now(timezone.utc).isoformat(),
+            before_updated=before.updated, pending=True))
 
     def _write(self, kind: str, before: Event, do):
-        change = self._journal(kind, before)
-        try:
-            result = do()
-        except BaseException:
-            self.undo.discard(change)
-            raise
-        return change, result
+        """Journal as pending, write, and drop the entry if the write raised.
+
+        The undo lock is held throughout, so an Undo from another thread cannot
+        run between "journaled" and "finalized"."""
+        with self.undo.lock:
+            change = self._journal(kind, before)
+            try:
+                result = do()
+            except BaseException:
+                self.undo.discard(change)
+                raise
+            self.undo.finalize(change, getattr(result, "updated", None))
+            return change, result
 
     # -- writes ------------------------------------------------------------
     def create(self, account: str, *, calendar_id: str | None = None, title: str,
@@ -123,12 +162,14 @@ class Actions:
         return ev
 
     def move(self, event_id: str, new_start, new_end, *, account: str | None = None,
-             calendar_id: str | None = None) -> Event:
+             calendar_id: str | None = None, allow_series: bool = False,
+             allow_attendees: bool = False) -> Event:
         """Move an event. Timed events need tz-aware datetimes. For all-day events
         pass dates (or datetimes); `new_end` is exclusive (the day after the last
         day), the same convention the events use. A recurring instance (its id is
-        the instance id) moves alone; the rest of the series is untouched."""
-        client, before = self._begin(event_id, account, calendar_id)
+        the instance id) moves alone; the rest of the series is untouched. A series master is refused
+        unless allow_series; an event with other attendees unless allow_attendees."""
+        client, before = self._begin(event_id, account, calendar_id, allow_series, allow_attendees)
         s, e = _as_datetime(new_start, before.all_day), _as_datetime(new_end, before.all_day)
         _check_range(s, e)
         change, ev = self._write("move", before, lambda: client.update_event(
@@ -136,13 +177,18 @@ class Actions:
         return self._after(change, ev)
 
     def update(self, event_id: str, *, account: str | None = None,
-               calendar_id: str | None = None, **fields) -> Event:
+               calendar_id: str | None = None, allow_series: bool = False,
+               allow_attendees: bool = False, **fields) -> Event:
         bad = set(fields) - _UPDATE_FIELDS
         if bad:
             raise ValueError(f"unknown fields: {sorted(bad)}")
         if not fields:
             raise ValueError("nothing to update")
-        client, before = self._begin(event_id, account, calendar_id)
+        if any(v is None for v in fields.values()):
+            raise ValueError("field values must not be None")
+        if "title" in fields and not str(fields["title"]).strip():
+            raise ValueError("title must not be empty")
+        client, before = self._begin(event_id, account, calendar_id, allow_series, allow_attendees)
         if "all_day" in fields and bool(fields["all_day"]) != before.all_day \
                 and not ("start" in fields and "end" in fields):
             raise ValueError("changing all_day requires start and end")
@@ -164,17 +210,16 @@ class Actions:
         return self._after(change, ev)
 
     def delete(self, event_id: str, *, account: str | None = None,
-               calendar_id: str | None = None) -> None:
+               calendar_id: str | None = None, allow_series: bool = False,
+               allow_attendees: bool = False) -> None:
         """Delete one event (a recurring instance removes only that occurrence)."""
-        client, before = self._begin(event_id, account, calendar_id)
+        client, before = self._begin(event_id, account, calendar_id, allow_series, allow_attendees)
         change, _ = self._write("delete", before, lambda: client.delete_event(
             event_id, calendar_id=before.calendar_id))
-        self.undo.finalize(change, None)
         self.cache.delete_event(before.account, before.calendar_id, event_id)
         log.info("deleted event %s", event_id)
 
     def _after(self, change: Change, ev: Event) -> Event:
-        self.undo.finalize(change, ev.updated)
         self.cache.upsert_events(ev.account, [ev])
         log.info("%s event %s", change.kind, ev.id)
         return ev
@@ -208,7 +253,8 @@ class Actions:
                    now: datetime | None = None) -> list[tuple[datetime, datetime]]:
         """Gaps >= duration within local working hours on `day`, across every visible
         calendar of every account. Busy = timed events (partial overlap counts);
-        all-day events are ignored. The model has no declined-status field, so
+        all-day events, zero-length events and events Google shows as Free
+        (transparent) are ignored. The model has no declined-status field, so
         declined events cannot be told apart and count as busy. `now` only supplies
         the time zone (default: the system zone, resolved per boundary for DST)."""
         h0, h1 = working_hours
@@ -221,9 +267,14 @@ class Actions:
             return agenda._midnight(d, now) if hour in (0, 24) else _at(d, hour, now)
 
         w0, w1 = at(h0), at(h1)
+        if day == agenda._local_date(now):
+            w0 = max(w0, now)   # never offer time that has already passed
+        if w0 >= w1:
+            return []
         busy = sorted((max(e.start, w0), min(e.end, w1))
                       for e in self._visible(self.cache.events_between(w0, w1))
-                      if not e.all_day and e.end > w0 and e.start < w1)
+                      if not e.all_day and e.busy and e.end > e.start
+                      and e.end > w0 and e.start < w1)
         merged: list[list[datetime]] = []
         for s, e in busy:
             if merged and s <= merged[-1][1]:

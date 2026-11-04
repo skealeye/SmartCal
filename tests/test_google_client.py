@@ -168,7 +168,7 @@ def test_update_start_without_all_day_raises():
 def test_delete_event_calls_service():
     svc = FakeService([])
     GoogleClient("me@x.com", service=svc).delete_event("e1", calendar_id="me@x.com")
-    assert _writes(svc, "delete") == [{"calendarId": "me@x.com", "eventId": "e1"}]
+    assert _writes(svc, "delete") == [{"calendarId": "me@x.com", "eventId": "e1", "sendUpdates": "none"}]
 
 
 def test_cancelled_events_are_skipped():
@@ -245,3 +245,56 @@ def test_restore_event_falls_back_to_insert():
     [i] = _writes(svc, "insert")
     assert i["body"]["summary"] == "Dentist" and "status" not in i["body"]
     assert got.title == "Dentist"
+
+
+def test_to_event_maps_series_attendees_and_free_flags():
+    raw = _ev(recurrence=["RRULE:FREQ=WEEKLY"], transparency="transparent",
+              organizer={"self": True},
+              attendees=[{"email": "me@x.com", "self": True}, {"email": "o@y.com"}])
+    [e] = _client([raw]).list_events(*_range())
+    assert e.is_series_master and e.recurrence == ["RRULE:FREQ=WEEKLY"]
+    assert e.attendee_count == 1 and e.organizer_self is True and e.busy is False
+    [plain] = _client([_ev()]).list_events(*_range())
+    assert (plain.is_series_master, plain.attendee_count, plain.organizer_self, plain.busy) == (
+        False, 0, None, True)
+
+
+def test_send_updates_none_on_every_write():
+    svc = FakeService([])
+    c = GoogleClient("me@x.com", service=svc)
+    c.create_event("me@x.com", "A", _local(2026, 11, 4, 12), _local(2026, 11, 4, 13))
+    c.update_event("e1", calendar_id="me@x.com", title="B")
+    c.delete_event("e1", calendar_id="me@x.com")
+    c.restore_event(_before())
+    svc.patch = lambda **kw: _Boom(__import__("fakes").http_err(404))
+    c.restore_event(_before())
+    sent = [c[1] for c in svc.calls if isinstance(c, tuple)]
+    assert len(sent) == 5 and all(kw["sendUpdates"] == "none" for kw in sent)
+
+
+def test_restore_never_inserts_a_series_instance():
+    from fakes import http_err
+    svc = FakeService([])
+    svc.patch = lambda **kw: _Boom(http_err(404))
+    inst = _before()
+    inst.recurring_id = "series1"
+    with pytest.raises(Exception):
+        GoogleClient("me@x.com", service=svc).restore_event(inst)
+    assert not _writes(svc, "insert")
+
+
+def test_restore_other_errors_propagate_without_insert():
+    from fakes import http_err
+    for status in (403, 500):
+        svc = FakeService([])
+        svc.patch = lambda **kw: _Boom(http_err(status))
+        with pytest.raises(Exception):
+            GoogleClient("me@x.com", service=svc).restore_event(_before())
+        assert not _writes(svc, "insert")
+
+
+def test_get_cancelled_event_without_times():
+    svc = FakeService([])
+    svc.get = lambda **kw: _Req({"id": "e1", "status": "cancelled"})
+    e = GoogleClient("me@x.com", service=svc).get_event("e1", calendar_id="me@x.com")
+    assert e.status == "cancelled"

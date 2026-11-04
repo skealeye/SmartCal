@@ -41,6 +41,15 @@ def _time_body(value: datetime, all_day: bool) -> dict:
     return {"dateTime": value.isoformat()}
 
 
+# The assistant never emails attendees on the owner's behalf: every write passes
+# sendUpdates="none" explicitly (the API default would notify guests).
+NO_NOTIFY = "none"
+
+
+def http_status(exc: Exception) -> int | None:
+    return getattr(getattr(exc, "resp", None), "status", None)
+
+
 def _exec(request):
     """Execute an API request, mapping auth failures to ReauthRequired."""
     from google.auth.exceptions import RefreshError
@@ -108,7 +117,13 @@ class GoogleClient:
             start=start, end=end, all_day=all_day,
             location=raw.get("location", ""), description=raw.get("description", ""),
             meeting_url=_meeting_url(raw), recurring_id=raw.get("recurringEventId"),
-            updated=raw.get("updated"))
+            updated=raw.get("updated"), status=raw.get("status", "confirmed"),
+            recurrence=raw.get("recurrence") or None,
+            is_series_master=bool(raw.get("recurrence")),
+            attendee_count=sum(1 for a in raw.get("attendees", []) if not a.get("self")),
+            organizer_self=(bool(raw["organizer"].get("self"))
+                            if isinstance(raw.get("organizer"), dict) else None),
+            busy=raw.get("transparency") != "transparent")
 
     def list_events(self, start: datetime, end: datetime) -> list[Event]:
         """Events from every calendar in [start, end), recurrences expanded."""
@@ -130,6 +145,11 @@ class GoogleClient:
 
     def get_event(self, event_id: str, *, calendar_id: str) -> Event:
         raw = _exec(self.service.events().get(calendarId=calendar_id, eventId=event_id))
+        if raw.get("status") == "cancelled" and "start" not in raw:
+            # Deleted events may come back without times; callers only need the status.
+            now = datetime.now().astimezone()
+            raw = {**raw, "start": {"dateTime": now.isoformat()},
+                   "end": {"dateTime": now.isoformat()}}
         return self._to_event(raw, calendar_id)
 
     def create_event(self, calendar_id: str, title: str, start: datetime, end: datetime,
@@ -138,7 +158,8 @@ class GoogleClient:
         body = {"summary": title, "start": _time_body(start, all_day),
                 "end": _time_body(end, all_day), "location": location,
                 "description": description}
-        raw = _exec(self.service.events().insert(calendarId=calendar_id, body=body))
+        raw = _exec(self.service.events().insert(
+            calendarId=calendar_id, body=body, sendUpdates=NO_NOTIFY))
         return self._to_event(raw, calendar_id)
 
     def update_event(self, event_id: str, *, calendar_id: str, **fields) -> Event:
@@ -160,18 +181,21 @@ class GoogleClient:
             if k in fields:
                 body[k] = _time_body(fields[k], all_day)
         raw = _exec(self.service.events().patch(
-            calendarId=calendar_id, eventId=event_id, body=body))
+            calendarId=calendar_id, eventId=event_id, body=body, sendUpdates=NO_NOTIFY))
         return self._to_event(raw, calendar_id)
 
     def delete_event(self, event_id: str, *, calendar_id: str) -> None:
-        _exec(self.service.events().delete(calendarId=calendar_id, eventId=event_id))
+        _exec(self.service.events().delete(
+            calendarId=calendar_id, eventId=event_id, sendUpdates=NO_NOTIFY))
 
     def restore_event(self, before: Event) -> Event:
         """Bring back a deleted event with the fields of `before`.
 
-        First tries to un-delete it (patch status "confirmed" on the same id, which
-        keeps the id and, for a recurring instance, its place in the series). If
-        Google refuses (HttpError, e.g. already purged), inserts a new event.
+        First un-deletes it (patch status "confirmed" on the same id; keeps the id
+        and a recurring instance's place in its series). Only if Google answers
+        404/410 (the event is really gone) is a new event inserted, and never for
+        a series instance (that would create a one-off). Any other error (403, 5xx,
+        timeout, ...) propagates: the outcome is unknown, so nothing more is sent.
         """
         from googleapiclient.errors import HttpError
         all_day = before.all_day
@@ -182,7 +206,12 @@ class GoogleClient:
         try:
             raw = _exec(self.service.events().patch(
                 calendarId=before.calendar_id, eventId=before.id,
-                body={**body, "status": "confirmed"}))
-        except HttpError:
-            raw = _exec(self.service.events().insert(calendarId=before.calendar_id, body=body))
+                body={**body, "status": "confirmed"}, sendUpdates=NO_NOTIFY))
+        except HttpError as exc:
+            if http_status(exc) not in (404, 410) or before.recurring_id:
+                raise
+            if before.recurrence:
+                body["recurrence"] = before.recurrence
+            raw = _exec(self.service.events().insert(
+                calendarId=before.calendar_id, body=body, sendUpdates=NO_NOTIFY))
         return self._to_event(raw, before.calendar_id)

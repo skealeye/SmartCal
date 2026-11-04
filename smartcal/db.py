@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS events (
     description TEXT NOT NULL,
     meeting_url TEXT,
     recurring_id TEXT,
+    busy INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (account, calendar_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_events_start ON events (start_ts);
@@ -49,8 +50,8 @@ CREATE TABLE IF NOT EXISTS calendars (
 
 _INSERT = """
 INSERT OR REPLACE INTO events (account, calendar_id, id, calendar_name, color, title,
-    start, end, start_ts, end_ts, all_day, location, description, meeting_url, recurring_id)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    start, end, start_ts, end_ts, all_day, location, description, meeting_url, recurring_id, busy)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 """
 
 
@@ -63,7 +64,7 @@ def _row(account: str, e: Event) -> tuple:
     return (account, e.calendar_id, e.id, e.calendar_name, e.color, e.title,
             s.isoformat(), en.isoformat(), s.timestamp(), en.timestamp(),
             int(e.all_day), e.location or "", e.description or "",
-            e.meeting_url, e.recurring_id)
+            e.meeting_url, e.recurring_id, int(e.busy))
 
 
 class Cache:
@@ -72,6 +73,9 @@ class Cache:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as con, con:
             con.executescript(_SCHEMA)
+            cols = {r["name"] for r in con.execute("PRAGMA table_info(events)")}
+            if "busy" not in cols:  # database created before v0.1.18
+                con.execute("ALTER TABLE events ADD COLUMN busy INTEGER NOT NULL DEFAULT 1")
 
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(self.path, timeout=30)
@@ -152,5 +156,5 @@ class Cache:
             start=datetime.fromisoformat(r["start"]), end=datetime.fromisoformat(r["end"]),
             all_day=bool(r["all_day"]), location=r["location"],
             description=r["description"], meeting_url=r["meeting_url"],
-            recurring_id=r["recurring_id"],
+            recurring_id=r["recurring_id"], busy=bool(r["busy"]),
         )
