@@ -45,7 +45,7 @@ def add_account(label: str) -> str:
         raise FileNotFoundError(f"Missing {secret}. See README.md for setup steps.")
     print(f"Signing in Google account '{label}'...")
     flow = InstalledAppFlow.from_client_secrets_file(str(secret), SCOPES)
-    creds = flow.run_local_server(port=0)
+    creds = flow.run_local_server(port=0, timeout_seconds=180)
     service = build("calendar", "v3", credentials=creds, cache_discovery=False)
     email = service.calendars().get(calendarId="primary").execute()["id"]
     token_path(email).write_text(creds.to_json(), encoding="utf-8")

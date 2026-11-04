@@ -5,11 +5,17 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 
-from PyQt6.QtCore import QEvent, QPoint, Qt, pyqtSignal
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PyQt6.QtCore import QEvent, QPoint, QRect, Qt, pyqtSignal
+from PyQt6.QtGui import QCursor
+from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout,
+                             QWidget)
 
 from .. import __version__, agenda
 from . import theme
+
+WIDTH = 250
+MARGIN = 8
+MAX_HEIGHT = 480
 
 
 @dataclass
@@ -27,14 +33,20 @@ class AgendaPopup(QWidget):
     def __init__(self, cache, settings, parent=None):
         super().__init__(parent)
         self.cache, self.settings = cache, settings
-        self.last_hidden_at = 0.0
+        # Injectable for tests.
+        self.clock = time.monotonic
+        self.cursor_pos = lambda: QCursor.pos()
+        self.last_hidden_at = -1e9
+        self.last_hidden_cursor = QPoint()
+        self._anchored = False
+        self._tray_geom: QRect | None = None
         self._statuses: dict[str, str] = {}
         self._rows: list[RowInfo] = []
         self._next_line = ""
         self._no_accounts = False
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
                             | Qt.WindowType.WindowStaysOnTopHint)
-        self.setFixedWidth(250)
+        self.setFixedWidth(WIDTH)
         self.setObjectName("popup")
         self.setStyleSheet(
             f"#popup{{background:{theme.BG};border:1px solid {theme.BORDER};}}"
@@ -45,32 +57,40 @@ class AgendaPopup(QWidget):
         self._header = QLabel()
         self._header.setStyleSheet("font-weight:bold;font-size:13px;")
         self._status = QLabel()
+        self._status.setTextFormat(Qt.TextFormat.PlainText)
         self._status.setStyleSheet(f"color:{theme.WARN};font-size:11px;")
         self._status.setWordWrap(True)
         self._status.hide()
         self._next = QLabel()
+        self._next.setTextFormat(Qt.TextFormat.PlainText)
         self._next.setStyleSheet(f"color:{theme.LINK};")
         self._next.setWordWrap(True)
-        self._rows_box = QVBoxLayout()
+        self._content = QWidget()
+        self._content.setStyleSheet("background:transparent;")
+        self._rows_box = QVBoxLayout(self._content)
+        self._rows_box.setContentsMargins(0, 0, 0, 0)
         self._rows_box.setSpacing(4)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet("QScrollArea{background:transparent;}")
+        self._scroll.setWidget(self._content)
+        self._scroll.hide()
         self._empty = QLabel()
+        self._empty.setTextFormat(Qt.TextFormat.PlainText)
         self._empty.setStyleSheet(f"color:{theme.MUTED};")
         self._empty.setWordWrap(True)
-        footer = QHBoxLayout()
-        for name in ("Day", "Week", "Month"):
-            link = QLabel(f'<a href="{name.lower()}" style="color:{theme.LINK};'
-                          f'text-decoration:none;">{name}</a>')
-            link.linkActivated.connect(self.request_view)
-            footer.addWidget(link)
-        footer.addStretch()
-        ver = QLabel(f"v{__version__}")
-        ver.setStyleSheet(f"color:{theme.MUTED};font-size:10px;")
-        footer.addWidget(ver)
-        for w in (self._header, self._status, self._next):
+        self._footer = QLabel(
+            " · ".join(f'<a href="{n.lower()}" style="color:{theme.LINK};'
+                            f'text-decoration:none;">{n}</a>' for n in ("Day", "Week", "Month"))
+            + f' &nbsp;&nbsp; <span style="color:{theme.MUTED};font-size:10px;">'
+              f'v{__version__}</span>')
+        self._footer.setObjectName("footer")
+        self._footer.setTextFormat(Qt.TextFormat.RichText)
+        self._footer.linkActivated.connect(self.request_view)
+        for w in (self._header, self._status, self._next, self._scroll, self._empty, self._footer):
             outer.addWidget(w)
-        outer.addLayout(self._rows_box)
-        outer.addWidget(self._empty)
-        outer.addLayout(footer)
 
     # -- signals / state ------------------------------------------------
     def request_view(self, name: str) -> None:
@@ -78,6 +98,12 @@ class AgendaPopup(QWidget):
 
     def set_account_status(self, account: str, status: str) -> None:
         self._statuses[account] = status
+        self._update_status()
+
+    def prune_accounts(self, accounts) -> None:
+        """Forget statuses of accounts that no longer exist."""
+        keep = set(accounts)
+        self._statuses = {a: s for a, s in self._statuses.items() if a in keep}
         self._update_status()
 
     def set_no_accounts(self, value: bool) -> None:
@@ -92,10 +118,14 @@ class AgendaPopup(QWidget):
             notes.append("Sync problem")
         self._status.setText("\n".join(notes))
         self._status.setVisible(bool(notes))
+        self._resize()
 
     # -- accessors (used by tests and tooltip) ---------------------------
     def rows(self) -> list[RowInfo]:
         return list(self._rows)
+
+    def row_widgets(self) -> list[QWidget]:
+        return [self._rows_box.itemAt(i).widget() for i in range(self._rows_box.count())]
 
     def header_text(self) -> str:
         return self._header.text()
@@ -110,6 +140,15 @@ class AgendaPopup(QWidget):
         return self._status.text()
 
     # -- rendering ---------------------------------------------------------
+    def _area(self, point: QPoint | None = None) -> QRect:
+        from PyQt6.QtGui import QGuiApplication
+        point = point if point is not None else (
+            self._tray_geom.center() if self._tray_geom is not None and not self._tray_geom.isEmpty()
+            else None)
+        screen = (QGuiApplication.screenAt(point) if point is not None else None) \
+            or QGuiApplication.primaryScreen()
+        return screen.availableGeometry()
+
     def refresh(self, now: datetime | None = None) -> None:
         now = now or datetime.now().astimezone()
         events = agenda.today(self.cache, self.settings, now)
@@ -122,6 +161,7 @@ class AgendaPopup(QWidget):
         while self._rows_box.count():
             item = self._rows_box.takeAt(0)
             if item.widget():
+                item.widget().hide()
                 item.widget().deleteLater()
         self._rows = []
         for ev in events:
@@ -136,7 +176,29 @@ class AgendaPopup(QWidget):
                                 "> Add Google account…" if self._no_accounts
                                 else "Nothing scheduled today")
             self._empty.show()
+        self._scroll.setVisible(bool(events))
+        self._resize()
+
+    def _resize(self) -> None:
+        """Cap the list height (header/footer stay visible), then re-anchor if shown."""
+        lay = self.layout()
+        if self._scroll.isHidden() and not self._rows:
+            pass
+        else:
+            max_total = min(MAX_HEIGHT, self._area().height() - 24)
+            self._scroll.setFixedHeight(0)
+            lay.activate()
+            chrome = lay.sizeHint().height()
+            inner_w = WIDTH - 20
+            rows_lay = self._rows_box
+            content_h = max(rows_lay.sizeHint().height(),
+                            rows_lay.totalHeightForWidth(inner_w) if rows_lay.hasHeightForWidth()
+                            else 0)
+            self._scroll.setFixedHeight(max(40, min(content_h, max_total - chrome)))
+        lay.activate()
         self.adjustSize()
+        if self.isVisible() and self._anchored:
+            self._place()
 
     def _make_row(self, ev, time_text: str, is_next: bool) -> QWidget:
         row = QFrame()
@@ -147,6 +209,7 @@ class AgendaPopup(QWidget):
         lay.setContentsMargins(0, 0, 4, 0)
         lay.setSpacing(6)
         stripe = QFrame()
+        stripe.setObjectName("stripe")
         stripe.setFixedWidth(4)
         stripe.setStyleSheet(f"background:{theme.stripe_color(ev.color)};border-radius:2px;")
         lay.addWidget(stripe)
@@ -154,9 +217,12 @@ class AgendaPopup(QWidget):
         col.setContentsMargins(0, 3, 0, 3)
         col.setSpacing(0)
         top = QLabel(f"<b>{time_text}</b>  {_esc(ev.title)}")
+        top.setObjectName("title")
         top.setTextFormat(Qt.TextFormat.RichText)
         top.setWordWrap(True)
         sub = QLabel(ev.calendar_name)
+        sub.setObjectName("calname")
+        sub.setTextFormat(Qt.TextFormat.PlainText)
         sub.setStyleSheet(f"color:{theme.MUTED};font-size:10px;")
         col.addWidget(top)
         col.addWidget(sub)
@@ -164,18 +230,29 @@ class AgendaPopup(QWidget):
         return row
 
     # -- placement / focus ---------------------------------------------------
+    def compute_position(self, tray: QRect | None, area: QRect) -> QPoint:
+        w, h = self.width(), self.height()
+        if tray is None or tray.isEmpty():
+            # Icon is hidden in the overflow flyout: bottom-right of the work area.
+            x, y = area.right() + 1 - w - MARGIN, area.bottom() + 1 - h - MARGIN
+        else:
+            x = tray.center().x() - w // 2
+            if tray.top() < area.center().y():  # taskbar at top
+                y = tray.bottom() + 1 + 6
+            else:
+                y = tray.top() - h - 6
+        x = max(area.left() + MARGIN, min(x, area.right() + 1 - w - MARGIN))
+        y = max(area.top() + MARGIN, min(y, area.bottom() + 1 - h - MARGIN))
+        return QPoint(x, y)
+
+    def _place(self) -> None:
+        self.move(self.compute_position(self._tray_geom, self._area()))
+
     def show_near_tray(self, tray_geometry) -> None:
-        from PyQt6.QtGui import QGuiApplication
-        self.adjustSize()
-        screen = QGuiApplication.screenAt(tray_geometry.center()) or QGuiApplication.primaryScreen()
-        area = screen.availableGeometry()
-        x = tray_geometry.center().x() - self.width() // 2
-        y = tray_geometry.top() - self.height() - 6
-        if tray_geometry.top() < area.center().y():  # taskbar at top
-            y = tray_geometry.bottom() + 6
-        x = max(area.left() + 4, min(x, area.right() - self.width() - 4))
-        y = max(area.top() + 4, min(y, area.bottom() - self.height() - 4))
-        self.move(QPoint(x, y))
+        self._tray_geom = QRect(tray_geometry)
+        self._anchored = True
+        self._resize()  # sizes against the right screen; places only when visible
+        self._place()
         self.show()
         self.raise_()
         self.activateWindow()
@@ -186,11 +263,17 @@ class AgendaPopup(QWidget):
         return super().event(e)
 
     def hideEvent(self, e):
-        self.last_hidden_at = time.monotonic()
+        self.last_hidden_at = self.clock()
+        self.last_hidden_cursor = self.cursor_pos()
         super().hideEvent(e)
 
-    def recently_hidden(self, within: float = 0.3) -> bool:
-        return time.monotonic() - self.last_hidden_at < within
+    def recently_dismissed_by_tray_click(self, tray: QRect | None, within: float = 0.6) -> bool:
+        """True if the popup just hid because this very click deactivated it."""
+        if self.clock() - self.last_hidden_at >= within:
+            return False
+        if tray is None or tray.isEmpty():
+            return True
+        return tray.contains(self.last_hidden_cursor)
 
 
 def _esc(text: str) -> str:

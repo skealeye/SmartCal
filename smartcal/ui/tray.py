@@ -1,6 +1,7 @@
 """System tray icon: left-click toggles the agenda popup, right-click opens a menu."""
 from __future__ import annotations
 
+import logging
 import threading
 from datetime import datetime
 
@@ -9,6 +10,8 @@ from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from .. import agenda, google_auth
+
+log = logging.getLogger(__name__)
 
 
 def make_icon(day: int) -> QIcon:
@@ -35,21 +38,25 @@ def make_icon(day: int) -> QIcon:
 
 
 class TrayController(QSystemTrayIcon):
-    _add_failed = pyqtSignal(str)
+    _add_done = pyqtSignal(str)
 
-    def __init__(self, popup, worker, cache, settings, parent=None):
+    def __init__(self, popup, worker, cache, settings, parent=None,
+                 on_accounts_changed=None, add_account_fn=None):
         super().__init__(parent)
         self.popup, self.worker = popup, worker
         self.cache, self.settings = cache, settings
+        self._on_accounts_changed = on_accounts_changed
+        self._add_account_fn = add_account_fn or google_auth.add_account
+        self._adding = False
         self._icon_day = 0
         self.setIcon(make_icon(datetime.now().day))
         menu = QMenu()
         self._add_action = QAction("Add Google account…", menu)
-        self._add_action.triggered.connect(self.add_account)
+        self._add_action.triggered.connect(lambda _checked=False: self.add_account())
         self._sync_action = QAction("Sync now", menu)
-        self._sync_action.triggered.connect(self.worker.sync_now)
+        self._sync_action.triggered.connect(lambda _checked=False: self.worker.sync_now())
         quit_action = QAction("Quit", menu)
-        quit_action.triggered.connect(self.quit)
+        quit_action.triggered.connect(lambda _checked=False: self.quit())
         menu.addAction(self._add_action)
         menu.addAction(self._sync_action)
         menu.addSeparator()
@@ -57,22 +64,26 @@ class TrayController(QSystemTrayIcon):
         self._menu = menu  # keep a reference
         self.setContextMenu(menu)
         self.activated.connect(self._on_activated)
-        self._add_failed.connect(self._show_add_error)
+        self._add_done.connect(self._finish_add)
         self.update_tooltip()
+
+    def _tray_rect(self):
+        return self.geometry()
 
     def _on_activated(self, reason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self.toggle_popup()
 
     def toggle_popup(self) -> None:
+        rect = self._tray_rect()
         if self.popup.isVisible():
             self.popup.hide()
-        elif self.popup.recently_hidden():
-            # The click that deactivated the popup also reached the tray icon; stay hidden.
+        elif self.popup.recently_dismissed_by_tray_click(rect):
+            # The click that deactivated (hid) the popup also reached the tray icon.
             return
         else:
             self.popup.refresh()
-            self.popup.show_near_tray(self.geometry())
+            self.popup.show_near_tray(rect)
 
     def update_tooltip(self) -> None:
         now = datetime.now().astimezone()
@@ -83,24 +94,37 @@ class TrayController(QSystemTrayIcon):
         self.setToolTip(f"Next: {agenda.describe_next(nxt, now)}" if nxt else "SmartCal")
 
     def add_account(self) -> None:
+        if self._adding:
+            return
+        self._adding = True
         self._add_action.setEnabled(False)
 
         def work() -> None:
+            message = ""
             try:
-                google_auth.add_account("new")
-            except Exception as exc:  # noqa: BLE001 - reported to the user
-                self._add_failed.emit(str(exc))
-            else:
-                self.worker.sync_now()
-                self._add_failed.emit("")
+                self._add_account_fn("new")
+            except BaseException as exc:  # noqa: BLE001 - reported to the user
+                log.exception("add account failed")
+                message = str(exc) or type(exc).__name__
+            finally:
+                self._add_done.emit(message)
 
         threading.Thread(target=work, daemon=True, name="add-account").start()
 
-    def _show_add_error(self, message: str) -> None:
-        self._add_action.setEnabled(True)
-        if message:
-            self.showMessage("SmartCal", f"Could not add account: {message}",
-                             QSystemTrayIcon.MessageIcon.Warning)
+    def _finish_add(self, message: str) -> None:
+        try:
+            if not message:
+                if self._on_accounts_changed:
+                    self._on_accounts_changed()  # drop cached clients: new credentials
+                self.worker.sync_now()
+            else:
+                self.showMessage("SmartCal", f"Could not add account: {message}",
+                                 QSystemTrayIcon.MessageIcon.Warning)
+        except Exception:  # noqa: BLE001
+            log.exception("after adding account")
+        finally:
+            self._adding = False
+            self._add_action.setEnabled(True)
 
     def quit(self) -> None:
         self.worker.stop()
