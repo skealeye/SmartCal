@@ -107,7 +107,8 @@ class GoogleClient:
             title=raw.get("summary") or "(no title)",
             start=start, end=end, all_day=all_day,
             location=raw.get("location", ""), description=raw.get("description", ""),
-            meeting_url=_meeting_url(raw), recurring_id=raw.get("recurringEventId"))
+            meeting_url=_meeting_url(raw), recurring_id=raw.get("recurringEventId"),
+            updated=raw.get("updated"))
 
     def list_events(self, start: datetime, end: datetime) -> list[Event]:
         """Events from every calendar in [start, end), recurrences expanded."""
@@ -164,3 +165,24 @@ class GoogleClient:
 
     def delete_event(self, event_id: str, *, calendar_id: str) -> None:
         _exec(self.service.events().delete(calendarId=calendar_id, eventId=event_id))
+
+    def restore_event(self, before: Event) -> Event:
+        """Bring back a deleted event with the fields of `before`.
+
+        First tries to un-delete it (patch status "confirmed" on the same id, which
+        keeps the id and, for a recurring instance, its place in the series). If
+        Google refuses (HttpError, e.g. already purged), inserts a new event.
+        """
+        from googleapiclient.errors import HttpError
+        all_day = before.all_day
+        body = {"summary": before.title, "location": before.location,
+                "description": before.description,
+                "start": _time_body(before.start, all_day),
+                "end": _time_body(before.end, all_day)}
+        try:
+            raw = _exec(self.service.events().patch(
+                calendarId=before.calendar_id, eventId=before.id,
+                body={**body, "status": "confirmed"}))
+        except HttpError:
+            raw = _exec(self.service.events().insert(calendarId=before.calendar_id, body=body))
+        return self._to_event(raw, before.calendar_id)

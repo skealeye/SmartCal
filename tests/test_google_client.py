@@ -214,3 +214,34 @@ def test_zoom_lookalike_host_not_matched():
            _ev(id="b", location="join https://us02web.zoom.us/j/9.")]
     got = {e.id: e.meeting_url for e in _client(evs).list_events(*_range())}
     assert got == {"a": None, "b": "https://us02web.zoom.us/j/9"}
+
+
+def test_to_event_fills_updated():
+    [e] = _client([_ev(updated="2026-11-04T10:00:00.000Z")]).list_events(*_range())
+    assert e.updated == "2026-11-04T10:00:00.000Z"
+
+
+def _before():
+    from smartcal.models import Event
+    return Event("e1", "me@x.com", "me@x.com", "Me", "#0", "Dentist",
+                 _local(2026, 11, 5, 18), _local(2026, 11, 5, 19), False, "St", "d")
+
+
+def test_restore_event_undeletes_by_patching_confirmed():
+    svc = FakeService([])
+    got = GoogleClient("me@x.com", service=svc).restore_event(_before())
+    [p] = _writes(svc, "patch")
+    assert p["eventId"] == "e1" and p["body"]["status"] == "confirmed"
+    assert p["body"]["summary"] == "Dentist" and not _writes(svc, "insert")
+    assert got.id == "e1"
+
+
+def test_restore_event_falls_back_to_insert():
+    from types import SimpleNamespace
+    from googleapiclient.errors import HttpError
+    svc = FakeService([])
+    svc.patch = lambda **kw: _Boom(HttpError(SimpleNamespace(status=404, reason="x"), b""))
+    got = GoogleClient("me@x.com", service=svc).restore_event(_before())
+    [i] = _writes(svc, "insert")
+    assert i["body"]["summary"] == "Dentist" and "status" not in i["body"]
+    assert got.title == "Dentist"

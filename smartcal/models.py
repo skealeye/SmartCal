@@ -26,6 +26,7 @@ class Event:
     description: str = ""
     meeting_url: str | None = None
     recurring_id: str | None = None
+    updated: str | None = None  # Google's `updated` timestamp (not cached)
 
 
 @dataclass

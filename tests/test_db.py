@@ -48,3 +48,15 @@ def test_all_day_event_roundtrips(tmp_path):
     got = c.events_between(s - timedelta(days=1), s + timedelta(days=2))
     assert got == [e]
     assert got[0].all_day and got[0].start.tzinfo is not None
+
+
+def test_delete_event_removes_only_that_row(tmp_path):
+    from datetime import datetime
+    from smartcal.db import Cache
+    from smartcal.models import Event
+    c = Cache(tmp_path / "d.db")
+    t = datetime(2026, 11, 5, 9).astimezone()
+    mk = lambda cal: Event("e1", "a", cal, "n", "#0", "T", t, t, False)
+    c.upsert_events("a", [mk("c1"), mk("c2")])
+    c.delete_event("a", "c1", "e1")
+    assert [e.calendar_id for e in c.events_by_id("e1")] == ["c2"]

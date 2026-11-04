@@ -82,6 +82,18 @@ class Cache:
         with closing(self._connect()) as con, con:
             con.executemany(_INSERT, [_row(account, e) for e in events])
 
+    def delete_event(self, account: str, calendar_id: str, event_id: str) -> None:
+        with closing(self._connect()) as con, con:
+            con.execute("DELETE FROM events WHERE account = ? AND calendar_id = ? AND id = ?",
+                        (account, calendar_id, event_id))
+
+    def events_by_id(self, event_id: str) -> list[Event]:
+        """Every cached event with this id (ids are only unique per calendar)."""
+        with closing(self._connect()) as con:
+            rows = con.execute("SELECT * FROM events WHERE id = ? ORDER BY account, calendar_id",
+                               (event_id,)).fetchall()
+        return [self._event(r) for r in rows]
+
     def upsert_calendars(self, account: str, calendars: list[CalendarInfo]) -> None:
         """Replace the account's stored calendar list."""
         with closing(self._connect()) as con, con:
