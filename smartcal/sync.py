@@ -83,6 +83,10 @@ class SyncWorker(QThread):
             if result == "ok":
                 self.synced.emit(account)
 
+    def start(self, *args, **kwargs) -> None:
+        self._stop.clear()
+        super().start(*args, **kwargs)
+
     def sync_now(self) -> None:
         self._wake.set()
 
@@ -91,7 +95,6 @@ class SyncWorker(QThread):
         self._wake.set()
 
     def run(self) -> None:
-        self._stop.clear()
         while not self._stop.is_set():
             self._wake.clear()
             self.sync_all()

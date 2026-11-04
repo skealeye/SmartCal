@@ -133,3 +133,16 @@ def test_dst_day_boundaries_with_fixed_offset_now(tmp_path, monkeypatch):
         ev("3", "Sat", datetime(2026, 3, 7, 23, 30, tzinfo=est), datetime(2026, 3, 8, 0, 0, tzinfo=est))])
     now2 = datetime(2026, 3, 8, 12, 0, tzinfo=edt)
     assert [e.title for e in agenda.today(cache2, st2, now2)] == ["Eve"]
+
+
+def test_local_zone_none_path_resolves_boundaries_per_date(tmp_path, monkeypatch):
+    monkeypatch.setattr(agenda, "_local_zone", lambda: None)
+    now = datetime(2026, 7, 15, 12, 0).astimezone()  # mid-summer, far from any DST change
+    start, end = agenda._midnight(now.date(), now), agenda._midnight(now.date() + timedelta(days=1), now)
+    assert end - start == timedelta(hours=24)
+    inside = datetime(2026, 7, 15, 10, 0).astimezone()
+    after = datetime(2026, 7, 16, 10, 0).astimezone()
+    cache, st = make(tmp_path, [ev("1", "In", inside, inside + timedelta(hours=1)),
+                                ev("2", "Out", after, after + timedelta(hours=1))],
+                     cals=[CalendarInfo("primary", "Me", "#111", True)])
+    assert [e.title for e in agenda.today(cache, st, now)] == ["In"]

@@ -122,3 +122,11 @@ def test_worker_can_restart_after_stop(qtbot, cache, tmp_path):
         w.start()
     w.stop()
     w.wait(5000)
+
+
+def test_stop_immediately_after_start_exits(qtbot, cache, tmp_path):
+    w = worker(cache, FakeClient([_ev("1")]), tmp_path)
+    w.start()
+    w.stop()
+    assert w.wait(5000) is True
+    assert not w.isRunning()
