@@ -77,3 +77,17 @@ def test_remove_account_deletes_token_and_cache_rows(tmp_path, monkeypatch):
     got = cache.events_between(T - timedelta(days=1), T + timedelta(days=1))
     assert [e.account for e in got] == ["b@x.com"]
     google_auth.remove_account("a@x.com", cache)  # already gone: no error
+
+
+def test_dialog_save_error_keeps_dialog_open_and_unapplied(qtbot, tmp_path, monkeypatch):
+    dlg, settings, *_ = build(qtbot, tmp_path)
+    warnings = []
+    dlg._warn = lambda t, m: warnings.append(m)
+    dlg._rows["p"][1].setChecked(True)
+    dlg.autostart_box.setChecked(False)
+    dlg.default_lead.setValue(30)
+    monkeypatch.setattr(settings, "save", lambda: (_ for _ in ()).throw(OSError("disk full")))
+    dlg.show()
+    dlg.accept()
+    assert dlg.isVisible() and warnings and "disk full" in warnings[0]
+    assert not settings.muted and settings.autostart is True and settings.default_lead_minutes == 10

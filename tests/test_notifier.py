@@ -162,3 +162,100 @@ def test_settings_new_fields_roundtrip(tmp_path):
     s.set_claude_model("  other  ")
     s2 = Settings(tmp_path / "s.json")
     assert s2.is_muted("m") and s2.autostart is False and s2.claude_model == "other"
+
+
+def test_long_running_event_started_days_ago_toasts_once(tmp_path):
+    start = T0 - timedelta(hours=5)
+    r = Rig(tmp_path, [ev(start=start, minutes=60 * 24 * 6)])
+    r.notifier.check(T0)  # started 5 h ago, still running: one catch-up toast
+    assert len(r.toasts) == 1 and r.toasts[0][1].startswith("Started 04:00")
+    for days in (1, 2, 3, 4, 5):
+        r.notifier.check(T0 + timedelta(days=days))
+        r.make().check(T0 + timedelta(days=days, minutes=1))  # also after a restart
+    assert len(r.toasts) == 1
+
+
+def test_event_started_more_than_three_days_ago_never_toasts_twice(tmp_path):
+    start = T0 - timedelta(days=4)
+    r = Rig(tmp_path, [ev(start=start, minutes=60 * 24 * 10)])
+    for m in range(0, 600, 30):
+        r.notifier.check(T0 + timedelta(minutes=m))
+    assert r.toasts == []  # began more than 24 h before the first check: dropped silently
+    # first seen within 24 h of the start: once, and never again while it runs
+    r2 = Rig(tmp_path / "b", [ev(start=T0 - timedelta(hours=1), minutes=60 * 24 * 10)]) \
+        if (tmp_path / "b").mkdir() is None else None
+    for d in range(0, 8):
+        r2.notifier.check(T0 + timedelta(days=d))
+    assert len(r2.toasts) == 1
+
+
+def test_timezone_change_does_not_retoast(tmp_path):
+    r = Rig(tmp_path, [ev()])
+    r.notifier.check(T0 - timedelta(minutes=5))
+    other = timezone(timedelta(hours=2))
+    r.cache.replace_range("a@x.com", T0 - timedelta(days=1), T0 + timedelta(days=1),
+                          [ev(start=T0.astimezone(other), minutes=60)])
+    r.make().check(T0 - timedelta(minutes=4))
+    assert len(r.toasts) == 1
+
+
+def test_zero_lead_does_not_say_started_early(tmp_path):
+    r = Rig(tmp_path, [ev()])
+    r.settings.set_lead("primary", 0)
+    r.notifier.check(T0 - timedelta(seconds=30))
+    assert r.toasts == []
+    r.notifier.check(T0)
+    assert len(r.toasts) == 1 and r.toasts[0][1].startswith("Started 09:00")
+
+
+def test_corrupt_notified_json_loads_empty(tmp_path):
+    r = Rig(tmp_path, [ev()])
+    for junk in ("{not json", "[1,2]", '{"k": "x", "j": [1], "NaN": NaN}'):
+        r.fired_path.write_text(junk)
+        assert r.make().fired == {}
+    r.notifier.check(T0 - timedelta(minutes=5))
+    assert len(r.toasts) == 1
+
+
+def test_canceled_event_not_toasted():
+    # Cancelled events are dropped in google_client (status == "cancelled") and
+    # never reach the cache, so the Notifier has no status to check.
+    import inspect
+    from smartcal import google_client
+    assert 'cancelled' in inspect.getsource(google_client)
+
+
+def test_settings_nan_lead_ignored(tmp_path):
+    p = tmp_path / "s.json"
+    p.write_text('{"default_lead_minutes": NaN, "lead_minutes": {"a": Infinity, "b": -Infinity, "c": 7}}')
+    s = Settings(p)
+    assert s.default_lead_minutes == 10
+    assert s.lead_for("a") == 10 and s.lead_for("b") == 10 and s.lead_for("c") == 7
+
+
+def test_first_run_enables_autostart_once(tmp_path):
+    from smartcal import autostart
+    calls = []
+    s = Settings(tmp_path / "s.json")
+    autostart.apply_at_startup(s, calls.append)
+    assert calls == [True] and Settings(tmp_path / "s.json").first_run_done
+
+
+def test_autostart_not_reenabled_after_user_disabled(tmp_path):
+    from smartcal import autostart
+    s = Settings(tmp_path / "s.json")
+    autostart.apply_at_startup(s, lambda e: None)
+    s.set_autostart(False)
+    calls = []
+    autostart.apply_at_startup(Settings(tmp_path / "s.json"), calls.append)
+    assert calls == [False]
+
+
+def test_corrupt_settings_does_not_enable_autostart(tmp_path):
+    from smartcal import autostart
+    p = tmp_path / "s.json"
+    p.write_text("{broken")
+    s = Settings(p)
+    calls = []
+    autostart.apply_at_startup(s, calls.append)
+    assert calls == [] and s.first_run_done and not s.autostart

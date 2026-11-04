@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import math
 import os
 from pathlib import Path
 
@@ -14,9 +16,12 @@ DEFAULT_CLAUDE_MODEL = "claude-sonnet-5-5"
 
 def clamp_lead(value, default: int = DEFAULT_LEAD_MINUTES) -> int:
     """Lead time in minutes, clamped to 0-1440; bad values fall back to `default`."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (int, float))             or not math.isfinite(value):
         return default
     return max(0, min(1440, int(value)))
+
+
+log = logging.getLogger(__name__)
 
 
 class Settings:
@@ -30,14 +35,19 @@ class Settings:
         self.autostart: bool = True
         self.first_run_done: bool = False
         self.claude_model: str = DEFAULT_CLAUDE_MODEL
+        self.load_failed = False  # file exists but is unreadable/corrupt
         self.load()
 
     def load(self) -> None:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
         except (OSError, ValueError):
+            self._mark_corrupt()
             return
         if not isinstance(data, dict):
+            self._mark_corrupt()
             return
         self.hidden_calendars = self._str_set(data.get("hidden_calendars"))
         self.shown_calendars = self._str_set(data.get("shown_calendars"))
@@ -53,6 +63,13 @@ class Settings:
         model = data.get("claude_model")
         if isinstance(model, str) and model.strip():
             self.claude_model = model.strip()
+
+    def _mark_corrupt(self) -> None:
+        """Unreadable settings must never look like a first run (which enables autostart)."""
+        log.warning("could not read %s; using defaults", self.path)
+        self.load_failed = True
+        self.first_run_done = True
+        self.autostart = False
 
     @staticmethod
     def _str_set(value) -> set[str]:

@@ -5,6 +5,7 @@ account takes effect immediately, since it touches tokens and the cache.
 """
 from __future__ import annotations
 
+import copy
 import logging
 
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -147,10 +148,18 @@ class SettingsDialog(QDialog):
         self.account_list.addItems(list(self._accounts_provider()))
 
     def _ask_confirm(self, account: str) -> bool:
-        answer = QMessageBox.question(
-            self, "Remove account",
-            f"Remove {account}? Its sign-in and cached events will be deleted from this PC.")
-        return answer == QMessageBox.StandardButton.Yes
+        box = QMessageBox(QMessageBox.Icon.Question, "Remove account",
+                          f"Remove {account}? Its sign-in and cached events will be "
+                          "deleted from this PC.",
+                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, self)
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        return box.exec() == QMessageBox.StandardButton.Yes
+
+    def _warn(self, title: str, text: str) -> None:
+        box = QMessageBox(QMessageBox.Icon.Warning, title, text,
+                          QMessageBox.StandardButton.Ok, self)
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.exec()
 
     def remove_selected(self) -> None:
         item = self.account_list.currentItem()
@@ -163,14 +172,18 @@ class SettingsDialog(QDialog):
             self._on_remove(account)
         except Exception:  # noqa: BLE001
             log.exception("remove account failed")
-            QMessageBox.warning(self, "Remove account", f"Could not remove {account}.")
+            self._warn("Remove account", f"Could not remove {account}.")
             return
         self.refresh_accounts()
         self._build_calendars()
 
     # -- apply -------------------------------------------------------------
+    _FIELDS = ("hidden_calendars", "shown_calendars", "lead_minutes", "default_lead_minutes",
+               "muted", "autostart", "claude_model")
+
     def accept(self) -> None:
         s = self.settings
+        backup = {f: copy.deepcopy(getattr(s, f)) for f in self._FIELDS}
         s.default_lead_minutes = self.default_lead.value()
         for cid, (show, mute, spin, orig, primary) in self._rows.items():
             if show.isChecked() == s.is_hidden(cid, primary):  # visibility changed
@@ -180,6 +193,13 @@ class SettingsDialog(QDialog):
                 s.lead_minutes[cid] = spin.value()
         s.autostart = self.autostart_box.isChecked()
         s.claude_model = self.model_edit.text().strip() or s.claude_model
-        s.save()
+        try:
+            s.save()
+        except OSError as exc:
+            for f, v in backup.items():  # nothing half-applied
+                setattr(s, f, v)
+            log.exception("could not save settings")
+            self._warn("Settings", f"Could not save settings: {exc}")
+            return
         self.applied.emit()
         super().accept()

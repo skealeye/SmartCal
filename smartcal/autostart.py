@@ -52,3 +52,22 @@ def apply(enabled: bool) -> None:
         enable() if enabled else disable()
     except OSError:
         logging.getLogger(__name__).exception("could not update autostart")
+
+
+def apply_at_startup(settings, apply_fn=apply) -> None:
+    """Default-on autostart exactly once (first run); afterwards obey the user's setting.
+
+    Corrupt settings leave the registry alone.
+    """
+    import logging
+    if settings.load_failed:
+        logging.getLogger(__name__).warning("settings unreadable; autostart left unchanged")
+        return
+    if not settings.first_run_done:
+        settings.autostart = True
+        settings.first_run_done = True
+        try:
+            settings.save()
+        except OSError:
+            logging.getLogger(__name__).exception("could not save settings")
+    apply_fn(settings.autostart)

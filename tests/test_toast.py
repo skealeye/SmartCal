@@ -82,3 +82,72 @@ def test_missing_winotify_falls_back(monkeypatch):
     tray = FakeTray()
     ToastSender(tray=tray)("T", "B", None)
     assert len(tray.messages) == 1
+
+
+HOSTILE = ["$(calc)", "${a}", "$env:X", "a`b", 'x\n"@\ny', "x\n'@\ny", "“”‘’‚„",
+           "a;b", "%PATH%", "]]>", "line1\r\nline2\nline3", "bad￿char", "x" * 5000,
+           "”@   “@", "lone\ud800surrogate", "«q» ＂ ＇"]
+
+
+def _script(monkeypatch, title, body, url=None):
+    import winotify
+    out = []
+    monkeypatch.setattr(winotify, "_run_ps", lambda command="", file="": out.append(command))
+    ToastSender()(title, body, url)
+    return out[0]
+
+
+def _strip_payload(script):
+    import re
+    texts = re.findall(r"<text id=\"\d\"><!\[CDATA\[(.*?)\]\]></text>", script, flags=re.S)
+    assert len(texts) == 2
+    for t in texts:
+        yield t
+    return
+
+
+def test_hostile_text_cannot_alter_the_real_winotify_script(monkeypatch):
+    import re
+    benign = _script(monkeypatch, "BENIGN", "BENIGN")
+    norm = lambda s: re.sub(r'\$Toast\.Tag = "[0-9a-f]*"', "TAG", s)  # noqa: E731
+    for h in HOSTILE:
+        script = _script(monkeypatch, h, h)
+        payloads = list(_strip_payload(script))
+        for p in payloads:
+            assert not any(c in p for c in '$`"\'<>&\n\r  '), p
+            assert "]]>" not in p and "￿" not in p
+            assert not any(0xD800 <= ord(c) <= 0xDFFF for c in p)
+        assert len(payloads[0]) <= 120 and len(payloads[1]) <= 300
+        rebuilt = script
+        for p in payloads:
+            rebuilt = rebuilt.replace(p, "BENIGN", 1)
+        assert norm(rebuilt) == norm(benign), h
+        assert re.fullmatch(r'[0-9a-f]+', re.search(r'\$Toast\.Tag = "(.*?)"', script).group(1))
+
+
+def test_xml_invalid_characters_removed():
+    t = clean_text("a\x00b\x0bc\x1fd￾e￿ f\ud800g\udfffh i j")
+    assert t == "abcd e fghi j".replace("abcd", "abcd") or "\x00" not in t
+    for bad in ("\x00", "\x0b", "\x1f", "￾", "￿", "\ud800", "\udfff", " ", " "):
+        assert bad not in t
+    assert clean_text("café \U0001F600 ok") == "café \U0001F600 ok"
+    assert clean_text("x" * 500, 120) == "x" * 120
+
+
+def test_register_app_id_roundtrip_on_temp_key():
+    import uuid
+    import winreg
+    base = r"Software\SmartCalTest"
+    key = base + "\\" + uuid.uuid4().hex
+    from smartcal.toast import register_app_id
+    try:
+        register_app_id(key)
+        register_app_id(key)  # idempotent
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+            assert winreg.QueryValueEx(k, "DisplayName")[0] == "SmartCal"
+    finally:
+        for path in (key, base):
+            try:
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, path)
+            except OSError:
+                pass

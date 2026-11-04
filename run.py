@@ -1,3 +1,4 @@
+import logging
 import sys
 import threading
 
@@ -13,7 +14,7 @@ from smartcal.live_sync import LiveSyncWorker
 from smartcal.logsetup import guarded, install_excepthooks, setup_logging
 from smartcal.notifier import Notifier
 from smartcal.settings import Settings
-from smartcal.toast import ToastSender
+from smartcal.toast import ToastSender, register_app_id
 from smartcal.ui.popup import AgendaPopup
 from smartcal.ui.settings_dialog import SettingsDialog
 from smartcal.ui.tray import TrayController
@@ -29,10 +30,11 @@ def main() -> int:
 
     cache = Cache(data_dir() / "cache.db")
     settings = Settings()
-    if not settings.first_run_done:  # start with Windows is on by default
-        settings.first_run_done = True
-        settings.save()
-    autostart.apply(settings.autostart)
+    autostart.apply_at_startup(settings)  # on by default, first run only
+    try:
+        register_app_id()
+    except OSError:
+        logging.getLogger(__name__).exception("could not register toast app id")
 
     clients: dict[str, GoogleClient] = {}
     clients_lock = threading.Lock()
