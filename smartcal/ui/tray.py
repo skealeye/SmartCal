@@ -114,6 +114,17 @@ class TrayController(QSystemTrayIcon):
             self.popup.refresh()
             self.popup.show_near_tray(rect)
 
+    def show_popup(self) -> None:
+        """Show the popup (never hides it); used when a second launch was refused."""
+        if self.popup.isVisible():
+            self.popup.raise_()
+            self.popup.activateWindow()
+            return
+        self._attention = False
+        self.update_tooltip()
+        self.popup.refresh()
+        self.popup.show_near_tray(self._tray_rect())
+
     def update_tooltip(self) -> None:
         now = datetime.now().astimezone()
         if now.day != self._icon_day:

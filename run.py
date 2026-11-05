@@ -18,6 +18,7 @@ from smartcal.logsetup import guarded, install_excepthooks, setup_logging
 from smartcal.notifier import Notifier
 from smartcal.reminders import ReminderFirer, Reminders
 from smartcal.settings import Settings
+from smartcal.single_instance import SingleInstance
 from smartcal.undo import UndoStore
 from smartcal.toast import ToastSender, register_app_id
 from smartcal.ui.popup import AgendaPopup
@@ -32,6 +33,11 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("SmartCal")
+
+    instance = SingleInstance(data_dir())
+    if not instance.acquire():
+        logging.getLogger(__name__).info("SmartCal is already running; showed its popup")
+        return 0
 
     cache = Cache(data_dir() / "cache.db")
     settings = Settings()
@@ -128,6 +134,7 @@ def main() -> int:
                           on_before_exit=window.save_state)
     toast.tray = tray
     popup.chat_attention.connect(guarded(tray.notify_attention))
+    instance.activated.connect(guarded(tray.show_popup))   # a second launch was refused
     tray.show()
 
     @guarded
@@ -167,6 +174,7 @@ def main() -> int:
 
     worker.start()
     code = app.exec()
+    instance.release()
     worker.stop()
     if not worker.wait(3000):
         # Never terminate() a thread mid-request; state files are written atomically.

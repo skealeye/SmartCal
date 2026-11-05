@@ -176,6 +176,14 @@ def test_quit_with_stopping_worker_quits_normally(qtbot, tmp_path):
     assert exits == [] and quits == [1]
 
 
+def test_show_popup_shows_and_never_hides(qtbot, tmp_path):
+    tray, popup = build(qtbot, tmp_path)
+    tray.show_popup()
+    assert popup.isVisible()
+    tray.show_popup()
+    assert popup.isVisible()
+
+
 def test_settings_menu_action_opens_settings(qtbot, tmp_path):
     opened = []
     cache = Cache(tmp_path / "c.db")
