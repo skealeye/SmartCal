@@ -36,6 +36,16 @@ If the work account is blocked by your Workspace admin ("access blocked" / "app 
 
 While the consent screen is in **Testing**, refresh tokens expire after **7 days**, so you will have to sign in again weekly. Publishing the app to **In production** removes that limit (it will still show the unverified warning). Decide later whether to publish.
 
+## Claude API key (assistant chat)
+
+Create `%APPDATA%\SmartCal\.env` (see `.env.example`) containing:
+
+```
+ANTHROPIC_API_KEY=your-key-here
+```
+
+An `ANTHROPIC_API_KEY` environment variable takes precedence. SmartCal does not read a `.env` from the current folder. Never commit or share the key.
+
 ## Tests
 
 ```

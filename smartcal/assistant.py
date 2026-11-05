@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -49,6 +50,7 @@ CONTEXT_TITLE, CONTEXT_LOCATION = 100, 80
 LIMITS = {"title": 200, "location": 200, "place": 200, "description": 2000,
           "text": 200, "question": 1000, "event_id": 1024, "account": 320,
           "calendar": 1024, "calendar_id": 1024}
+EARLIEST, LATEST = timedelta(days=366), timedelta(days=5 * 366)
 MAX_USER_TEXT = 4000
 MAX_OUTPUT = 4000
 NEEDS_CONFIRMATION = ("needs_confirmation: ask the user with ask_user. This deletes an event or "
@@ -173,6 +175,41 @@ class AssistantResult:
     undoable: bool
     question: bool = False
     changes: list[str] = field(default_factory=list)
+    pending: list[str] = field(default_factory=list)   # SmartCal-built "Waiting for your OK" lines
+
+
+BUSY_TEXT = "Still working on your last message."
+MAX_PENDING = 5
+PENDING_PREFIX = "Waiting for your OK to: "
+PENDING_HEADER = "--- SmartCal ---"
+NOT_APPROVED_NOTE = ("SmartCal note: the user's reply was not a clear yes, so the action(s) that "
+                     "were waiting for confirmation were NOT approved and have been cancelled. "
+                     "Do not retry them unless the user asks again.")
+_AFFIRMATIVE = ("yes", "y", "yep", "yeah", "yup", "ok", "okay", "sure", "go ahead", "do it",
+                "confirm", "confirmed", "please do", "yes please", "sounds good", "correct",
+                "approved", "absolutely", "of course")
+_NEGATIVE = {"no", "nope", "nah", "not", "don't", "dont", "never", "cancel", "stop", "wait",
+             "hold", "instead", "but", "except", "unless", "only"}
+_FAKE_PENDING = re.compile(r"^[\W_]*waiting for your ok", re.IGNORECASE)
+
+
+def is_affirmative(text: str) -> bool:
+    """True only for an unambiguous English yes ("yes", "ok, do it", "yes delete it").
+
+    The message must start with an allowlisted affirmative and contain no negative or
+    hesitation word and no question mark. Anything else is NOT approval."""
+    t = str(text or "").strip().lower().replace("’", "'")
+    t = re.sub(r"[.!\s]+$", "", t)
+    if not t or "?" in t:
+        return False
+    words = re.findall(r"[a-z']+", t)
+    if not words or any(w in _NEGATIVE or w.endswith("n't") for w in words):
+        return False
+    for phrase in _AFFIRMATIVE:
+        p = phrase.split()
+        if words[:len(p)] == p:
+            return True
+    return False
 
 
 class _ToolError(Exception):
@@ -201,12 +238,21 @@ def _ctx(text, limit: int) -> str:
 
 
 def _when(dt: datetime, now: datetime, all_day: bool = False) -> str:
+    """Raises OverflowError/ValueError/OSError for unrepresentable times; `_dt` calls it
+    while validating, so a Done line can never fail after a write."""
     zone = agenda._zone(now)
     local = dt.astimezone(zone) if zone else dt.astimezone()
     day = f"{local:%a %b} {local.day}"
     if all_day:
         return day
     return f"{day} {local.hour % 12 or 12}:{local.minute:02d} {'AM' if local.hour < 12 else 'PM'}"
+
+
+def _safe_when(dt: datetime, now: datetime, all_day: bool = False) -> str:
+    try:
+        return _when(dt, now, all_day)
+    except (OverflowError, ValueError, OSError):
+        return "the requested time"
 
 
 def _json(obj) -> str:
@@ -225,24 +271,29 @@ def _read_env_file(path: Path) -> dict[str, str]:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        key = key.strip().removeprefix("export ").strip()
+        key = key.strip()
+        if key.startswith("export "):
+            key = key[len("export "):].strip()
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
+        if value[:1] in ("\"", "'"):
+            end = value.find(value[0], 1)
+            value = value[1:end] if end > 0 else value[1:]
+        else:
+            value = re.split(r"\s+#", value, maxsplit=1)[0].strip()
         out[key] = value
     return out
 
 
 def load_api_key() -> str:
-    """ANTHROPIC_API_KEY from the environment, else %APPDATA%\\SmartCal\\.env, else ./.env."""
+    """ANTHROPIC_API_KEY from the environment, else from %APPDATA%\\SmartCal\\.env.
+    (No current-folder fallback: the app's working folder is not trusted.)"""
     key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
     if key:
         return key
     app_env = data_dir() / ".env"
-    for path in (app_env, Path.cwd() / ".env"):
-        key = _read_env_file(path).get("ANTHROPIC_API_KEY", "").strip()
-        if key:
-            return key
+    key = _read_env_file(app_env).get("ANTHROPIC_API_KEY", "").strip()
+    if key:
+        return key
     raise AssistantError(f"No Claude API key found. Add ANTHROPIC_API_KEY to {app_env}")
 
 
@@ -300,7 +351,8 @@ def _api_error(exc: Exception) -> AssistantError:
 # -- confirmation gate -------------------------------------------------------
 class ConfirmationGate:
     """Authorizes a risky call only when the same call was refused in the previous
-    turn, that turn ended with an ask_user question, and the user has replied."""
+    turn, that turn ended with an ask_user question, and the user's reply since is
+    an unambiguous yes (`is_affirmative`)."""
 
     def __init__(self):
         self.reset()
@@ -310,19 +362,31 @@ class ConfirmationGate:
         self._requested: dict[tuple, int] = {}
         self._descriptions: dict[tuple, str] = {}
         self._question_turn: int | None = None
+        self._approved = False
 
-    def new_turn(self) -> None:
+    def new_turn(self, user_text: str) -> bool:
+        """Start a turn; returns True when pending requests were dropped (not approved)."""
         self.turn += 1
-        keep = {k: t for k, t in self._requested.items() if t == self.turn - 1}
+        prev = self.turn - 1
+        waiting = self._question_turn == prev and any(
+            t == prev for t in self._requested.values())
+        self._approved = waiting and is_affirmative(user_text)
+        keep = ({k: t for k, t in self._requested.items() if t == prev}
+                if self._approved else {})
         self._requested = keep
         self._descriptions = {k: d for k, d in self._descriptions.items() if k in keep}
+        return waiting and not self._approved
 
     def allow(self, key: tuple, description: str) -> bool:
         prev = self.turn - 1
-        if prev >= 1 and self._requested.get(key) == prev and self._question_turn == prev:
+        if (self._approved and prev >= 1 and self._requested.get(key) == prev
+                and self._question_turn == prev):
             del self._requested[key]
             self._descriptions.pop(key, None)
             return True
+        if self._requested.get(key) != self.turn and len(self.pending()) >= MAX_PENDING:
+            raise _ToolError("too many pending confirmations: ask the user about the ones "
+                             "already waiting first")
         self._requested[key] = self.turn
         self._descriptions[key] = description
         return False
@@ -331,7 +395,8 @@ class ConfirmationGate:
         self._question_turn = self.turn
 
     def pending(self) -> list[str]:
-        return [d for k, d in self._descriptions.items() if self._requested.get(k) == self.turn]
+        return [PENDING_PREFIX + d for k, d in self._descriptions.items()
+                if self._requested.get(k) == self.turn]
 
 
 @dataclass
@@ -355,15 +420,28 @@ class Assistant:
         self.clock = clock
         self.history: list[dict] = []
         self.gate = ConfirmationGate()
+        self._busy = threading.Lock()   # never waited on: a second caller is turned away
 
-    def reset(self) -> None:
-        self.history.clear()
-        self.gate.reset()
+    def reset(self) -> bool:
+        """Clear the conversation; returns False (and changes nothing) while busy."""
+        if not self._busy.acquire(blocking=False):
+            return False
+        try:
+            self.history.clear()
+            self.gate.reset()
+            return True
+        finally:
+            self._busy.release()
 
     def undo_last(self) -> str:
-        if self.undo is None:
-            return "Nothing to undo."
-        return self.undo.undo_last(self.actions)
+        if not self._busy.acquire(blocking=False):
+            return BUSY_TEXT
+        try:
+            if self.undo is None:
+                return "Nothing to undo."
+            return self.undo.undo_last(self.actions)
+        finally:
+            self._busy.release()
 
     def _now(self) -> datetime:
         now = self.clock()
@@ -371,14 +449,23 @@ class Assistant:
 
     # -- conversation ------------------------------------------------------
     def reply(self, user_text: str) -> AssistantResult:
+        if not self._busy.acquire(blocking=False):
+            return AssistantResult(BUSY_TEXT, False)
+        try:
+            return self._reply(user_text)
+        finally:
+            self._busy.release()
+
+    def _reply(self, user_text: str) -> AssistantResult:
         text = clean_output(user_text, MAX_USER_TEXT)
+        dropped = self.gate.new_turn(text)   # anything but a clear yes cancels pending OKs
         if not text:
             return AssistantResult("Type a message first.", False)
-        self.gate.new_turn()
         saved = copy.deepcopy(self.history)
         now = self._now()
         turn = _Turn()
-        self._add_user([{"type": "text", "text": text}])
+        blocks = [{"type": "text", "text": NOT_APPROVED_NOTE}] if dropped else []
+        self._add_user(blocks + [{"type": "text", "text": text}])
         try:
             system = self.system_prompt(now)
             for _ in range(MAX_ROUND_TRIPS):
@@ -394,10 +481,8 @@ class Assistant:
                 self._add_user(results)
                 if question is not None:
                     self.gate.asked()
-                    pending = self.gate.pending()
-                    if pending:
-                        question += "\n\nWaiting for your OK to: " + "; ".join(pending)
-                    return self._finish(turn, question, question=True)
+                    return self._finish(turn, question, question=True,
+                                        pending=self.gate.pending())
             return self._finish(turn, "I stopped because that request needed too many steps. "
                                       "Try asking for one thing at a time.")
         except AssistantError as exc:
@@ -424,10 +509,17 @@ class Assistant:
         else:
             self.history.append({"role": "user", "content": list(blocks)})
 
-    def _finish(self, turn: _Turn, text: str, question: bool = False) -> AssistantResult:
+    def _finish(self, turn: _Turn, text: str, question: bool = False,
+                pending: list[str] | None = None) -> AssistantResult:
         self._trim()
-        return AssistantResult(text=clean_output(text) or "Done.", undoable=turn.written > 0,
-                               question=question, changes=list(turn.changes))
+        pending = [_line(p, 300) for p in pending or []]
+        body = "\n".join(ln for ln in clean_output(text).split("\n")
+                         if not _FAKE_PENDING.match(ln))
+        body = clean_output(body) or ("Done." if not pending else "")
+        if pending:   # appended after cleaning/truncation, so it cannot be cut off
+            body = (body + "\n\n" if body else "") + PENDING_HEADER + "\n" + "\n".join(pending)
+        return AssistantResult(text=body, undoable=turn.written > 0, question=question,
+                               changes=list(turn.changes), pending=pending)
 
     def _trim(self) -> None:
         h = self.history
@@ -526,7 +618,7 @@ class Assistant:
                 results.append(_result(uid, f"error: {exc}", True))
             except Exception as exc:  # noqa: BLE001 - everything else goes back to the model
                 log.info("tool %s failed: %s", name, type(exc).__name__)
-                results.append(_result(uid, f"error: {_describe(exc)}", True))
+                results.append(_result(uid, f"error: {_describe(exc, self._shown)}", True))
         return results, question
 
     def _handlers(self):
@@ -545,9 +637,16 @@ class Assistant:
             dt = datetime.fromisoformat(s)
         except ValueError:
             raise _ToolError(f"{name} must be an ISO-8601 date-time") from None
-        if dt.tzinfo is None:
-            zone = agenda._zone(now)
-            dt = dt.replace(tzinfo=zone) if zone else dt.astimezone()
+        try:
+            if dt.tzinfo is None:
+                zone = agenda._zone(now)
+                dt = dt.replace(tzinfo=zone) if zone else dt.astimezone()
+            ok = now - EARLIEST <= dt <= now + LATEST
+            _when(dt, now)   # must be displayable before anything is written
+        except (OverflowError, ValueError, OSError):
+            ok = False
+        if not ok:
+            raise _ToolError(f"{name} must be within the past year and the next 5 years")
         return dt
 
     def _spend_write(self, turn: _Turn) -> None:
@@ -562,11 +661,15 @@ class Assistant:
         calendar_id = _text(args, "calendar_id") or None
         if account is None or calendar_id is None:
             account, calendar_id = self.actions._locate(event_id, account, calendar_id)
-        cals = self.cache.calendars_by_account().get(account, [])
-        info = next((c for c in cals if c.id == calendar_id), None)
-        if info is None or self.settings.is_hidden(calendar_id, info.primary):
+        if not self._shown(account, calendar_id):
             raise EventNotFoundError(event_id)
         return event_id, account, calendar_id
+
+    def _shown(self, account: str, calendar_id: str) -> bool:
+        """The calendar is known for that account and not hidden in Settings."""
+        cals = self.cache.calendars_by_account().get(account, [])
+        info = next((c for c in cals if c.id == calendar_id), None)
+        return info is not None and not self.settings.is_hidden(calendar_id, info.primary)
 
     def _cached(self, event_id: str, account: str, calendar_id: str):
         return next((e for e in self.cache.events_by_id(event_id)
@@ -627,8 +730,11 @@ class Assistant:
         title = _text(args, "title", required=True)
         all_day = _bool(args, "all_day")
         start, end = self._dt(args, "start", now), self._dt(args, "end", now)
-        if all_day and end <= start:
-            end = agenda._midnight(agenda._local_date(start) + timedelta(days=1), now)
+        if all_day:   # all-day events are whole local days; end is exclusive
+            first, after = agenda._local_date(start), agenda._local_date(end)
+            if after <= first:
+                after = first + timedelta(days=1)
+            start, end = agenda._midnight(first, now), agenda._midnight(after, now)
         location = _text(args, "location")
         place = _text(args, "place")
         description = ""
@@ -642,7 +748,7 @@ class Assistant:
                                  description=description)
         turn.written += 1
         turn.changes.append(f"Done: added {_line(ev.title, 100)} on "
-                            f"{_when(ev.start, now, ev.all_day)}")
+                            f"{_safe_when(ev.start, now, ev.all_day)}")
         return {"ok": True, "event_id": ev.id, "account": account, "calendar_id": ev.calendar_id}
 
     def _guarded(self, turn: _Turn, key: tuple, description: str, write):
@@ -657,8 +763,8 @@ class Assistant:
             return write(True)
 
     def _move_event(self, args, turn, now):
-        event_id, account, calendar_id = self._locate(args)
         start, end = self._dt(args, "new_start", now), self._dt(args, "new_end", now)
+        event_id, account, calendar_id = self._locate(args)
         key = (account, calendar_id, event_id, "move", start.isoformat(), end.isoformat())
         title = self._title(event_id, account, calendar_id)
         ev = self._guarded(turn, key, f"move {title} (has other attendees) to "
@@ -670,12 +776,12 @@ class Assistant:
             return NEEDS_CONFIRMATION
         turn.written += 1
         turn.changes.append(f"Done: moved {_line(ev.title, 100)} to "
-                            f"{_when(ev.start, now, ev.all_day)}")
+                            f"{_safe_when(ev.start, now, ev.all_day)}")
         return {"ok": True, "event_id": ev.id, "start": ev.start.isoformat(),
                 "end": ev.end.isoformat()}
 
     def _update_event(self, args, turn, now):
-        event_id, account, calendar_id = self._locate(args)
+        _text(args, "event_id", required=True)
         raw = args.get("fields")
         if not isinstance(raw, dict) or not raw:
             raise _ToolError("fields must be a non-empty object")
@@ -686,9 +792,11 @@ class Assistant:
         for k in raw:
             fields[k] = self._dt(raw, k, now) if k in ("start", "end") \
                 else _text(raw, k, required=(k == "title"), allow_empty=(k != "title"))
-        key = (account, calendar_id, event_id, "update",
+        key = ("update",
                _json({k: (v.isoformat() if isinstance(v, datetime) else v)
                       for k, v in sorted(fields.items())}))
+        event_id, account, calendar_id = self._locate(args)
+        key = (account, calendar_id, event_id) + key
         title = self._title(event_id, account, calendar_id)
         ev = self._guarded(turn, key, f"change {', '.join(sorted(fields))} of {title} "
                                       f"(has other attendees)",
@@ -704,7 +812,7 @@ class Assistant:
     def _delete_event(self, args, turn, now):
         event_id, account, calendar_id = self._locate(args)
         cached = self._cached(event_id, account, calendar_id)
-        when = f" ({_when(cached.start, now, cached.all_day)})" if cached else ""
+        when = f" ({_safe_when(cached.start, now, cached.all_day)})" if cached else ""
         key = (account, calendar_id, event_id, "delete")
         if not self.gate.allow(key, f"delete {self._title(event_id, account, calendar_id)}{when}"):
             return NEEDS_CONFIRMATION
@@ -741,7 +849,7 @@ class Assistant:
             raise _ToolError(f"at most {MAX_REMINDERS} reminders per message")
         self.reminders.add(text, fire_at)
         turn.reminders += 1
-        turn.changes.append(f"Done: reminder at {_when(fire_at, now)}: {_line(text, 100)}")
+        turn.changes.append(f"Done: reminder at {_safe_when(fire_at, now)}: {_line(text, 100)}")
         return {"ok": True, "fire_at": fire_at.isoformat()}
 
 
@@ -792,14 +900,17 @@ def _result(tool_use_id: str, content: str, is_error: bool = False) -> dict:
     return block
 
 
-def _describe(exc: Exception) -> str:
+def _describe(exc: Exception, shown=lambda account, calendar_id: True) -> str:
     if isinstance(exc, AmbiguousEventError):
-        return "ambiguous: that id is in several calendars. Ask the user which with ask_user. " \
-               "Candidates: " + _json([{"id": e.id, "title": _line(e.title, CONTEXT_TITLE),
-                                        "start": e.start.isoformat(), "account": e.account,
-                                        "calendar": _line(e.calendar_name, 80),
-                                        "calendar_id": e.calendar_id}
-                                       for e in exc.candidates[:10]])
+        visible = [e for e in exc.candidates if shown(e.account, e.calendar_id)]
+        if not visible:
+            return "event not found; use list_events to get current ids"
+        return "ambiguous: that id is in several calendars. Ask the user which with ask_user, " \
+               "then pass account and calendar_id. Candidates: " + _json(
+                   [{"id": e.id, "title": _line(e.title, CONTEXT_TITLE),
+                     "start": e.start.isoformat(), "account": e.account,
+                     "calendar": _line(e.calendar_name, 80), "calendar_id": e.calendar_id}
+                    for e in visible[:10]])
     if isinstance(exc, EventNotFoundError):
         return "event not found; use list_events to get current ids"
     if isinstance(exc, SeriesRefusedError):
