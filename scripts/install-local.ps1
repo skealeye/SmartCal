@@ -1,9 +1,15 @@
-# Copy dist\SmartCal to %LOCALAPPDATA%\Programs\SmartCal and add a Start Menu shortcut.
+# Copy the build (%LOCALAPPDATA%\SmartCal-build\dist\SmartCal, or the older repo
+# dist\SmartCal if that is all there is) to %LOCALAPPDATA%\Programs\SmartCal and add
+# a Start Menu shortcut.
 # Does not touch the registry: SmartCal registers its own autostart on first run.
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
-$src = Join-Path $root "dist\SmartCal"
+$src = Join-Path $env:LOCALAPPDATA "SmartCal-build\dist\SmartCal"
+if (-not (Test-Path (Join-Path $src "SmartCal.exe"))) {
+    $src = Join-Path $root "dist\SmartCal"   # built by an older build.ps1
+}
 if (-not (Test-Path (Join-Path $src "SmartCal.exe"))) { throw "Run scripts\build.ps1 first." }
+Write-Host "Installing from $src"
 
 if (Get-Process SmartCal -ErrorAction SilentlyContinue) {
     Write-Host "Close SmartCal (right-click the tray icon > Quit) and run this again."

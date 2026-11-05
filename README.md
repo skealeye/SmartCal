@@ -57,9 +57,11 @@ python run.py
 
 ```
 pip install -r requirements-dev.txt
-powershell -File scripts\build.ps1          # builds dist\SmartCal\SmartCal.exe
+powershell -File scripts\build.ps1          # builds %LOCALAPPDATA%\SmartCal-build\dist\SmartCal\SmartCal.exe
 powershell -File scripts\install-local.ps1  # copies it to %LOCALAPPDATA%\Programs\SmartCal + Start Menu shortcut
 ```
+
+The build goes to the local disk (`%LOCALAPPDATA%\SmartCal-build\dist` and `\work`), not the repo's `dist\`: building on the Z: network share fails now and then. Only the `.spec` file is written to the repo's `build\` folder. The install script falls back to the repo's `dist\SmartCal` if no local build exists.
 
 On first run SmartCal registers itself to start at login (turn this off in Settings). The packaged exe is registered by its own path.
 
