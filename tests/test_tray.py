@@ -164,6 +164,15 @@ def test_quit_with_stuck_worker_flushes_and_exits_without_terminate(qtbot, tmp_p
     assert worker.stopped and flushed == [1] and exits == [0] and quits == []
 
 
+def test_forced_exit_removes_the_tray_icon_first(qtbot, tmp_path):
+    order = []
+    tray, _ = build(qtbot, tmp_path, StuckWorker(), on_before_exit=lambda: order.append("flush"),
+                    exit_fn=lambda code: order.append("exit"))
+    tray.hide = lambda: order.append("hide")
+    tray.quit()
+    assert order == ["hide", "flush", "exit"]
+
+
 def test_quit_with_stopping_worker_quits_normally(qtbot, tmp_path):
     exits, quits = [], []
 

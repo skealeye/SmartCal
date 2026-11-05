@@ -28,6 +28,9 @@ from smartcal.ui.tray import TrayController, dialog_visible, track_dialog
 from smartcal.ui.window import CalendarWindow
 
 
+TOOK_OVER_TEXT = "SmartCal was already running but not responding; starting a new copy"
+
+
 def main() -> int:
     install_excepthooks()   # first: even a failure while setting up logging is caught
     setup_logging(data_dir() / "smartcal.log")
@@ -138,6 +141,8 @@ def main() -> int:
     popup.chat_attention.connect(guarded(tray.notify_attention))
     instance.activated.connect(guarded(tray.show_popup))   # a second launch was refused
     tray.show()
+    if instance.took_over:
+        tray.showMessage("SmartCal", TOOK_OVER_TEXT)
 
     @guarded
     def on_synced(_account: str) -> None:

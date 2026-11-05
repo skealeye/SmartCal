@@ -273,6 +273,10 @@ class TrayController(QSystemTrayIcon):
         if not self.worker.wait(STOP_WAIT_MS):
             log.warning("sync thread did not stop; exiting without waiting for it")
             try:
+                self.hide()   # os._exit skips cleanup: remove the icon, no ghost in the tray
+            except Exception:  # noqa: BLE001
+                log.exception("hiding the tray icon failed")
+            try:
                 if self._on_before_exit:
                     self._on_before_exit()
                 for handler in logging.getLogger().handlers:
