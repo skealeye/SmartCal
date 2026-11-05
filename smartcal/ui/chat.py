@@ -30,6 +30,14 @@ REAUTH_GENERIC = "Sign in again: right-click the tray icon > Add Google accountâ
 UNDONE = "Undone"
 GONE = "Nothing to undo"
 STILL_WORKING = "Still workingâ€¦"
+NOT_UNDONE = "Not undone"
+UNDO_ANYWAY = "Undo anyway"
+FORCE_CONFIRM = "This will overwrite the changes made in Google."
+
+
+def offers_force(line: str) -> bool:
+    """An undo warning about an edit made elsewhere: the owner may overwrite it."""
+    return line.startswith(NOT_UNDONE) and "elsewhere" in line
 
 
 def reauth_text(exc: BaseException) -> str:
@@ -100,6 +108,7 @@ class _Item(QFrame):
         self.undo_btn: QPushButton | None = None
         self.approve_btn: QPushButton | None = None
         self.deny_btn: QPushButton | None = None
+        self.anyway_btn: QPushButton | None = None
         self.undoable = False
         self.remaining = 0        # writes of this reply not yet undone
         self.setObjectName("chatitem")
@@ -110,6 +119,8 @@ class _Item(QFrame):
     def set_buttons_enabled(self, which: str, enabled: bool) -> None:
         if which == "undo" and self.undo_btn is not None:
             self.undo_btn.setEnabled(enabled)
+        if which == "anyway" and self.anyway_btn is not None:
+            self.anyway_btn.setEnabled(enabled)
         if which == "pending":
             for b in (self.approve_btn, self.deny_btn):
                 if b is not None:
@@ -130,6 +141,7 @@ class ChatWidget(QWidget):
         self._items: list[_Item] = []
         self._closing = False
         self._gone: list[int] = []
+        self.confirm_overwrite = self._ask_overwrite   # replaceable in tests
         self.destroyed.connect(lambda *_a, g=self._gone: g.append(1))
         self.setStyleSheet(
             f"QLabel{{color:{theme.TEXT};font-size:12px;}}"
@@ -366,7 +378,10 @@ class ChatWidget(QWidget):
     def _on_undone(self, item: _Item, result) -> None:
         lines, err, consumed, count = result
         for line in lines:
-            self._add_plain("claude", "Claude", line)
+            if offers_force(line):
+                self._add_force_offer(item, line)
+            else:
+                self._add_plain("claude", "Claude", line)
         done = sum(1 for line in lines if line.startswith(UNDONE))
         item.remaining = max(0, item.remaining - consumed)
         if err is not None:
@@ -374,6 +389,51 @@ class ChatWidget(QWidget):
         self._refresh_undo(item, gone=count == 0)
         if done:
             self.changed.emit()
+
+    def _add_force_offer(self, src: _Item, line: str) -> None:
+        """The undo warning plus an 'Undo anyway' button (usable once)."""
+        item = _Item("claude")
+        item.lay.addWidget(_label("Claude", f"font-weight:bold;color:{theme.LINK};"))
+        item.lay.addWidget(_label(line))
+        item.anyway_btn = _button(UNDO_ANYWAY)
+        item.anyway_btn.clicked.connect(lambda _c=False, s=src, i=item: self._undo_anyway(s, i))
+        item.lay.addWidget(item.anyway_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        self._append(item)
+
+    def _ask_overwrite(self) -> bool:
+        from PyQt6.QtWidgets import QMessageBox
+        box = QMessageBox(QMessageBox.Icon.Warning, UNDO_ANYWAY, FORCE_CONFIRM,
+                          QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                          self)
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        return box.exec() == QMessageBox.StandardButton.Ok
+
+    def _undo_anyway(self, src: _Item, item: _Item) -> None:
+        if self.is_busy() or item.anyway_btn is None or not item.anyway_btn.isEnabled():
+            return
+        if not self.confirm_overwrite():
+            return
+        item.set_buttons_enabled("anyway", False)   # once only
+        self._freeze_old_buttons()
+        if src.undo_btn is not None:
+            src.undo_btn.setEnabled(False)
+
+        def job(a):
+            err, consumed = None, 0
+            lines = []
+            try:
+                before = a.undo_count()
+                lines.append(str(a.undo_last(force=True)))
+                consumed = max(0, before - a.undo_count())
+                count = a.undo_count()
+            except Exception as exc:  # noqa: BLE001 - shown by the UI thread
+                err, count = exc, None
+            return lines, err, consumed, count
+
+        def fail(exc):
+            self._on_error(exc)
+            self._refresh_undo(src)
+        self._start(job, lambda r: self._on_undone(src, r), fail)
 
     def new_chat(self) -> None:
         if self.is_busy():
@@ -388,6 +448,7 @@ class ChatWidget(QWidget):
     def _freeze_old_buttons(self) -> None:
         for it in self._items:
             it.set_buttons_enabled("pending", False)
+            it.set_buttons_enabled("anyway", False)   # the undo stack may change
 
     def _add_user(self, text: str) -> None:
         item = _Item("user")

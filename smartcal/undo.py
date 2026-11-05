@@ -249,11 +249,10 @@ class UndoStore:
                     if c.after_updated is None:
                         return (f"Not undone: the last change to {c.summary} did not "
                                 f"finish recording, so it cannot be told apart from an "
-                                f"edit made elsewhere. Undo again with force to overwrite.")
+                                f"edit made elsewhere. Use 'Undo anyway' to overwrite it.")
                     if current.updated != c.after_updated:
                         return (f"Not undone: {c.summary} was changed elsewhere since "
-                                f"SmartCal edited it. Undo again with force to overwrite "
-                                f"those changes.")
+                                f"SmartCal edited it. Use 'Undo anyway' to overwrite it.")
             restored = None
             if c.kind == "create":
                 client.delete_event(c.event_id, calendar_id=c.calendar_id)

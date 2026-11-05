@@ -513,13 +513,15 @@ class Assistant:
         finally:
             self._busy.release()
 
-    def undo_last(self) -> str:
+    def undo_last(self, force: bool = False) -> str:
+        """Undo the newest change; force=True overwrites edits made elsewhere since
+        (only after the owner pressed 'Undo anyway')."""
         if not self._busy.acquire(blocking=False):
             return BUSY_TEXT
         try:
             if self.undo is None:
                 return "Nothing to undo."
-            return self.undo.undo_last(self.actions)
+            return self.undo.undo_last(self.actions, force=force)
         finally:
             self._busy.release()
 
