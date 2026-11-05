@@ -10,6 +10,7 @@ from datetime import timedelta
 
 import pytest
 from PyQt6.QtCore import QPoint, QRect, Qt
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QApplication, QLabel
 
 from smartcal.settings import Settings
@@ -110,7 +111,9 @@ def test_no_change_refresh_with_details_open_and_hover_starts_nothing(qtbot, tmp
     p = shown_popup(qtbot, tmp_path, MANY)
     click(qtbot, rows(p)[2])
     fly = p.flyout()
-    _enter(rows(p)[4])
+    over = rows(p)[4]
+    p.cursor_pos = lambda: over.mapToGlobal(over.rect().center())   # the mouse rests here
+    _enter(over)
     settled(qtbot, p)
     qtbot.waitUntil(lambda: not p.row_fades_running())
     p.refresh()                                   # the 30 s tick
@@ -341,14 +344,106 @@ def test_hover_button_paints_its_background_without_restyling(qtbot, tmp_path, a
     assert img.pixelColor(2, join.height() // 2).name() == join.background()
 
 
-def test_rows_never_open_parentless_windows(qtbot, tmp_path):
+def test_rows_never_open_parentless_windows(qtbot, tmp_path, caplog):
     before = {id(w) for w in QApplication.topLevelWidgets() if w.isVisible()}
     for style in ("stripe", "fill"):
         r = AgendaRow(ev("1", "A", 10), "10:00 AM", False, "#3fa364", style=style)
+        qtbot.addWidget(r)
         assert all(c.parentWidget() is not None for c in r.findChildren(QLabel))
         stripe = r.findChild(type(r).__mro__[1], "stripe")
         assert stripe.parentWidget() is r
-        r.deleteLater()
-    QApplication.processEvents()
+        with caplog.at_level("WARNING"):
+            r.show()                              # the guard: never a window of its own
+        QApplication.processEvents()
+        assert not r.isVisible()
+        assert "without a parent" in caplog.text
     after = {id(w) for w in QApplication.topLevelWidgets() if w.isVisible()}
     assert after <= before
+
+
+# == v0.8.2 ===================================================================================
+LONG_NOTES = "\n".join(f"line {i} of the notes" for i in range(120))
+
+
+def test_capped_panel_follows_popup_tween_with_one_geometry_change(qtbot, tmp_path, animated):
+    p = shown_popup(qtbot, tmp_path, MANY[:3] + [ev("l", "Long", 18, description=LONG_NOTES)],
+                    tray=BOTTOM_RIGHT)
+    click(qtbot, rows(p)[-1])
+    fly = p.flyout()
+    settled(qtbot, p)
+    assert fly.height() == p.height()             # capped at the popup's height
+    calls = spy(fly, ("setGeometry", "resize", "move", "setFixedSize"))
+    for i in (3, 4):                              # a sync: the popup grows (upward)
+        p.cache.upsert_events("a", [MANY[i]])
+    p.refresh()
+    anim = p.height_animation()
+    assert anim is not None
+    seen = 0
+    for _ in frames(anim, 8):
+        assert calls["resize"] == 0 and calls["move"] == 0 and calls["setFixedSize"] == 0
+        assert calls["setGeometry"] <= 1
+        seen += calls["setGeometry"]
+        assert fly.geometry().bottom() <= p.geometry().bottom()   # never pokes below
+        assert fly.y() == p.y() and fly.height() == p.height()
+        for k in calls:
+            calls[k] = 0
+    assert seen >= 4
+    anim.resume()
+    settled(qtbot, p)
+    assert fly.geometry().bottom() == p.geometry().bottom() and fly.y() == p.y()
+
+
+def test_notice_slides_in_after_the_collapse(qtbot, tmp_path, animated):
+    p = shown_popup(qtbot, tmp_path, MANY)
+    right_click(rows(p)[1])
+    _menu_action(p, meeting_menus.HIDE_ONE).trigger()
+    collapse = p.height_animation()
+    collapse.pause()
+    collapse.setCurrentTime(collapse.duration())  # the collapse completes
+    QApplication.processEvents()
+    assert not p.collapsing()
+    assert p.revealing(p._notice_box)             # the notice is sliding in, not snapped
+    reveal = p.height_animation()
+    assert 0 <= reveal.currentTime() < reveal.duration()
+    assert p._notice_box.height() < p._natural_height(p._notice_box)
+    settled(qtbot, p)
+    assert p.notice_text() == meeting_menus.HIDDEN_NOTICE
+    assert p.height() == layout_height(p)
+
+
+def test_collapse_keeps_focus_and_scroll_position(qtbot, tmp_path, animated):
+    long = "with a title long enough to wrap onto a second line here"
+    events = [ev(str(i), f"Meeting {i} {long}", 9 + i) for i in range(8)]
+    p = shown_popup(qtbot, tmp_path, events, area=QRect(0, 0, 1000, 330), tray=BOTTOM_RIGHT)
+    bar = p._scroll.verticalScrollBar()
+    assert bar.maximum() > 0
+    bar.setValue(bar.maximum())                    # scrolled to the bottom
+    target = rows(p)[6]
+    target.setFocus()
+    qtbot.waitUntil(lambda: QApplication.focusWidget() is target)
+    value = bar.value()
+    right_click(target)
+    _menu_action(p, meeting_menus.HIDE_ONE).trigger()
+    assert p.collapsing()
+    assert bar.value() == value and QApplication.focusWidget() is target
+    settled(qtbot, p)
+    assert target.event.title not in titles(p)
+
+
+def test_only_the_row_under_the_cursor_looks_hovered_after_a_refresh(qtbot, tmp_path,
+                                                                     animated):
+    p = shown_popup(qtbot, tmp_path, MANY)
+    first = rows(p)[1]
+    point = first.mapToGlobal(first.rect().center())
+    p.cursor_pos = lambda: point                  # the mouse rests here
+    _enter(first)
+    qtbot.waitUntil(lambda: not p.row_fades_running())
+    p.cache.delete_event("a", "primary", MANY[0].id)   # rows shift up under the cursor
+    p.refresh()
+    settled(qtbot, p)
+    hovered = [r for r in rows(p) if r.is_hovered()]
+    under = [r for r in rows(p) if r.rect().contains(r.mapFromGlobal(point))]
+    assert hovered == under and len(hovered) == 1      # one row, the right one
+    assert all(r.background().name() == QColor(r.target_background()).name()
+               or r.target_background() == "transparent" for r in rows(p))
+    assert not p.row_fades_running()

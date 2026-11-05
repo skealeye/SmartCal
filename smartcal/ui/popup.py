@@ -362,6 +362,20 @@ class AgendaPopup(QWidget):
             self._fade_in([r for r in self.row_widgets() if isinstance(r, AgendaRow)
                            and _row_key(r.event) not in before])
         self._place_flyout()
+        self._sync_hover()
+
+    def _sync_hover(self) -> None:
+        """After a rebuild the rows may have moved under a still cursor: exactly the row
+        under it looks hovered (set at once, no fade)."""
+        try:
+            pos = self.cursor_pos()
+        except Exception:  # noqa: BLE001 - a hover look never breaks a refresh
+            return
+        for r in self.row_widgets():
+            if isinstance(r, AgendaRow):
+                inside = self.isVisible() and r.isVisible() \
+                    and r.rect().contains(r.mapFromGlobal(pos))
+                r.set_hovered(inside, animate=False)
 
     def _refresh(self, now: datetime | None) -> None:
         now = now or self.now()
@@ -552,8 +566,10 @@ class AgendaPopup(QWidget):
     def _tween_done(self, tw) -> None:
         if self._tween is not tw:
             return
-        self._end_tween(tw)
-        self._resize(animate=False)     # lands exactly on the measured final layout
+        self._end_tween(tw)             # runs its finish (which may start a new tween:
+        if self._tween is None:         # a collapse's notice slides in; never snap it)
+            self._resize(animate=False)     # lands exactly on the measured final layout
+            self._sync_hover()          # the rows may now sit elsewhere under the mouse
 
     def _end_tween(self, tw) -> None:
         self._tween = None
@@ -672,15 +688,22 @@ class AgendaPopup(QWidget):
             return
         h0, l0 = self.height(), self._scroll.height()
         heights = [max(1, r.height()) for r in rows]
-        for r in rows:                          # measure the list without them, once
-            r.hide()
-        l1, h1, content_h = self._measure()
-        for r in rows:
-            r.show()
-        self._scroll.setFixedHeight(l0)
-        if l1 is None or h1 is None:
-            on_done()
-            return
+        # The list without them, computed (not by hiding them: the right-clicked row
+        # usually has focus, and hiding it would move focus and scroll the list).
+        rows_lay = self._rows_box
+        inner_w = WIDTH - 20
+        content_h = (rows_lay.totalHeightForWidth(inner_w) if rows_lay.hasHeightForWidth()
+                     else rows_lay.sizeHint().height())
+        all_rows = [r for r in self.row_widgets() if isinstance(r, AgendaRow)]
+        left = len(all_rows) - len(rows)
+        removed = sum(heights) + rows_lay.spacing() * (len(rows) if left > 0
+                                                      else max(0, len(rows) - 1))
+        content_h = max(0, content_h - removed)
+        chrome = h0 - l0
+        max_total = min(MAX_HEIGHT, self._area().height() - 24)
+        l1 = max(40, min(content_h, max_total - chrome))
+        h1 = chrome + l1
+        self._final_height = h1
         fxs = []
         for r, h in zip(rows, heights):
             fx = QGraphicsOpacityEffect(r)
@@ -1545,6 +1568,17 @@ class AgendaRow(QFrame):
 
     def is_hovered(self) -> bool:
         return self._hovered
+
+    def set_hovered(self, hovered: bool, animate: bool = True) -> None:
+        if hovered == self._hovered:
+            return
+        self._hovered = hovered
+        if animate:
+            self._restyle()
+        else:
+            motion.stop(self._bg_anim)
+            self._bg_anim = None
+            self._set_bg(self._target_qcolor())
 
     def fading(self) -> bool:
         """Its background (or its Join button's) is still fading."""

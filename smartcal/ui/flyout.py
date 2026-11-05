@@ -340,27 +340,58 @@ class DetailsFlyout(QWidget):
             body_h += max(0, box.fit_height(width) - box.minimumHeight())
         return max(MIN_HEIGHT, h + body_h)
 
-    def _apply_size(self, size: QSize, animate: bool = True) -> None:
-        """Width at once; a height change of the open, visible panel tweens (InOutCubic,
-        motion.NORMAL) with the micro-animations on, else it is set at once."""
+    def _apply_size(self, size: QSize, animate: bool = True) -> QSize | None:
+        """The size the panel takes now (returned; None: unchanged, or its own height
+        tween owns the height). A height change of the open, visible panel tweens
+        (InOutCubic, motion.NORMAL) with the micro-animations on; else it is returned
+        for place() to apply together with the position, in one geometry change."""
         target_h = size.height()
-        if self.width() != size.width():
-            self.setFixedSize(size.width(), self.height())
+        width = size.width()
         if self._height_target == target_h and (self.height() == target_h
                                                 or self.height_animating()):
-            return
+            return QSize(width, self.height()) if self.width() != width else None
         self._stop_height_anim()
         self._height_target = target_h
         ms = motion.micro_duration(motion.NORMAL) \
             if animate and self.isVisible() and not self._closing else 0
         if not ms or self.height() == target_h:
-            self._resize_height(target_h)
-            return
+            now = QSize(width, target_h)
+            return now if now != self.size() else None
+        if self.width() != width:
+            self.setFixedSize(width, self.height())
         if self.body() is not None and self.content_height() <= target_h:
             # The content fits at the end: no scrollbar flashing in between.
             self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._height_anim = motion.tween(self, self.height(), target_h, ms,
                                          self._resize_height, self._height_anim_done)
+        return None
+
+    def _set_geometry(self, rect: QRect) -> None:
+        """Size and position in ONE native change (a resize then a move made the panel
+        poke below the popup for a frame while it followed the popup's own tween). The
+        fixed-size limits are widened/narrowed in the order that never resizes the
+        window by themselves; newly exposed pixels are painted in the same frame."""
+        if rect == self.geometry():
+            self._update_mask()
+            return
+        size = rect.size()
+        grow = size.height() > self.height() or size.width() > self.width()
+        big = QSize(max(size.width(), self.width()), max(size.height(), self.height()))
+        small = QSize(min(size.width(), self.width()), min(size.height(), self.height()))
+        self.setMaximumSize(big)                # widen first: no resize from the limits
+        self.setMinimumSize(small)
+        old = self._visible_region(self.pos())
+        new = self._visible_region(rect.topLeft())
+        shrinking = new is not None and old is not None \
+            and _area(new, self.rect()) < _area(old, self.rect())
+        if shrinking:
+            self._apply_mask(new)       # shrinking visible part: mask before moving
+        self.setGeometry(rect)
+        self.setMinimumSize(size)               # ...then fixed at the new size
+        self.setMaximumSize(size)
+        self._update_mask()
+        if grow and self.isVisible():
+            self.repaint()
 
     def _height_anim_done(self) -> None:
         self._height_anim = None
@@ -484,7 +515,7 @@ class DetailsFlyout(QWidget):
         the popup (`tucked`); `behind` is the popup's rect it slides behind (None: no
         slide, e.g. over the popup on a narrow screen). While a slide runs, the slide
         owns the position: only its end moves. Fade-only mode: always docked."""
-        self._apply_size(size, animate)
+        now = self._apply_size(size, animate)
         if self.isHidden():
             self._mode = slide_mode()   # read per opening: no restart needed to switch
         if self._mode == "fade":
@@ -493,11 +524,20 @@ class DetailsFlyout(QWidget):
         self._behind = QRect(behind) if behind is not None else None
         self._side = "right" if docked.x() > tucked.x() else "left"
         if self.isHidden():
+            if now is not None:
+                self.setFixedSize(now)
             return                      # nothing on screen: no move, no window region
         if self._anim.state() == QPropertyAnimation.State.Running:
+            if now is not None:
+                self.setFixedSize(now)  # the slide owns the position
             self._anim.setEndValue(self._tucked if self._closing else self._docked)
-        elif (self._mode == "fade" or not self._closing) and self.pos() != self._docked:
-            self._move_to(self._docked)
+        elif self._mode == "fade" or not self._closing:
+            # Docked: size and position together, once (e.g. following the popup's
+            # height tween, where the popup's top moves every frame).
+            self._set_geometry(QRect(self._docked, now if now is not None else self.size()))
+            return
+        elif now is not None:
+            self.setFixedSize(now)
         self._update_mask()
 
     # -- the slide ---------------------------------------------------------------
