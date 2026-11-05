@@ -4,7 +4,7 @@ SmartCal is a Windows tray calendar app. It merges your personal and work Google
 
 ## How it works
 
-- **Synced range:** SmartCal keeps your events from 7 days ago to 60 days ahead (refreshed every 5 minutes). The week and month windows show **Not synced for these dates** past that range, and the assistant says it cannot see those dates instead of calling them free.
+- **Synced range:** SmartCal keeps your events from 7 days ago (or from the start of this month's grid, if that is earlier, so the current month view is always complete) to 60 days ahead, refreshed every 5 minutes. The week and month windows show **Not synced for these dates** past that range. The assistant only trusts the dates every account has actually synced: if an account needs you to sign in again, was offline, or has not finished its first sync, it says it cannot see those dates (or that the account hasn't finished syncing yet) instead of calling them free.
 - **One copy running:** starting SmartCal again (for example from the Start Menu while it already started at login) just opens the running copy's popup.
 - **Declined meetings** are left out of the agenda, reminders and free-time search; the week and month windows show them dimmed and struck through.
 - **Shared calendars** (for example your personal calendar also subscribed in the work account) count once: events and reminders are not doubled, and in Settings the calendar is set up under the account that owns it.

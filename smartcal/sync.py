@@ -12,20 +12,25 @@ from .google_auth import ReauthRequired
 
 log = logging.getLogger(__name__)
 
-# The synced range: local days [today - SYNC_PAST_DAYS, today + SYNC_FUTURE_DAYS].
-# Everything that reads the cache (window, assistant) must respect it.
+# The synced range: local days [past edge, today + SYNC_FUTURE_DAYS], where the past
+# edge is the earlier of today - SYNC_PAST_DAYS and the first day of the month grid
+# that contains today (so the current month view never has unsynced days).
+# Everything that reads or prunes the cache (window, assistant, sync) uses sync_window.
 SYNC_PAST_DAYS = 7
 SYNC_FUTURE_DAYS = 60
 
 
 def synced_days(now: datetime) -> tuple[date, date]:
-    """First and last local day (both inclusive) that the cache holds."""
+    """First and last local day (both inclusive) that a sync at `now` covers."""
+    from .ui.layout import month_grid   # pure date math, no widgets
     today = agenda.local_date(now)
-    return today - timedelta(days=SYNC_PAST_DAYS), today + timedelta(days=SYNC_FUTURE_DAYS)
+    first = min(today - timedelta(days=SYNC_PAST_DAYS), month_grid(today.year, today.month)[0])
+    return first, today + timedelta(days=SYNC_FUTURE_DAYS)
 
 
 def sync_window(now: datetime) -> tuple[datetime, datetime]:
-    """[start, end) of the synced range: local midnights, DST-safe."""
+    """[start, end) of the synced range: local midnights, DST-safe. The one window
+    used by sync, prune, the window's banner and the recorded sync state."""
     first, last = synced_days(now)
     return agenda.midnight(first, now), agenda.midnight(last + timedelta(days=1), now)
 
@@ -55,6 +60,7 @@ class SyncWorker(QThread):
         self.interval_seconds = interval_seconds
         self._wake = threading.Event()
         self._stop = threading.Event()
+        self.clock = lambda: datetime.now().astimezone()
 
     def _accounts(self) -> list[str]:
         return []   # LiveSyncWorker reads the stored accounts
@@ -67,7 +73,8 @@ class SyncWorker(QThread):
 
         Stores every calendar's events (hidden ones too); hiding is a read-time filter.
         """
-        start, end = sync_window(datetime.now().astimezone())
+        now = self.clock()
+        start, end = sync_window(now)
         try:
             client = self._client(account)
             calendars = client.list_calendars()
@@ -84,6 +91,7 @@ class SyncWorker(QThread):
         self.cache.upsert_calendars(account, calendars)
         self.cache.replace_range(account, start, end, events)
         self.cache.prune_outside(account, start, end)   # days that left the window
+        self.cache.record_sync(account, start, end, now)   # only after a full success
         return "ok"
 
     def sync_all(self) -> None:

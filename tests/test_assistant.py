@@ -19,6 +19,7 @@ from smartcal.maps import directions_url
 from smartcal.models import Event
 from smartcal.reminders import Reminders
 from smartcal.settings import Settings
+from smartcal.sync import sync_window
 from smartcal.undo import UndoStore
 
 NY = ZoneInfo("America/New_York")
@@ -82,7 +83,7 @@ def tool_results(call):
 
 
 def make(tmp_path, claude, events=(), accounts=("a@x.com",), extra_cals=(), clock=None,
-         hidden=()):
+         hidden=(), synced=True):
     cache = Cache(tmp_path / "c.db")
     clients = {a: FakeClient(a, [e for e in events if e.account == a]) for a in accounts}
     for a in accounts:
@@ -95,6 +96,10 @@ def make(tmp_path, claude, events=(), accounts=("a@x.com",), extra_cals=(), cloc
     store = UndoStore(tmp_path / "undo.json")
     actions = Actions(lambda a: clients[a], cache, store, settings)
     clock = clock or (lambda: NOW)
+    if synced:   # as if every account just finished a successful sync
+        lo, hi = sync_window(clock())
+        for a in accounts:
+            cache.record_sync(a, lo, hi, clock())
     reminders = Reminders(tmp_path / "r.json", clock=clock)
     a = Assistant(claude, actions, reminders, settings, cache, undo=store, clock=clock)
     return a, clients, cache, reminders

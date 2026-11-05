@@ -36,7 +36,6 @@ from .config import data_dir
 from .google_auth import ReauthRequired
 from .google_client import http_status
 from .maps import directions_url
-from .sync import sync_window, synced_days
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +63,7 @@ You are the calendar assistant inside SmartCal, a Windows desktop calendar app. 
 owner with their Google calendars, and you can also answer general questions.
 
 Current local date and time: {now}. Time zone: {zone}.
-Synced range: SmartCal only has the owner's events from {synced_first} to {synced_last}. \
+Synced range: {synced} \
 For dates outside that range, say SmartCal cannot see them; never assume they are free.
 
 Rules:
@@ -680,22 +679,55 @@ class Assistant:
         local = now.astimezone(zone) if zone else now.astimezone()
         zone_name = getattr(zone, "key", None) or local.tzname() or "local"
         offset = local.strftime("%z")
-        first, last = synced_days(now)
+        known = self._known_window(now)
+        if isinstance(known, str):
+            synced = f"{known}; SmartCal cannot see the owner's events yet."
+        else:
+            first, last = self._window_days(known, now)
+            synced = (f"SmartCal only has the owner's events from {first.isoformat()} "
+                      f"to {last.isoformat()}.")
         return SYSTEM_PROMPT.format(
             now=f"{local:%A, %B} {local.day}, {local:%Y} {local:%H:%M}",
             zone=f"{zone_name} (UTC{offset[:3]}:{offset[3:]})",
-            synced_first=first.isoformat(), synced_last=last.isoformat(),
-            calendar=self.calendar_block(now))
+            synced=synced, calendar=self.calendar_block(now))
+
+    def _known_window(self, now: datetime) -> tuple[datetime, datetime] | str:
+        """[start, end) that every active account actually synced, or why there is none.
+
+        This is what the cache really holds, not the range the clock suggests: an
+        account that needs re-auth, was offline for days or has not finished its
+        first sync (e.g. right after an upgrade) narrows it or empties it."""
+        active = list(self._active())
+        if not active:
+            return "no calendars synced yet"
+        windows = self.cache.sync_windows()
+        missing = [a for a in active if a not in windows]
+        if missing:
+            return " and ".join(_line(a, 200) for a in missing) + \
+                (" hasn't" if len(missing) == 1 else " haven't") + " finished syncing yet"
+        window = self.cache.synced_window(active)
+        return window if window is not None else "no calendars synced yet"
 
     @staticmethod
-    def _require_synced(now: datetime, start: datetime, end: datetime | None = None) -> None:
-        """Refuse dates the cache does not hold: there, "no events" would be a lie."""
-        lo, hi = sync_window(now)
-        end = start if end is None else end
-        if start < lo or start >= hi or end > hi:
-            first, last = synced_days(now)
+    def _window_days(window: tuple[datetime, datetime], now: datetime) -> tuple[date, date]:
+        lo, hi = window
+        return agenda.local_date(lo), agenda.local_date(hi - timedelta(microseconds=1))
+
+    def _require_synced(self, now: datetime, start: datetime | None = None,
+                        end: datetime | None = None) -> None:
+        """Refuse dates the cache does not hold: there, "no events" would be a lie.
+        A start must lie in [lo, hi); an (exclusive) end in (lo, hi]."""
+        known = self._known_window(now)
+        if isinstance(known, str):
+            raise _ToolError(f"{known}, so SmartCal cannot see that date; never assume it is free")
+        lo, hi = known
+        bad = (start is not None and not lo <= start < hi) or \
+              (end is not None and not lo < end <= hi)
+        if bad:
+            first, last = self._window_days(known, now)
             raise _ToolError(f"that date is outside the synced range "
-                             f"({first.isoformat()}..{last.isoformat()})")
+                             f"({first.isoformat()}..{last.isoformat()}); "
+                             f"SmartCal only knows events in that window")
 
     # -- tools ---------------------------------------------------------------
     def _run_tools(self, uses, turn: _Turn, now: datetime):
@@ -804,10 +836,12 @@ class Assistant:
         minutes = _int(args, "duration_minutes", 5, 1440, required=True)
         h0 = _int(args, "working_start_hour", 0, 23, default=9)
         h1 = _int(args, "working_end_hour", 1, 24, default=17)
-        first, last = synced_days(now)
-        if not first <= day <= last:   # nothing cached there: never report a free day
-            raise _ToolError(f"that date is outside the synced range "
-                             f"({first.isoformat()}..{last.isoformat()})")
+        try:
+            bounds = agenda.midnight(day, now), agenda.midnight(day + timedelta(days=1), now)
+        except (OverflowError, ValueError):
+            raise _ToolError("date is out of range") from None
+        # Nothing cached there (or an account never synced): never report a free day.
+        self._require_synced(now, *bounds)
         slots = self.actions.free_slots(day, timedelta(minutes=minutes), (h0, h1), now=now)
         return {"free": [[s.isoformat(), e.isoformat()] for s, e in slots[:20]]}
 
@@ -914,9 +948,8 @@ class Assistant:
         for k in raw:
             fields[k] = self._dt(raw, k, now) if k in ("start", "end") \
                 else _text(raw, k, required=(k == "title"), allow_empty=(k != "title"))
-        for k in ("start", "end"):
-            if k in fields:
-                self._require_synced(now, fields[k])
+        # An end is exclusive: one exactly at the window's end is still inside.
+        self._require_synced(now, fields.get("start"), fields.get("end"))
         event_id, account, calendar_id = self._locate(args)
         key = (account, calendar_id, event_id, "update",
                _json({k: (v.isoformat() if isinstance(v, datetime) else v)

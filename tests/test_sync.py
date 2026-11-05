@@ -104,16 +104,19 @@ def test_sync_window_is_last_week_to_two_months_ahead(cache, tmp_path):
     now = datetime.now().astimezone()
     today = agenda.local_date(now)
     assert sync.SYNC_PAST_DAYS == 7 and sync.SYNC_FUTURE_DAYS == 60
-    assert seen == [(agenda.midnight(today - timedelta(days=7), now),
+    from smartcal.ui.layout import month_grid
+    first = min(today - timedelta(days=7), month_grid(today.year, today.month)[0])
+    assert seen == [(agenda.midnight(first, now),
                      agenda.midnight(today + timedelta(days=61), now))]
-    assert sync.synced_days(now) == (today - timedelta(days=7), today + timedelta(days=60))
+    assert sync.synced_days(now) == (first, today + timedelta(days=60))
     assert sync.sync_window(now) == seen[0]
 
 
 def test_sync_prunes_rows_outside_the_window(cache, tmp_path):
     now = datetime.now().astimezone()
     old, inside = _ev("old"), _ev("inside")
-    old.start, old.end = now - timedelta(days=20), now - timedelta(days=20, hours=-1)
+    # 50 days back is always outside, even late in a month (the month grid is kept).
+    old.start, old.end = now - timedelta(days=50), now - timedelta(days=50, hours=-1)
     far = _ev("far")
     far.start, far.end = now + timedelta(days=90), now + timedelta(days=90, hours=1)
     other = _ev("other-account")

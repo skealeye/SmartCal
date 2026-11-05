@@ -47,6 +47,12 @@ CREATE TABLE IF NOT EXISTS calendars (
     is_primary INTEGER NOT NULL,
     PRIMARY KEY (account, id)
 );
+CREATE TABLE IF NOT EXISTS sync_state (
+    account TEXT PRIMARY KEY,
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    synced_at TEXT NOT NULL
+);
 """
 
 _INSERT = """
@@ -134,6 +140,36 @@ class Cache:
         with closing(self._connect()) as con, con:
             con.execute("DELETE FROM events WHERE account = ?", (account,))
             con.execute("DELETE FROM calendars WHERE account = ?", (account,))
+            con.execute("DELETE FROM sync_state WHERE account = ?", (account,))
+
+    # -- sync state ----------------------------------------------------------------
+    def record_sync(self, account: str, start: datetime, end: datetime,
+                    synced_at: datetime) -> None:
+        """Remember the [start, end) window of the account's last SUCCESSFUL sync."""
+        with closing(self._connect()) as con, con:
+            con.execute(
+                "INSERT OR REPLACE INTO sync_state (account, window_start, window_end, synced_at)"
+                " VALUES (?,?,?,?)",
+                (account, _aware(start).isoformat(), _aware(end).isoformat(),
+                 _aware(synced_at).isoformat()))
+
+    def sync_windows(self) -> dict[str, tuple[datetime, datetime]]:
+        """Account -> [start, end) of its last successful sync (absent: never synced)."""
+        with closing(self._connect()) as con:
+            rows = con.execute("SELECT * FROM sync_state").fetchall()
+        return {r["account"]: (datetime.fromisoformat(r["window_start"]),
+                               datetime.fromisoformat(r["window_end"])) for r in rows}
+
+    def synced_window(self, accounts) -> tuple[datetime, datetime] | None:
+        """The window every given account has synced: the narrowest (intersection).
+        None if `accounts` is empty, any of them never synced, or they do not overlap."""
+        accounts = list(accounts)
+        windows = self.sync_windows()
+        if not accounts or any(a not in windows for a in accounts):
+            return None
+        start = max(windows[a][0] for a in accounts)
+        end = min(windows[a][1] for a in accounts)
+        return (start, end) if start < end else None
 
     def purge_orphans(self, accounts) -> int:
         """Delete events and calendars of accounts not in `accounts` (e.g. rows a sync
@@ -144,6 +180,7 @@ class Cache:
         with closing(self._connect()) as con, con:
             n = con.execute(f"DELETE FROM events WHERE {where}", keep).rowcount
             n += con.execute(f"DELETE FROM calendars WHERE {where}", keep).rowcount
+            con.execute(f"DELETE FROM sync_state WHERE {where}", keep)
         return n
 
     def calendars_by_account(self) -> dict[str, list[CalendarInfo]]:
