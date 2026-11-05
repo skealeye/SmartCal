@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (QButtonGroup, QDialog, QFrame, QGraphicsOpacityEffe
 
 from .. import agenda
 from ..config import data_dir
+from ..sync import synced_days
 from . import layout, theme
 
 HOUR_H = 48
@@ -450,6 +451,12 @@ class CalendarWindow(QMainWindow):
             bar.addWidget(b)
             self.view_buttons[name] = b
         root.addLayout(bar)
+        self.unsynced_label = QLabel()
+        self.unsynced_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.unsynced_label.setWordWrap(True)
+        self.unsynced_label.setStyleSheet(f"color:{theme.WARN};padding:4px 2px;")
+        self.unsynced_label.hide()
+        root.addWidget(self.unsynced_label)
         self.stack = QStackedWidget()
         self.time_view = TimeView()
         self.month_view = MonthView()
@@ -548,6 +555,7 @@ class CalendarWindow(QMainWindow):
             self._pending_reset = True
         self.title_label.setText(layout.title_for(self.view, self.anchor))
         self.view_buttons[self.view].setChecked(True)
+        self._update_unsynced(self.visible_dates(), self.now())
         if not self.isVisible():
             self._stale = True
             return
@@ -565,6 +573,20 @@ class CalendarWindow(QMainWindow):
         else:
             self.time_view.set_data(dates, by_day, ref, reset_scroll)
             self.stack.setCurrentWidget(self.time_view)
+
+    def _update_unsynced(self, dates: list[date], ref: datetime) -> None:
+        """Warn when the shown days reach past the synced range (they would look empty)."""
+        first, last = synced_days(ref)
+        outside = dates[0] < first or dates[-1] > last
+        if outside:
+            self.unsynced_label.setText(
+                f"Not synced for these dates. SmartCal keeps events from "
+                f"{layout.month_short(first)} {first.day} to {layout.month_short(last)} "
+                f"{last.day}, {last.year}.")
+        self.unsynced_label.setVisible(outside)
+
+    def unsynced_shown(self) -> bool:
+        return not self.unsynced_label.isHidden()
 
     def _tick(self) -> None:
         if self.isVisible():

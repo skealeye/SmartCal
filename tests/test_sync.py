@@ -91,6 +91,41 @@ def test_unhiding_calendar_shows_cached_events_without_resync(cache, tmp_path):
     assert agenda.next_event(cache, st, now).id == "2"
 
 
+def test_sync_window_is_last_week_to_two_months_ahead(cache, tmp_path):
+    from smartcal import agenda, sync
+    seen = []
+
+    class Recording(FakeClient):
+        def list_events(self, start, end):
+            seen.append((start, end))
+            return []
+
+    assert worker(cache, Recording(), tmp_path).sync_account("a") == "ok"
+    now = datetime.now().astimezone()
+    today = agenda._local_date(now)
+    assert sync.SYNC_PAST_DAYS == 7 and sync.SYNC_FUTURE_DAYS == 60
+    assert seen == [(agenda._midnight(today - timedelta(days=7), now),
+                     agenda._midnight(today + timedelta(days=61), now))]
+    assert sync.synced_days(now) == (today - timedelta(days=7), today + timedelta(days=60))
+    assert sync.sync_window(now) == seen[0]
+
+
+def test_sync_prunes_rows_outside_the_window(cache, tmp_path):
+    now = datetime.now().astimezone()
+    old, inside = _ev("old"), _ev("inside")
+    old.start, old.end = now - timedelta(days=20), now - timedelta(days=20, hours=-1)
+    far = _ev("far")
+    far.start, far.end = now + timedelta(days=90), now + timedelta(days=90, hours=1)
+    other = _ev("other-account")
+    other.start, other.end = old.start, old.end
+    cache.upsert_events("a", [old, far])
+    cache.upsert_events("b", [other])
+    assert worker(cache, FakeClient([inside]), tmp_path).sync_account("a") == "ok"
+    ids = {(e.account, e.id) for e in cache.events_between(now - timedelta(days=400),
+                                                           now + timedelta(days=400))}
+    assert ids == {("a", "inside"), ("b", "other-account")}
+
+
 def test_dns_failure_is_offline(cache, tmp_path):
     import httplib2
     for err in (httplib2.ServerNotFoundError("dns"), TimeoutError("t")):

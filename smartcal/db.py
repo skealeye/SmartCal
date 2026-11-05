@@ -157,6 +157,14 @@ class Cache:
             )
             con.executemany(_INSERT, [_row(account, e) for e in events])
 
+    def prune_outside(self, account: str, start: datetime, end: datetime) -> None:
+        """Drop the account's events that do not overlap [start, end) (no longer synced)."""
+        with closing(self._connect()) as con, con:
+            con.execute(
+                "DELETE FROM events WHERE account = ? AND (end_ts <= ? OR start_ts >= ?)",
+                (account, _aware(start).timestamp(), _aware(end).timestamp()),
+            )
+
     @staticmethod
     def _event(r: sqlite3.Row) -> Event:
         return Event(

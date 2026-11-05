@@ -3,13 +3,31 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from . import agenda
 from .google_auth import ReauthRequired
 
 log = logging.getLogger(__name__)
+
+# The synced range: local days [today - SYNC_PAST_DAYS, today + SYNC_FUTURE_DAYS].
+# Everything that reads the cache (window, assistant) must respect it.
+SYNC_PAST_DAYS = 7
+SYNC_FUTURE_DAYS = 60
+
+
+def synced_days(now: datetime) -> tuple[date, date]:
+    """First and last local day (both inclusive) that the cache holds."""
+    today = agenda._local_date(now)
+    return today - timedelta(days=SYNC_PAST_DAYS), today + timedelta(days=SYNC_FUTURE_DAYS)
+
+
+def sync_window(now: datetime) -> tuple[datetime, datetime]:
+    """[start, end) of the synced range: local midnights, DST-safe."""
+    first, last = synced_days(now)
+    return agenda._midnight(first, now), agenda._midnight(last + timedelta(days=1), now)
 
 
 def _classify(exc: BaseException) -> str:
@@ -50,9 +68,7 @@ class SyncWorker(QThread):
 
         Stores every calendar's events (hidden ones too); hiding is a read-time filter.
         """
-        now = datetime.now().astimezone()
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
-        end = now + timedelta(days=14)
+        start, end = sync_window(datetime.now().astimezone())
         try:
             client = self._client(account)
             calendars = client.list_calendars()
@@ -68,6 +84,7 @@ class SyncWorker(QThread):
             return result
         self.cache.upsert_calendars(account, calendars)
         self.cache.replace_range(account, start, end, events)
+        self.cache.prune_outside(account, start, end)   # days that left the window
         return "ok"
 
     def sync_all(self) -> None:
