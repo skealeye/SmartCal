@@ -12,6 +12,8 @@ overlaps the popup, the overlapping part is masked away."""
 from __future__ import annotations
 
 import html
+import math
+import os
 
 from PyQt6.QtCore import (QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRect, QSize, Qt,
                           QTimer, pyqtProperty)
@@ -24,6 +26,13 @@ from ..textutil import html_to_text, meeting_label, safe_http_url
 from . import layout, meeting_menus, motion, theme
 from .linktext import LinkText, plain_tip
 from .popup import WIDTH   # one source of truth: the panel is as wide as the popup
+
+# True: the panel slides out from behind the popup, the overlapping part hidden by a
+# window mask. Set it False to fall back to a fade-only open/close (no overlap and no
+# mask: the panel sits docked next to the popup and only fades, same durations) if the
+# mask flickers on some display. SMARTCAL_SLIDE_MODE=fade picks that without a rebuild.
+SLIDE_USES_MASK = True
+SLIDE_MODE_ENV = "SMARTCAL_SLIDE_MODE"
 
 MARGINS = 10
 DESCRIPTION_MIN_LINES = 3       # the description fills the rest of the panel; at least this
@@ -42,6 +51,43 @@ def _set_scroll(box, value: int) -> None:
 def _scrollbar_w() -> int:
     style = QApplication.style()
     return style.pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent) if style else 12
+
+
+def slide_mode() -> str:
+    """"slide": out from behind the popup, the overlap hidden by a window mask.
+    "fade": docked beside the popup from the start, only fading in and out (same
+    durations); no mask. SLIDE_USES_MASK picks the default; SMARTCAL_SLIDE_MODE=fade
+    (or =slide) overrides it without a rebuild."""
+    env = os.environ.get(SLIDE_MODE_ENV, "").strip().lower()
+    if env in ("fade", "slide"):
+        return env
+    return "slide" if SLIDE_USES_MASK else "fade"
+
+
+def px_before_edge(x: int, edge: int, dpr: float) -> int:
+    """Logical pixels of a window at `x` that lie left of `edge`, rounded down in device
+    pixels (never reaching the edge at fractional scaling)."""
+    return max(0, math.floor((round(edge * dpr) - round(x * dpr)) / dpr))
+
+
+def px_until_edge(x: int, edge: int, dpr: float) -> int:
+    """Logical pixels from a window's left at `x` up to `edge`, rounded up in device
+    pixels (whatever is kept right of it never reaches back over the edge)."""
+    return max(0, math.ceil((round(edge * dpr) - round(x * dpr)) / dpr))
+
+
+class _NotesBox(LinkText):
+    """The description box: prefers its minimum height (it grows into whatever room the
+    panel has left, through its Expanding policy), so a short panel scrolls the body
+    instead of stretching the box to QTextBrowser's default height."""
+
+    def sizeHint(self) -> QSize:
+        return QSize(super().sizeHint().width(), self.minimumHeight())
+
+
+def _area(region: QRegion | None, full: QRect) -> int:
+    r = region.boundingRect() if region is not None else full
+    return 0 if region is not None and region.isEmpty() else r.width() * r.height()
 
 
 
@@ -73,9 +119,7 @@ class DetailsFlyout(QWidget):
         pal.setColor(QPalette.ColorRole.Window, QColor(theme.BG))
         self.setPalette(pal)
         self.setObjectName("flyout")
-        self.setStyleSheet(
-            f"#flyout{{background:{theme.BG};border:1px solid {theme.BORDER};}}"
-            f"QLabel{{color:{theme.TEXT};font-size:12px;}}")
+        self.setStyleSheet(theme.window_style("flyout"))   # the popup's own look
         w = WIDTH
         self.setFixedSize(w, max(1, popup.height()))
         outer = QVBoxLayout(self)
@@ -95,9 +139,14 @@ class DetailsFlyout(QWidget):
         self._scroll.setStyleSheet("QScrollArea{background:transparent;}")
         self._scroll.viewport().setAutoFillBackground(False)
         outer.addWidget(self._scroll, 1)
-        # The slide: the window position, animated (see _set_slide_pos).
+        self._mode = slide_mode()
+        self._side = "left"
+        # The slide: the window position, animated (see _set_slide_pos). Fade-only
+        # mode animates the window opacity instead.
         self._anim = QPropertyAnimation(self, b"slide_pos", self)
         self._anim.finished.connect(self._slide_finished)
+        self._fade = QPropertyAnimation(self, b"windowOpacity", self)
+        self._fade.finished.connect(self._slide_finished)
 
     # -- content -------------------------------------------------------------
     def body(self) -> QWidget | None:
@@ -191,14 +240,15 @@ class DetailsFlyout(QWidget):
         description = html_to_text(ev.description or "")
         has_desc = bool(description)
         if has_desc:
-            desc = LinkText(description)
+            desc = _NotesBox(description)
             desc.setObjectName("description")
             desc.setStyleSheet(f"QTextBrowser{{background:{theme.BG};color:{theme.TEXT};"
                                f"border:1px solid {theme.BORDER};font-size:11px;}}")
-            # Fills the rest of the panel (up to its whole text), scrolls beyond that.
-            full = desc.fit_height(width)
-            desc.setMinimumHeight(min(full, desc.fit_height(width, DESCRIPTION_MIN_LINES)))
-            desc.setMaximumHeight(full)
+            # Fills the rest of the panel down to the buttons and scrolls beyond that; no
+            # height cap. Measured after the style sheet (font, border) is applied.
+            desc.ensurePolished()
+            desc.setMinimumHeight(min(desc.fit_height(width),
+                                      desc.fit_height(width, DESCRIPTION_MIN_LINES)))
             desc.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
             desc.link_opened.connect(lambda _u: popup.hide())
             # Out of the Tab chain (Join -> Hide… -> Color…); links still click.
@@ -252,7 +302,8 @@ class DetailsFlyout(QWidget):
             for b in (hide_btn, color_btn):
                 b.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         lay.addLayout(actions)
-        lay.addStretch(1)               # spare height stays below the buttons
+        if not has_desc:
+            lay.addStretch(1)           # no notes: spare height stays below the buttons
         return box
 
     # -- focus ---------------------------------------------------------------
@@ -303,69 +354,105 @@ class DetailsFlyout(QWidget):
         """Size the panel and set where it docks (`docked`) and where it hides behind
         the popup (`tucked`); `behind` is the popup's rect it slides behind (None: no
         slide, e.g. over the popup on a narrow screen). While a slide runs, the slide
-        owns the position: only its end moves."""
+        owns the position: only its end moves. Fade-only mode: always docked."""
         if self.size() != size:
             self.setFixedSize(size)
+        if self.isHidden():
+            self._mode = slide_mode()   # read per opening: no restart needed to switch
+        if self._mode == "fade":
+            tucked, behind = docked, None
         self._docked, self._tucked = QPoint(docked), QPoint(tucked)
         self._behind = QRect(behind) if behind is not None else None
-        if self.sliding():
+        self._side = "right" if docked.x() > tucked.x() else "left"
+        if self.isHidden():
+            return                      # nothing on screen: no move, no window region
+        if self._anim.state() == QPropertyAnimation.State.Running:
             self._anim.setEndValue(self._tucked if self._closing else self._docked)
-        elif not self.isHidden() and not self._closing and self.pos() != self._docked:
+        elif (self._mode == "fade" or not self._closing) and self.pos() != self._docked:
             self._move_to(self._docked)
         self._update_mask()
 
     # -- the slide ---------------------------------------------------------------
     def sliding(self) -> bool:
-        return self._anim.state() == QPropertyAnimation.State.Running
+        running = QPropertyAnimation.State.Running
+        return self._anim.state() == running or self._fade.state() == running
 
     def closing(self) -> bool:
         """Sliding back: still visible, already closed for the popup."""
         return self._closing
 
+    def mode(self) -> str:
+        """"slide" (out from behind the popup, masked) or "fade" (docked, fades)."""
+        return self._mode
+
     def slide_open(self, ms: int) -> None:
         """Show (tucked behind the popup) and slide out to the docked position; while
-        sliding back, turn around from where it is. `ms` 0: dock at once."""
+        sliding back, turn around from where it is. `ms` 0: dock at once. In fade-only
+        mode: shown docked, fading in."""
         self._closing = False
         if self.isHidden():
-            self._anim.stop()
-            # Instant (animations off): straight to the dock, never masked.
-            self._move_to(self._tucked if ms > 0 else self._docked)
+            self._stop_animations()
+            if self._mode == "fade":
+                self.move(self._docked)
+                self._set_opacity(0.0 if ms > 0 else 1.0)
+            else:
+                # Instant (animations off): straight to the dock, never masked.
+                self.move(self._tucked if ms > 0 else self._docked)
+                self._apply_mask(self._visible_region(self.pos()))   # before it shows
             self.show()                 # WA_ShowWithoutActivating: the popup keeps focus
-            start = QPoint(self._tucked)
-        else:
-            start = self.pos()
-        if not self._run(start, self._docked, ms, QEasingCurve.Type.OutCubic):
+        if not self._run(opening=True, ms=ms):
             self._move_to(self._docked)
+            self._set_opacity(1.0)
             self._update_mask()
 
     def slide_close(self, ms: int) -> None:
-        """Slide back behind the popup, then hide. `ms` 0: hide at once."""
+        """Slide back behind the popup (fade-only: fade out), then hide. `ms` 0: hide at
+        once."""
         self._closing = True
-        if not self._run(self.pos(), self._tucked, ms, QEasingCurve.Type.InCubic):
+        if not self._run(opening=False, ms=ms):
             self._finish_close(notify=False)
 
     def hide_now(self) -> None:
         """Hidden at once, no slide (the popup went away)."""
-        self._anim.stop()
+        self._stop_animations()
         self._closing = False
-        self._clear_mask()
-        self.hide()
+        self.hide()                     # hidden first: unmasking never flashes it over
+        self._clear_mask()              # the popup
+        self._set_opacity(1.0)
 
-    def _run(self, start: QPoint, end: QPoint, ms: int, curve) -> bool:
-        """Animate start -> end; the time is `ms` scaled by the share of the full slide
-        left to go (a turnaround midway takes part of it). False: nothing to animate."""
+    def _stop_animations(self) -> None:
         self._anim.stop()
-        span = abs(self._docked.x() - self._tucked.x()) + abs(self._docked.y() - self._tucked.y())
-        left = abs(end.x() - start.x()) + abs(end.y() - start.y())
-        if span > 0:
-            ms = int(round(ms * min(1.0, left / span)))
-        if ms <= 0 or left == 0:
-            return False
-        self._anim.setDuration(ms)
-        self._anim.setStartValue(QPoint(start))
-        self._anim.setEndValue(QPoint(end))
-        self._anim.setEasingCurve(QEasingCurve(curve))
-        self._anim.start()
+        self._fade.stop()
+
+    def _run(self, opening: bool, ms: int) -> bool:
+        """Animate toward docked (opening) or tucked; the time is `ms` scaled by the
+        share of the way left to go (a turnaround midway takes part of it). False:
+        nothing to animate."""
+        self._stop_animations()
+        curve = QEasingCurve(QEasingCurve.Type.OutCubic if opening
+                             else QEasingCurve.Type.InCubic)
+        if self._mode == "fade":
+            start, end = self.windowOpacity(), (1.0 if opening else 0.0)
+            ms = int(round(ms * min(1.0, abs(end - start))))
+            if ms <= 0:
+                return False
+            anim = self._fade
+        else:
+            start = self.pos()
+            end = QPoint(self._docked if opening else self._tucked)
+            span = (abs(self._docked.x() - self._tucked.x())
+                    + abs(self._docked.y() - self._tucked.y()))
+            left = abs(end.x() - start.x()) + abs(end.y() - start.y())
+            if span > 0:
+                ms = int(round(ms * min(1.0, left / span)))
+            if ms <= 0 or left == 0:
+                return False
+            anim = self._anim
+        anim.setDuration(ms)
+        anim.setStartValue(start)
+        anim.setEndValue(end)
+        anim.setEasingCurve(curve)
+        anim.start()
         return True
 
     def _slide_finished(self) -> None:
@@ -373,15 +460,21 @@ class DetailsFlyout(QWidget):
             self._finish_close(notify=True)
         else:
             self._update_mask()         # docked: nothing to mask
+            self._set_opacity(1.0)
 
     def _finish_close(self, notify: bool) -> None:
         was_active = self._popup.active_window() is self
-        self._anim.stop()
+        self._stop_animations()
         self._closing = False
-        self._clear_mask()
-        self.hide()
+        self.hide()                     # hidden first: unmasking never flashes it over
+        self._clear_mask()              # the popup
+        self._set_opacity(1.0)          # the next (maybe instant) open starts opaque
         if notify:
             self._popup._flyout_slid_back(was_active)
+
+    def _set_opacity(self, value: float) -> None:
+        if self.windowOpacity() != value:
+            self.setWindowOpacity(value)
 
     def _get_slide_pos(self) -> QPoint:
         return self.pos()
@@ -392,38 +485,47 @@ class DetailsFlyout(QWidget):
     slide_pos = pyqtProperty(QPoint, fget=_get_slide_pos, fset=_set_slide_pos)
 
     def _visible_region(self, pos: QPoint) -> QRegion | None:
-        """The part of the panel at `pos` that is not behind the popup (local coords);
-        None when nothing is behind it."""
+        """The part of the panel at `pos` that is not behind the popup (local coords),
+        rounded in device pixels so it never reaches over the popup's edge at 125% or
+        150% scaling; None when nothing is behind it."""
         if self._behind is None:
             return None
-        here = QRect(pos, self.size())
-        overlap = here.intersected(self._behind)
-        if overlap.isEmpty():
+        if not QRect(pos, self.size()).intersects(self._behind):
             return None
-        return QRegion(self.rect()).subtracted(QRegion(overlap.translated(-pos)))
-
-    def _hidden_area(self, pos: QPoint) -> int:
-        """How much of the panel at `pos` is behind the popup (pixels)."""
-        if self._behind is None:
-            return 0
-        overlap = QRect(pos, self.size()).intersected(self._behind)
-        return 0 if overlap.isEmpty() else overlap.width() * overlap.height()
+        dpr = self.devicePixelRatioF() or 1.0
+        w, h = self.width(), self.height()
+        if self._side == "right":       # shows right of the popup's right edge
+            hidden = min(w, px_until_edge(pos.x(), self._behind.right() + 1, dpr))
+            return QRegion(hidden, 0, w - hidden, h) if hidden < w else QRegion()
+        shown = min(w, px_before_edge(pos.x(), self._behind.left(), dpr))
+        return QRegion(0, 0, shown, h) if shown > 0 else QRegion()
 
     def _move_to(self, pos: QPoint) -> None:
-        """Move, keeping the part behind the popup masked away in every frame: a growing
-        visible part is unmasked after the move, a shrinking one masked before it."""
+        """Move, keeping the part behind the popup masked away in every frame.
+        Growing (sliding out): move first, with the old, smaller mask (its pixels at the
+        new position are still clear of the popup), then grow the mask and paint the
+        newly shown strip right away. Shrinking (sliding back): shrink the mask first,
+        then move. Masking first when growing would, for one frame, show the panel over
+        the popup by the step's width."""
         if pos == self.pos():
             self._update_mask()
             return
+        old = self._visible_region(self.pos())
         new = self._visible_region(pos)
-        if self._hidden_area(pos) > self._hidden_area(self.pos()):
+        if _area(new, self.rect()) < _area(old, self.rect()):
             self._apply_mask(new)
             self.move(pos)
         else:
             self.move(pos)
             self._apply_mask(new)
+            exposed = (new if new is not None else QRegion(self.rect())).subtracted(
+                old if old is not None else QRegion(self.rect()))
+            if not exposed.isEmpty() and self.isVisible():
+                self.repaint(exposed)   # painted in this frame, never a dark strip
 
     def _update_mask(self) -> None:
+        if self.isHidden():
+            return
         self._apply_mask(self._visible_region(self.pos()))
 
     def _apply_mask(self, region: QRegion | None) -> None:
@@ -431,16 +533,22 @@ class DetailsFlyout(QWidget):
             self._clear_mask()
             return
         if region.isEmpty():
-            # Fully behind the popup. (An empty mask would mean "no mask".) One pixel on
-            # the popup's own border, in the same border color: nothing shows.
-            region = QRegion(0, 0, 1, 1)
-        self.setMask(region)
+            # Fully behind the popup. An empty mask would mean "no mask", so keep one
+            # pixel and make the window fully transparent: 0 px show.
+            self.setMask(QRegion(0, 0, 1, 1))
+            self._set_opacity(0.0)
+        else:
+            self.setMask(region)
+            if self._mode == "slide":
+                self._set_opacity(1.0)
         self._masked = True
 
     def _clear_mask(self) -> None:
         if self._masked:
             self.clearMask()
             self._masked = False
+            if self._mode == "slide":
+                self._set_opacity(1.0)
 
     # -- events: the popup decides ---------------------------------------------
     def setVisible(self, visible: bool) -> None:
@@ -453,7 +561,7 @@ class DetailsFlyout(QWidget):
             self._hiding = False
 
     def hideEvent(self, e):
-        self._anim.stop()               # never keeps moving a hidden window
+        self._stop_animations()         # never keeps moving a hidden window
         self._closing = False
         super().hideEvent(e)
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import sys
 
-from PyQt6.QtCore import QPoint, QRect
+from PyQt6.QtCore import QPoint, QRect, QSize
 
 ENV_OFF = "SMARTCAL_NO_ANIMATIONS"
 SPI_GETCLIENTAREAANIMATION = 0x1042
@@ -62,6 +62,14 @@ def tray_edge(tray: QRect | None, area: QRect) -> str:
     if tray.left() > area.right():
         return "right"
     return "top" if tray.top() < area.center().y() else "bottom"
+
+
+def clamp_to_area(pos: QPoint, size: QSize, area: QRect) -> QPoint:
+    """`pos` moved just enough that a window of `size` there lies inside `area` (no
+    margin): the opening slide never covers the taskbar or reaches another monitor."""
+    x = max(area.left(), min(pos.x(), area.right() + 1 - size.width()))
+    y = max(area.top(), min(pos.y(), area.bottom() + 1 - size.height()))
+    return QPoint(x, y)
 
 
 def slide_in_offset(edge: str, px: int = POPUP_SLIDE_PX) -> QPoint:

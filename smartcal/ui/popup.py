@@ -111,9 +111,9 @@ class AgendaPopup(QWidget):
                             | Qt.WindowType.WindowStaysOnTopHint)
         self.setFixedWidth(WIDTH)
         self.setObjectName("popup")
-        self.setStyleSheet(
-            f"#popup{{background:{theme.BG};border:1px solid {theme.BORDER};}}"
-            f"QLabel{{color:{theme.TEXT};font-size:12px;}}")
+        # One look for the popup and the details panel: background and 1 px border.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        self.setStyleSheet(theme.window_style("popup"))
         outer = QVBoxLayout(self)
         outer.setContentsMargins(10, 10, 10, 8)
         outer.setSpacing(6)
@@ -457,9 +457,12 @@ class AgendaPopup(QWidget):
             (row or self).setFocus()
 
     def _flyout_slid_back(self, was_active: bool) -> None:
-        """The panel finished sliding back and hid. If it had focus then (clicked into
-        while sliding back), the popup takes focus back, as close_flyout does."""
-        if was_active and self.isVisible() and not self.reclaim_check.isActive():
+        """The panel finished sliding back and hid. If it had focus then (e.g. clicked
+        into while sliding back), the popup takes focus back, as close_flyout does, and
+        the reclaim check starts over, even if one was already running: that one may
+        have been started before the panel took focus again (RECLAIM_CHECK_MS is longer
+        than the slide), and nothing else would ask for the popup's activation."""
+        if was_active and self.isVisible():
             self.raise_()
             self.activateWindow()
             self.reclaim_check.start()
@@ -665,8 +668,11 @@ class AgendaPopup(QWidget):
             # Slides in from the tray side (away from the taskbar) while fading in. The
             # first paint is not delayed: the animation runs after the show.
             docked = self.pos()
-            edge = motion.tray_edge(self._tray_geom, self._area())
-            self.move(docked + motion.slide_in_offset(edge))
+            area = self._area()
+            edge = motion.tray_edge(self._tray_geom, area)
+            # Starts inside the work area: never over the taskbar or another monitor.
+            start = docked + motion.slide_in_offset(edge)
+            self.move(motion.clamp_to_area(start, self.size(), area))
             self.setWindowOpacity(0.0)
             self._show_slide.setDuration(ms)
             self._show_slide.setStartValue(self.pos())
@@ -677,8 +683,10 @@ class AgendaPopup(QWidget):
         self.show()
         self.raise_()
         self.activateWindow()
-        if ms:
+        if ms and self.isVisible():     # it may have hidden again during show/activate
             self._show_anim.start()
+        elif ms:
+            self._stop_show_animation()
 
     def _stop_show_animation(self) -> None:
         """Hidden (or shown again) mid-animation: no animation left running, fully

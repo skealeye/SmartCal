@@ -203,12 +203,14 @@ def test_flyout_shows_linkified_description(qtbot, tmp_path, opened):
     assert not p.isVisible() and not p.flyout().isVisible()   # like Join: closes both
 
 
-def test_description_is_capped_at_about_ten_lines(qtbot, tmp_path):
+def test_long_description_stays_inside_the_panel_and_scrolls(qtbot, tmp_path):
+    # v0.6.2: no 10-line cap; the notes fill the panel (as tall as the popup) and scroll.
     long = "\n".join(f"line {i}" for i in range(60))
     p = make_popup(qtbot, tmp_path, [ev("1", "Sync", 10, description=long)])
     click(qtbot, rows(p)[0])
+    QApplication.processEvents()
     box = details(p).findChild(QTextBrowser, "description")
-    assert box.height() <= 12 * box.fontMetrics().lineSpacing() + 20
+    assert box.height() < p.flyout().height()
     assert box.verticalScrollBar().maximum() > 0      # the rest scrolls
 
 

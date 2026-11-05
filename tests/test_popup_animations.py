@@ -347,7 +347,15 @@ def test_popup_slides_in_from_tray_side_for_each_taskbar_edge(qtbot, tmp_path, a
         p.show_near_tray(tray)
         docked = p.docked_geometry()
         assert p.showing_animated()
-        assert p.pos() == docked.topLeft() + offset, (tray, p.pos(), docked)
+        # From the tray side, but clamped inside the work area (v0.6.2): never over the
+        # taskbar or onto another monitor.
+        start = p.pos()
+        assert start == motion.clamp_to_area(docked.topLeft() + offset, p.size(), area)
+        assert area.contains(QRect(start, p.size())), (tray, start, area)
+        moved = start - docked.topLeft()
+        assert moved != QPoint(0, 0), (tray, start, docked)
+        assert (moved.x() * offset.x() >= 0 and moved.y() * offset.y() >= 0
+                and (moved.x() == 0) == (offset.x() == 0)), (tray, moved, offset)
         assert p.windowOpacity() < 0.05
         assert p._show_slide.duration() == motion.POPUP_MS
         assert p._show_slide.easingCurve().type().name == "OutCubic"
@@ -488,3 +496,197 @@ def test_no_runtimeerror_when_popup_destroyed_mid_animation(qtbot, tmp_path, ani
         assert not [w for w in QApplication.topLevelWidgets()
                     if isinstance(w, DetailsFlyout) and not sip.isdeleted(w)
                     and w.isVisible()]
+
+
+# -- v0.6.2: review fixes ------------------------------------------------------------------
+SHORT_NOTES = ("One session only. Pick one and decline the rest.\n"
+               "Do not forward this invite or share the Zoom link. Need someone added? "
+               "Have their producer request it with L7 approval.")
+
+
+def _open_with(qtbot, tmp_path, description, **kw):
+    e = ev("notes", "SwaggerAttire Read-In Session - DO NOT FWD INVITE", 18,
+           description=description, meeting_url="https://zoom.us/j/1", **kw)
+    p = popup_on(qtbot, tmp_path, MANY + [e])
+    click(qtbot, next(r for r in rows(p) if r.event.id == "notes"))
+    QApplication.processEvents()
+    return p, p.flyout()
+
+
+def _gap_above_buttons(fly) -> int:
+    body = details_of(fly)
+    desc = fly.description_box()
+    join = body.findChild(QPushButton, "bigjoin")
+    below = join if join is not None else body.findChild(QPushButton, "hide")
+    return below.mapTo(body, QPoint(0, 0)).y() - (desc.mapTo(body, QPoint(0, 0)).y()
+                                                 + desc.height())
+
+
+def details_of(fly):
+    return fly.body()
+
+
+def test_short_description_fully_visible_no_scrollbar(qtbot, tmp_path):
+    p, fly = _open_with(qtbot, tmp_path, SHORT_NOTES)
+    desc = fly.description_box()
+    assert desc.verticalScrollBar().maximum() == 0          # nothing to scroll...
+    assert not desc.verticalScrollBar().isVisible()
+    doc_h = desc.document().size().height()
+    assert doc_h <= desc.viewport().height()                 # ...every line shows in full
+    assert "L7 approval" in desc.toPlainText()
+    assert fly._scroll.verticalScrollBar().maximum() == 0    # the panel fits too
+
+
+def test_long_description_fills_remaining_height_then_scrolls(qtbot, tmp_path):
+    long = "\n".join(f"line {i} of the notes" for i in range(120))
+    p, fly = _open_with(qtbot, tmp_path, long)
+    desc = fly.description_box()
+    assert desc.verticalScrollBar().maximum() > 0            # the rest scrolls
+    assert fly._scroll.verticalScrollBar().maximum() == 0    # inside the panel, which fits
+    assert desc.height() > fly.height() // 3                 # it got the spare height
+    assert 0 <= _gap_above_buttons(fly) < 12
+    hide = details_of(fly).findChild(QPushButton, "hide")
+    bottom = hide.mapTo(fly, QPoint(0, hide.height())).y()
+    assert fly.height() - bottom < 24                        # buttons at the bottom
+
+
+def test_description_fills_space_above_buttons_no_blank_band(qtbot, tmp_path):
+    for i, notes in enumerate((SHORT_NOTES, "Short.", DESC)):
+        sub = tmp_path / str(i)
+        sub.mkdir()
+        p, fly = _open_with(qtbot, sub, notes)
+        gap = _gap_above_buttons(fly)
+        assert 0 <= gap < 12, (i, gap)
+        hide = details_of(fly).findChild(QPushButton, "hide")
+        bottom = hide.mapTo(fly, QPoint(0, hide.height())).y()
+        assert fly.height() - bottom < 24, (i, fly.height(), bottom)
+        p.hide()
+
+
+def test_fade_only_fallback_has_no_mask_and_ends_docked(qtbot, tmp_path, animated,
+                                                        monkeypatch):
+    from smartcal.ui import flyout as flyout_mod
+    for how in ("env", "constant"):
+        if how == "env":
+            monkeypatch.setenv(flyout_mod.SLIDE_MODE_ENV, "fade")
+        else:
+            monkeypatch.delenv(flyout_mod.SLIDE_MODE_ENV)
+            monkeypatch.setattr(flyout_mod, "SLIDE_USES_MASK", False)
+        sub = tmp_path / how
+        sub.mkdir()
+        p = settled_popup(qtbot, sub, MANY)
+        click(qtbot, rows(p)[0])
+        fly = p.flyout()
+        assert fly.mode() == "fade"
+        assert fly.isVisible() and fly.sliding()
+        assert fly.pos() == docked_pos(p) and fly.mask().isEmpty()   # docked from the start
+        assert fly.windowOpacity() < 0.05
+        assert fly._fade.duration() == motion.FLYOUT_OPEN_MS
+        qtbot.waitUntil(lambda: not fly.sliding())
+        assert fly.windowOpacity() == 1.0 and fly.pos() == docked_pos(p)
+        assert fly.mask().isEmpty()
+        click(qtbot, rows(p)[0])                             # fades out, then hides
+        assert fly.closing() and fly.isVisible() and fly.pos() == docked_pos(p)
+        assert fly._fade.duration() == motion.FLYOUT_CLOSE_MS
+        qtbot.waitUntil(lambda: not fly.isVisible())
+        assert fly.windowOpacity() == 1.0 and fly.mask().isEmpty()
+        assert p.isVisible()
+        p.hide()
+    monkeypatch.setattr(flyout_mod, "SLIDE_USES_MASK", True)
+    assert flyout_mod.slide_mode() == "slide"
+    monkeypatch.setenv(flyout_mod.SLIDE_MODE_ENV, "fade")
+    assert flyout_mod.slide_mode() == "fade"
+
+
+def test_slid_back_panel_with_focus_hands_it_to_popup_even_during_reclaim(qtbot, tmp_path,
+                                                                         animated):
+    p = settled_popup(qtbot, tmp_path, MANY)
+    row = rows(p)[0]
+    qtbot.keyClick(row, Qt.Key.Key_Return)
+    fly = p.flyout()
+    qtbot.waitUntil(lambda: not fly.sliding())
+    settle_qt()
+    activated = []
+    p.activateWindow = lambda: activated.append(1)          # Windows ignores the request...
+    p.active_window = lambda: fly if fly.isVisible() else None   # ...the panel keeps focus
+    p.app_active = lambda: True
+    qtbot.keyClick(fly, Qt.Key.Key_Escape)                  # Esc: slide back + reclaim
+    assert fly.closing() and p.reclaim_check.isActive() and activated == [1]
+    qtbot.waitUntil(lambda: not fly.isVisible())            # 140 ms < RECLAIM_CHECK_MS
+    assert activated == [1, 1]                               # asked again at the end...
+    assert p.reclaim_check.isActive()
+    assert p.reclaim_check.remainingTime() > 150             # ...and the check restarted
+    p.active_window = lambda: p
+    qtbot.waitUntil(lambda: not p.reclaim_check.isActive())
+    settle_qt()
+    assert p.isVisible()
+
+
+def test_popup_and_panel_share_one_border_and_background(qtbot, tmp_path):
+    p = popup_on(qtbot, tmp_path, MANY)
+    click(qtbot, rows(p)[0])
+    fly = p.flyout()
+    assert p.testAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+    assert p.styleSheet() == theme.window_style("popup")
+    assert fly.styleSheet() == theme.window_style("flyout")
+    a, b = p.grab().toImage(), fly.grab().toImage()
+    border, bg = QColor(theme.BORDER).rgb(), QColor(theme.BG).rgb()
+    for img in (a, b):
+        w, h = img.width(), img.height()
+        assert [img.pixel(0, 0), img.pixel(w - 1, h // 2), img.pixel(w // 2, h - 1),
+                img.pixel(0, h // 2)] == [border] * 4
+        assert img.pixel(2, h - 3) == bg
+
+
+def test_fully_tucked_panel_shows_zero_pixels(qtbot, tmp_path, animated):
+    p = settled_popup(qtbot, tmp_path, MANY)
+    click(qtbot, rows(p)[0])
+    fly = p.flyout()
+    assert fly.pos() == QPoint(p.x(), p.y()) and fly.sliding()
+    assert fly.windowOpacity() == 0.0                        # fully behind: transparent
+    qtbot.waitUntil(lambda: fly.x() < p.x() - 10)
+    assert fly.windowOpacity() == 1.0                        # out: opaque again
+    qtbot.waitUntil(lambda: not fly.sliding())
+    click(qtbot, rows(p)[0])
+    qtbot.waitUntil(lambda: not fly.isVisible())
+    assert fly.windowOpacity() == 1.0 and fly.mask().isEmpty()
+
+
+def test_mask_edges_never_cross_the_popup_edge_at_fractional_scaling():
+    from smartcal.ui.flyout import px_before_edge, px_until_edge
+    for dpr in (1.0, 1.25, 1.5, 1.75, 2.0):
+        for edge in range(700, 760, 7):
+            for x in range(edge - 260, edge + 1, 3):
+                shown = px_before_edge(x, edge, dpr)
+                assert round(x * dpr) + round(shown * dpr) <= round(edge * dpr)
+                assert shown >= edge - x - 1                 # at most 1 px short
+                hidden = px_until_edge(x, edge, dpr)
+                assert round(x * dpr) + round(hidden * dpr) >= round(edge * dpr)
+                assert hidden <= edge - x + 1
+
+
+def test_hidden_panel_place_sets_no_mask(qtbot, tmp_path, animated):
+    p = settled_popup(qtbot, tmp_path, MANY)
+    click(qtbot, rows(p)[0])
+    fly = p.flyout()
+    qtbot.waitUntil(lambda: not fly.sliding())
+    click(qtbot, rows(p)[0])
+    qtbot.waitUntil(lambda: not fly.isVisible())
+    calls = []
+    fly.setMask = lambda *a: calls.append(a)
+    fly.place(fly.size(), QPoint(p.x() - 20, p.y()), QPoint(p.x(), p.y()), p.geometry())
+    p.show_notice("taller")
+    assert calls == [] and fly.mask().isEmpty()
+
+
+def test_popup_hidden_during_show_is_not_animated(qtbot, tmp_path, animated):
+    cache, settings = store(tmp_path, MANY)
+    p = AgendaPopup(cache, settings)
+    p.now = lambda: NOW
+    p._area = lambda point=None: AREA
+    qtbot.addWidget(p)
+    p.refresh()
+    p.activateWindow = lambda: p.hide()                     # e.g. a focus loss right away
+    p.show_near_tray(BOTTOM_RIGHT)
+    assert not p.isVisible() and not p.showing_animated()
+    assert p.windowOpacity() == 1.0

@@ -13,6 +13,14 @@ BORDER = "#3c4043"
 LINK = "#8ab4f8"
 WARN = "#fdd663"
 DEFAULT_STRIPE = "#4285f4"
+BORDER_PX = 1
+
+
+def window_style(name: str) -> str:
+    """Style sheet of the tray popup and its details panel (one look for both): the
+    dark background, a BORDER_PX border in BORDER, and the label text."""
+    return (f"#{name}{{background:{BG};border:{BORDER_PX}px solid {BORDER};}}"
+            f"QLabel{{color:{TEXT};font-size:12px;}}")
 
 
 _HEX = re.compile(r"#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})")
