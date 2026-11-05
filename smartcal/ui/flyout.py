@@ -307,6 +307,8 @@ class DetailsFlyout(QWidget):
         if (e.type() == QEvent.Type.WindowDeactivate and self.isVisible()
                 and not self._hiding):
             self._popup._group_deactivated(self)
+        elif e.type() == QEvent.Type.WindowActivate:
+            self._popup.note_foreground()
         return super().event(e)
 
     def keyPressEvent(self, e):

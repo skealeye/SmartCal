@@ -300,11 +300,19 @@ def _active_popup(p):
     p.app_active = lambda: True
 
 
+def seen_in_front(p):
+    """One watchdog tick with the group in the foreground (as on a normal open)."""
+    p.foreground_is_group = lambda: True
+    p._watchdog_tick()
+    assert p._seen_foreground
+
+
 def test_watchdog_hides_group_when_qt_active_but_foreground_elsewhere_for_two_ticks(qtbot,
                                                                                     tmp_path):
     p = popup_on(qtbot, tmp_path, [ev("1", "A", 10)])
     fly = open_details(qtbot, p, rows(p)[0])
     _active_popup(p)
+    seen_in_front(p)
     p.foreground_is_group = lambda: False             # another app owns the foreground
     p._watchdog_tick()
     assert p.isVisible() and fly.isVisible()          # one tick: maybe a transient flip
@@ -315,6 +323,7 @@ def test_watchdog_hides_group_when_qt_active_but_foreground_elsewhere_for_two_ti
 def test_single_tick_foreground_elsewhere_does_not_hide(qtbot, tmp_path):
     p = popup_on(qtbot, tmp_path, [ev("1", "A", 10)])
     _active_popup(p)
+    seen_in_front(p)
     fg = {"group": False}
     p.foreground_is_group = lambda: fg["group"]
     p._watchdog_tick()
@@ -334,6 +343,7 @@ def test_foreground_check_ignored_while_menu_open(qtbot, tmp_path):
     assert meeting_menus.is_open(p.menu())
     p.active_window = lambda: fly
     p.app_active = lambda: True
+    p._seen_foreground = True                         # seen in front before the menu
     p.foreground_is_group = lambda: False
     for _ in range(4):
         p._watchdog_tick()
@@ -352,7 +362,7 @@ def test_foreground_hook_failure_defaults_to_group(qtbot, tmp_path):
         p._watchdog_tick()
     settle_qt()
     assert p.isVisible()
-    assert p._os_foreground_is_group() is True        # offscreen: no opinion, never hides
+    assert p._os_foreground_is_group() is None        # offscreen: unknown, never hides
 
 
 def test_watchdog_closes_when_a_non_group_smartcal_window_is_active(qtbot, tmp_path):
@@ -366,3 +376,88 @@ def test_watchdog_closes_when_a_non_group_smartcal_window_is_active(qtbot, tmp_p
     p._watchdog_tick()
     qtbot.waitUntil(lambda: not p.isVisible())
     assert not fly.isVisible()
+
+
+# -- v0.5.5: the foreground check only acts after the group was seen in front ---------------
+def test_foreground_check_never_hides_popup_that_was_never_seen_in_front(qtbot, tmp_path):
+    p = popup_on(qtbot, tmp_path, [ev("1", "A", 10)])
+    fly = open_details(qtbot, p, rows(p)[0])
+    _active_popup(p)
+    p.foreground_is_group = lambda: False             # Windows kept Explorer in front
+    for _ in range(5):
+        p._watchdog_tick()
+    settle_qt()
+    assert p.isVisible() and fly.isVisible() and not p._seen_foreground
+
+
+def test_foreground_check_hides_after_group_was_seen_then_lost_for_two_ticks(qtbot,
+                                                                             tmp_path,
+                                                                             caplog):
+    import logging
+    p = popup_on(qtbot, tmp_path, [ev("1", "Secret title", 10)])
+    fly = open_details(qtbot, p, rows(p)[0])
+    _active_popup(p)
+    seen_in_front(p)
+    p.foreground_is_group = lambda: False
+    with caplog.at_level(logging.INFO, logger="smartcal.ui.popup"):
+        p._watchdog_tick()
+        assert p.isVisible()
+        p._watchdog_tick()
+    assert not p.isVisible() and not fly.isVisible()
+    lines = [r.getMessage() for r in caplog.records if r.name == "smartcal.ui.popup"]
+    assert lines == ["foreground check closed the popup"]
+    assert not any("Secret" in m for m in lines)
+    # Logged once only.
+    caplog.clear()
+    p.show_near_tray(TOP_TRAY)
+    _active_popup(p)
+    seen_in_front(p)
+    p.foreground_is_group = lambda: False
+    with caplog.at_level(logging.INFO, logger="smartcal.ui.popup"):
+        p._watchdog_tick()
+        p._watchdog_tick()
+    assert not p.isVisible()
+    assert [r for r in caplog.records if r.name == "smartcal.ui.popup"] == []
+
+
+def test_unknown_foreground_never_hides(qtbot, tmp_path):
+    p = popup_on(qtbot, tmp_path, [ev("1", "A", 10)])
+    _active_popup(p)
+    seen_in_front(p)
+    for unknown in (lambda: None, lambda: 0, lambda: "?"):
+        p.foreground_is_group = unknown
+        for _ in range(4):
+            p._watchdog_tick()
+    settle_qt()
+    assert p.isVisible()
+    p.foreground_is_group = lambda: False             # strikes did not build up meanwhile
+    p._watchdog_tick()
+    assert p.isVisible()
+
+
+def test_seen_flag_cleared_on_hide(qtbot, tmp_path):
+    p = popup_on(qtbot, tmp_path, [ev("1", "A", 10)])
+    _active_popup(p)
+    seen_in_front(p)
+    p.hide()
+    assert not p._seen_foreground
+    p.show_near_tray(TOP_TRAY)
+    assert not p._seen_foreground                     # shown again: must be seen again
+    _active_popup(p)
+    p.foreground_is_group = lambda: False
+    for _ in range(3):
+        p._watchdog_tick()
+    settle_qt()
+    assert p.isVisible()
+
+
+def test_window_activate_marks_group_seen_in_front(qtbot, tmp_path):
+    p = popup_on(qtbot, tmp_path, [ev("1", "A", 10)])
+    fly = open_details(qtbot, p, rows(p)[0])
+    p._seen_foreground = False
+    p.foreground_is_group = lambda: None
+    QApplication.sendEvent(fly, QEvent(QEvent.Type.WindowActivate))
+    assert not p._seen_foreground                     # unknown: not evidence
+    p.foreground_is_group = lambda: True
+    QApplication.sendEvent(fly, QEvent(QEvent.Type.WindowActivate))
+    assert p._seen_foreground
