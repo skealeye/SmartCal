@@ -103,9 +103,11 @@ def main() -> int:
             dialog_ref[0].activateWindow()
             return
         dlg = SettingsDialog(settings, cache, list_accounts, tray.add_account,
-                             remove_account_and_refresh)
+                             remove_account_and_refresh, signin_pending=tray.signin_pending,
+                             on_cancel_signin=tray.cancel_signin)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.applied.connect(on_settings_applied)
+        tray.signin_changed.connect(dlg.refresh_signin)
         dialog_ref[:] = [dlg]
         dlg.destroyed.connect(lambda *_: dialog_ref.clear())
         dlg.show()

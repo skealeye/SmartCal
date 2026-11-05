@@ -32,24 +32,115 @@ def list_accounts() -> list[str]:
     return sorted(p.stem for p in _tokens_dir().glob("*.json"))
 
 
-def add_account(label: str) -> str:
-    """Run the browser consent flow; store the token; return the account email.
+SIGNIN_TIMEOUT = 120      # seconds the local OAuth server waits for the browser
+SIGNIN_DEAD_AFTER = 125   # a sign-in pending longer than this is dead: allow a new one
 
-    `label` is only a hint for logs/prompts; identity is the primary calendar id.
-    """
+
+class SignInCancelled(Exception):
+    """The owner cancelled a pending Google sign-in (not an error)."""
+
+
+def free_port() -> int:
+    """A free local TCP port for the OAuth redirect server."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("localhost", 0))
+        return s.getsockname()[1]
+
+
+def _make_flow():
     from google_auth_oauthlib.flow import InstalledAppFlow
-    from googleapiclient.discovery import build
-
     secret = data_dir() / "client_secret.json"
     if not secret.exists():
         raise FileNotFoundError(f"Missing {secret}. See README.md for setup steps.")
-    print(f"Signing in Google account '{label}'...")
-    flow = InstalledAppFlow.from_client_secrets_file(str(secret), SCOPES)
-    creds = flow.run_local_server(port=0, timeout_seconds=180)
+    return InstalledAppFlow.from_client_secrets_file(str(secret), SCOPES)
+
+
+def _http_get(url: str) -> None:
+    import urllib.request
+    with urllib.request.urlopen(url, timeout=3) as resp:   # noqa: S310 - localhost only
+        resp.read()
+
+
+def _store_credentials(creds) -> str:
+    """Save a new token under the account's email (its primary calendar id)."""
+    from googleapiclient.discovery import build
     service = build("calendar", "v3", credentials=creds, cache_discovery=False)
     email = service.calendars().get(calendarId="primary").execute()["id"]
-    token_path(email).write_text(creds.to_json(), encoding="utf-8")
+    _write_atomic(token_path(email), creds.to_json())
     return email
+
+
+class SignIn:
+    """One browser consent flow at a time, which the owner can cancel.
+
+    The local redirect server listens on a port chosen here, so `cancel()` can
+    end it at once: any request makes the server return, and the
+    `error=access_denied` redirect makes the token exchange fail, which `run()`
+    reports as SignInCancelled.
+    """
+
+    def __init__(self, flow_factory=None, store=None, http_get=None, port_fn=free_port):
+        import threading
+        self._flow_factory = flow_factory or _make_flow
+        self._store = store or _store_credentials
+        self._http_get = http_get or _http_get
+        self._port_fn = port_fn
+        self._lock = threading.Lock()
+        self.port: int | None = None
+        self._cancelled = False
+
+    def run(self, label: str = "new") -> str:
+        """Blocking (run it on a worker thread); returns the new account's email."""
+        flow = self._flow_factory()
+        port = self._port_fn()
+        with self._lock:
+            self.port, self._cancelled = port, False
+        try:
+            try:
+                creds = flow.run_local_server(port=port, open_browser=True,
+                                              timeout_seconds=SIGNIN_TIMEOUT)
+            except Exception:
+                if self._cancelled:
+                    raise SignInCancelled() from None
+                raise
+            if creds is None or self._cancelled:
+                raise SignInCancelled()
+            return self._store(creds)
+        finally:
+            with self._lock:
+                if self.port == port:
+                    self.port = None
+
+    def cancel(self) -> bool:
+        """End a pending sign-in; False if none is running."""
+        import threading
+        with self._lock:
+            port = self.port
+            if port is None:
+                return False
+            self._cancelled = True
+        url = f"http://localhost:{port}/?error=access_denied"
+
+        def poke() -> None:
+            try:
+                self._http_get(url)
+            except Exception:  # noqa: BLE001 - the server may already be gone
+                pass
+        threading.Thread(target=poke, daemon=True, name="cancel-signin").start()
+        return True
+
+
+SIGN_IN = SignIn()
+
+
+def add_account(label: str) -> str:
+    """Run the browser consent flow; store the token; return the account email.
+
+    `label` is only a hint; identity is the primary calendar id. Raises
+    SignInCancelled if SIGN_IN.cancel() was called meanwhile.
+    """
+    return SIGN_IN.run(label)
 
 
 def remove_account(account: str, cache=None) -> None:

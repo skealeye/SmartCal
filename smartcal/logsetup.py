@@ -20,7 +20,17 @@ def setup_logging(path: str | Path) -> RotatingFileHandler:
     root = logging.getLogger()
     root.addHandler(handler)
     root.setLevel(logging.INFO)
+    quiet_noisy_loggers()
     return handler
+
+
+# These log full URLs at INFO: the OAuth URL carries the state and PKCE challenge.
+NOISY_LOGGERS = ("google_auth_oauthlib.flow",)
+
+
+def quiet_noisy_loggers() -> None:
+    for name in NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def _sys_hook(exc_type, exc, tb) -> None:

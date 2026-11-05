@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from datetime import datetime
 
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -15,6 +16,8 @@ from .. import agenda, google_auth
 log = logging.getLogger(__name__)
 
 STOP_WAIT_MS = 3000
+ADD_TEXT = "Add Google account…"
+CANCEL_TEXT = "Cancel Google sign-in"
 
 
 def dialog_visible(dlg) -> bool:
@@ -51,11 +54,13 @@ def make_icon(day: int) -> QIcon:
 
 
 class TrayController(QSystemTrayIcon):
-    _add_done = pyqtSignal(str)
+    _add_done = pyqtSignal(int, str, str)   # generation, status, message
+    signin_changed = pyqtSignal(bool)       # a Google sign-in started (True) / ended
 
     def __init__(self, popup, worker, cache, settings, parent=None,
                  on_accounts_changed=None, add_account_fn=None, on_open_settings=None, reminders=None,
-                 on_before_exit=None, exit_fn=os._exit):
+                 on_before_exit=None, exit_fn=os._exit, cancel_signin_fn=None,
+                 clock=time.monotonic):
         super().__init__(parent)
         self.popup, self.worker = popup, worker
         self._on_before_exit = on_before_exit
@@ -64,6 +69,10 @@ class TrayController(QSystemTrayIcon):
         self.cache, self.settings = cache, settings
         self._on_accounts_changed = on_accounts_changed
         self._add_account_fn = add_account_fn or google_auth.add_account
+        self._cancel_signin_fn = cancel_signin_fn or google_auth.SIGN_IN.cancel
+        self._clock = clock
+        self._add_started = 0.0
+        self._add_gen = 0
         self._on_open_settings = on_open_settings
         self.reminders = reminders
         self._reminders_dialog = None
@@ -72,8 +81,8 @@ class TrayController(QSystemTrayIcon):
         self._icon_day = 0
         self.setIcon(make_icon(datetime.now().day))
         menu = QMenu()
-        self._add_action = QAction("Add Google account…", menu)
-        self._add_action.triggered.connect(lambda _checked=False: self.add_account())
+        self._add_action = QAction(ADD_TEXT, menu)
+        self._add_action.triggered.connect(lambda _checked=False: self._on_add_triggered())
         self._sync_action = QAction("Sync now", menu)
         self._sync_action.triggered.connect(lambda _checked=False: self.worker.sync_now())
         self._settings_action = QAction("Settings…", menu)
@@ -89,6 +98,7 @@ class TrayController(QSystemTrayIcon):
         menu.addSeparator()
         menu.addAction(quit_action)
         self._menu = menu  # keep a reference
+        menu.aboutToShow.connect(self._update_add_action)
         self.setContextMenu(menu)
         self.activated.connect(self._on_activated)
         self._add_done.connect(self._finish_add)
@@ -166,38 +176,75 @@ class TrayController(QSystemTrayIcon):
         if dialog_visible(self._reminders_dialog):
             self._reminders_dialog.refresh()
 
+    # -- Google sign-in ------------------------------------------------------
+    def signin_pending(self) -> bool:
+        """A sign-in is running and not yet older than the OAuth timeout (+5 s)."""
+        return self._adding and \
+            self._clock() - self._add_started < google_auth.SIGNIN_DEAD_AFTER
+
+    def _update_add_action(self) -> None:
+        self._add_action.setText(CANCEL_TEXT if self.signin_pending() else ADD_TEXT)
+        self._add_action.setEnabled(True)
+
+    def _on_add_triggered(self) -> None:
+        if self.signin_pending():
+            self.cancel_signin()
+        else:
+            self.add_account()
+
     def add_account(self) -> None:
-        if self._adding:
+        if self.signin_pending():
             return
+        self._add_gen += 1
+        gen = self._add_gen
         self._adding = True
-        self._add_action.setEnabled(False)
+        self._add_started = self._clock()
+        self._update_add_action()
+        self.signin_changed.emit(True)
 
         def work() -> None:
-            message = ""
+            status, message = "ok", ""
             try:
                 self._add_account_fn("new")
+            except google_auth.SignInCancelled:
+                status = "cancelled"
             except BaseException as exc:  # noqa: BLE001 - reported to the user
                 log.exception("add account failed")
-                message = str(exc) or type(exc).__name__
+                status, message = "error", str(exc) or type(exc).__name__
             finally:
-                self._add_done.emit(message)
+                self._add_done.emit(gen, status, message)
 
         threading.Thread(target=work, daemon=True, name="add-account").start()
 
-    def _finish_add(self, message: str) -> None:
+    def cancel_signin(self) -> None:
+        if not self.signin_pending():
+            return
         try:
-            if not message:
+            self._cancel_signin_fn()
+        except Exception:  # noqa: BLE001
+            log.exception("cancel sign-in failed")
+
+    def _finish_add(self, gen: int, status: str, message: str) -> None:
+        current = gen == self._add_gen   # an older (dead) sign-in finishing late
+        try:
+            if status == "ok":
                 if self._on_accounts_changed:
                     self._on_accounts_changed()  # drop cached clients: new credentials
                 self.worker.sync_now()
-            else:
+            elif status == "cancelled":
+                if current:
+                    self.showMessage("SmartCal", "Sign-in cancelled",
+                                     QSystemTrayIcon.MessageIcon.Information)
+            elif current:
                 self.showMessage("SmartCal", f"Could not add account: {message}",
                                  QSystemTrayIcon.MessageIcon.Warning)
         except Exception:  # noqa: BLE001
             log.exception("after adding account")
         finally:
-            self._adding = False
-            self._add_action.setEnabled(True)
+            if current:
+                self._adding = False
+                self._update_add_action()
+                self.signin_changed.emit(False)
 
     def quit(self) -> None:
         """Stop the sync thread and quit. A thread stuck in a request (HTTP timeout is

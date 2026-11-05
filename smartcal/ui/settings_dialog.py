@@ -31,11 +31,13 @@ class SettingsDialog(QDialog):
     applied = pyqtSignal()
 
     def __init__(self, settings, cache, accounts_provider, on_add_account, on_remove_account,
-                 parent=None):
+                 parent=None, signin_pending=None, on_cancel_signin=None):
         super().__init__(parent)
         self.settings, self.cache = settings, cache
         self._accounts_provider = accounts_provider
         self._on_add, self._on_remove = on_add_account, on_remove_account
+        self._signin_pending = signin_pending or (lambda: False)
+        self._on_cancel_signin = on_cancel_signin
         self.confirm = self._ask_confirm  # replaceable in tests
         self.setWindowTitle("SmartCal settings")
         self.resize(520, 560)
@@ -144,15 +146,37 @@ class SettingsDialog(QDialog):
         row = QHBoxLayout()
         self.add_button = QPushButton("Add…")
         self.remove_button = QPushButton("Remove…")
-        self.add_button.clicked.connect(lambda _c=False: self._on_add())
+        self.add_button.clicked.connect(lambda _c=False: self._add())
+        self.signin_label = QLabel("Signing in…")
+        self.cancel_signin_button = QPushButton("Cancel")
+        self.cancel_signin_button.clicked.connect(lambda _c=False: self._cancel_signin())
         self.remove_button.clicked.connect(lambda _c=False: self.remove_selected())
         row.addWidget(self.add_button)
+        row.addWidget(self.signin_label)
+        row.addWidget(self.cancel_signin_button)
         row.addWidget(self.remove_button)
         row.addStretch(1)
         layout.addLayout(row)
         layout.addWidget(QLabel("Adding or removing an account takes effect immediately."))
         self.refresh_accounts()
+        self.refresh_signin()
         return w
+
+    def refresh_signin(self, *_args) -> None:
+        """While a Google sign-in is pending: 'Signing in… [Cancel]' instead of Add."""
+        pending = bool(self._signin_pending())
+        self.add_button.setVisible(not pending)
+        self.signin_label.setVisible(pending)
+        self.cancel_signin_button.setVisible(pending)
+
+    def _add(self) -> None:
+        self._on_add()
+        self.refresh_signin()
+
+    def _cancel_signin(self) -> None:
+        if self._on_cancel_signin:
+            self._on_cancel_signin()
+        self.refresh_signin()
 
     def refresh_accounts(self) -> None:
         self.account_list.clear()

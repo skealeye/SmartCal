@@ -96,8 +96,9 @@ def test_add_account_reenables_menu_item_after_failure(qtbot, tmp_path):
     tray, _ = build(qtbot, tmp_path, worker, add_account_fn=failing)
     tray.showMessage = lambda *a, **k: messages.append(a[1])
     tray.add_account()
-    assert not tray._add_action.isEnabled()
-    qtbot.waitUntil(lambda: tray._add_action.isEnabled(), timeout=3000)
+    assert tray._add_action.text() == "Cancel Google sign-in" and tray.signin_pending()
+    qtbot.waitUntil(lambda: not tray.signin_pending(), timeout=3000)
+    assert tray._add_action.text() == "Add Google account…" and tray._add_action.isEnabled()
     assert "RuntimeError" in messages[0]
     assert worker.syncs == 0
 
@@ -108,7 +109,7 @@ def test_add_account_reenables_even_if_sync_now_raises(qtbot, tmp_path):
     tray, _ = build(qtbot, tmp_path, worker, add_account_fn=lambda label: "a@x.com",
                     on_accounts_changed=lambda: dropped.append(1))
     tray.add_account()
-    qtbot.waitUntil(lambda: tray._add_action.isEnabled(), timeout=3000)
+    qtbot.waitUntil(lambda: not tray.signin_pending(), timeout=3000)
     assert dropped == [1] and worker.syncs == 1
 
 
@@ -125,7 +126,7 @@ def test_add_account_double_trigger_starts_one_flow(qtbot, tmp_path):
     tray.add_account()
     qtbot.waitUntil(lambda: len(calls) == 1)
     gate.set()
-    qtbot.waitUntil(lambda: tray._add_action.isEnabled(), timeout=3000)
+    qtbot.waitUntil(lambda: not tray.signin_pending(), timeout=3000)
     assert len(calls) == 1
 
 
