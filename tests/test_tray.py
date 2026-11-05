@@ -164,6 +164,43 @@ def test_quit_with_stuck_worker_flushes_and_exits_without_terminate(qtbot, tmp_p
     assert worker.stopped and flushed == [1] and exits == [0] and quits == []
 
 
+def test_quit_releases_single_instance_before_waiting(qtbot, tmp_path):
+    order = []
+
+    class Instance:
+        def release(self):
+            order.append("release")
+
+    class Worker(StuckWorker):
+        def stop(self):
+            order.append("stop")
+
+        def wait(self, ms):
+            order.append("wait")
+            return True
+
+    tray, _ = build(qtbot, tmp_path, Worker(), instance=Instance())
+    tray._quit_app = lambda: order.append("quit")
+    tray.quit()
+    assert order == ["release", "stop", "wait", "quit"]
+
+
+def test_quit_release_makes_lock_free_for_a_relaunch(qtbot, tmp_path):
+    from smartcal.single_instance import SingleInstance
+    first = SingleInstance(tmp_path / "d")
+    (tmp_path / "d").mkdir()
+    assert first.acquire() is True
+    tray, _ = build(qtbot, tmp_path, StuckWorker(), instance=first, exit_fn=lambda c: None)
+    tray.hide = lambda: None
+    tray.quit()                      # worker stuck: forced-exit path, lock already free
+    again = SingleInstance(tmp_path / "d")
+    try:
+        assert again.acquire() is True and not again.took_over
+    finally:
+        again.release()
+        first.release()              # idempotent: run.py calls it again after exec()
+
+
 def test_forced_exit_removes_the_tray_icon_first(qtbot, tmp_path):
     order = []
     tray, _ = build(qtbot, tmp_path, StuckWorker(), on_before_exit=lambda: order.append("flush"),

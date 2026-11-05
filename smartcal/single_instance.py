@@ -109,6 +109,11 @@ class SingleInstance(QObject):
     def acquire(self) -> bool:
         """True: start this instance. False: the first one answered and shows its popup."""
         if self._try_lock():
+            if not self._locked:
+                # Lock unusable: still ask once, or every launch would add a copy.
+                allow_foreground()
+                if self._notify_first():
+                    return False
             self._listen()
             return True
         allow_foreground()

@@ -63,10 +63,10 @@ def test_range_uses_narrowest_account_window(tmp_path):
                         text_msg("ok"))
     a, _, cache, _ = make(tmp_path, claude, [ev()], accounts=("a@x.com", "b@x.com"))
     lo, _hi = sync.sync_window(NOW)
-    narrow_end = agenda.midnight(date(2026, 11, 21), NOW)   # b's last good sync was long ago
-    cache.record_sync("b@x.com", lo - timedelta(days=30), narrow_end, NOW - timedelta(days=40))
-    assert cache.synced_window(["a@x.com", "b@x.com"]) == (lo, narrow_end)
-    assert cache.synced_window(["a@x.com"]) == sync.sync_window(NOW)
+    narrow_end = agenda.midnight(date(2026, 11, 21), NOW)   # b's window is narrower
+    cache.record_sync("b@x.com", lo - timedelta(days=30), narrow_end, NOW - timedelta(hours=1))
+    assert cache.synced_window(["a@x.com", "b@x.com"]) == (lo, narrow_end, NOW - timedelta(hours=1))
+    assert cache.synced_window(["a@x.com"]) == (*sync.sync_window(NOW), NOW)
     dec15, nov20, nov21, listed = run(a, claude)
     assert dec15["is_error"] and "outside the synced range (2026-10-28..2026-11-20)" in dec15["content"]
     assert not nov20.get("is_error") and '"free":[[' in nov20["content"]
@@ -79,14 +79,14 @@ def test_failed_sync_does_not_advance_window(tmp_path):
     cache = Cache(tmp_path / "c.db")
     t1 = datetime(2026, 11, 4, 9, tzinfo=NY)
     assert sync_worker(cache, SyncClient("a"), lambda: t1).sync_account("a") == "ok"
-    assert cache.synced_window(["a"]) == sync.sync_window(t1)
+    assert cache.synced_window(["a"]) == (*sync.sync_window(t1), t1)
     t2 = t1 + timedelta(days=10)
     for err in (OSError("offline"), ReauthRequired("a"), ValueError("boom")):
         result = sync_worker(cache, SyncClient("a", err), lambda: t2).sync_account("a")
         assert result != "ok"
-        assert cache.synced_window(["a"]) == sync.sync_window(t1)
+        assert cache.synced_window(["a"]) == (*sync.sync_window(t1), t1)
     assert sync_worker(cache, SyncClient("a"), lambda: t2).sync_account("a") == "ok"
-    assert cache.synced_window(["a"]) == sync.sync_window(t2)
+    assert cache.synced_window(["a"]) == (*sync.sync_window(t2), t2)
 
 
 def test_old_cache_without_sync_state_treated_as_unsynced_until_first_sync(tmp_path):
@@ -204,3 +204,61 @@ def test_token_only_account_counts_as_active(tmp_path):
     claude.then(tool_msg(free("2026-11-05")), text_msg("ok"))
     a.reply("again")
     assert '"free":[[' in tool_results(claude.messages.calls[-1])[0]["content"]
+
+
+# -- N1/N7: stale data blocks availability answers ------------------------------------
+def _stale(tmp_path, claude, hours):
+    a, _, cache, _ = make(tmp_path, claude, [ev()], accounts=("a@x.com", "work@x.com"))
+    lo, hi = sync.sync_window(NOW)
+    cache.record_sync("work@x.com", lo, hi, NOW - timedelta(hours=hours))
+    return a
+
+
+def test_stale_sync_blocks_free_slots_with_age_message(tmp_path):
+    assert sync.STALE_AFTER == timedelta(hours=2)
+    claude = FakeClaude(tool_msg(free("2026-11-05"),
+                                 ("list_events", {"start": "2026-11-05", "end": "2026-11-06"})),
+                        text_msg("ok"))
+    a = _stale(tmp_path, claude, hours=75)
+    for r in run(a, claude):
+        assert r["is_error"] and '"free"' not in r["content"]
+        assert ("work@x.com last synced 3 days ago (it may need you to sign in again) — "
+                "I can't check availability reliably") in r["content"]
+
+
+def test_fresh_sync_allows_free_slots(tmp_path):
+    claude = FakeClaude(tool_msg(free("2026-11-05")), text_msg("ok"))
+    a = _stale(tmp_path, claude, hours=1.5)          # inside STALE_AFTER
+    r = run(a, claude)[0]
+    assert not r.get("is_error") and '"free":[[' in r["content"]
+
+
+def test_tool_results_include_data_age(tmp_path):
+    claude = FakeClaude(tool_msg(free("2026-11-05"),
+                                 ("list_events", {"start": "2026-11-05", "end": "2026-11-06"})),
+                        text_msg("ok"))
+    a = _stale(tmp_path, claude, hours=1)
+    for r in run(a, claude):
+        assert not r.get("is_error")
+        assert '"data_age":"calendar data last synced 1 hour ago"' in r["content"]
+
+
+def test_prompt_states_data_age(tmp_path):
+    fresh = _stale(tmp_path / "f", FakeClaude(text_msg("hi")), hours=1)
+    assert "Calendar data last synced 1 hour ago." in fresh.system_prompt(NOW)
+    old = _stale(tmp_path / "o", FakeClaude(text_msg("hi")), hours=30)
+    prompt = old.system_prompt(NOW)
+    assert "work@x.com last synced 30 hours ago" in prompt
+    assert "Calendar data last synced 30 hours ago." in prompt
+
+
+def test_calendar_block_not_none_when_unsynced(tmp_path):
+    block = _stale(tmp_path / "s", FakeClaude(text_msg("hi")), hours=50).calendar_block(NOW)
+    assert "(none)" not in block
+    assert ("(not reliably synced — do not answer availability questions from this block) "
+            "(calendar data last synced 2 days ago)") in block
+    new, *_ = make(tmp_path / "n", FakeClaude(text_msg("hi")), tokens=("a@x.com", "new@x.com"))
+    block = new.calendar_block(NOW)
+    assert "(none)" not in block and "(not reliably synced" in block
+    ok, *_ = make(tmp_path / "k", FakeClaude(text_msg("hi")))
+    assert "(none)" in ok.calendar_block(NOW)

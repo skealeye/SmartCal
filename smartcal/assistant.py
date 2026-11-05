@@ -36,6 +36,7 @@ from .config import data_dir
 from .google_auth import ReauthRequired, list_accounts
 from .google_client import http_status
 from .maps import directions_url
+from .sync import STALE_AFTER, ago_text
 
 log = logging.getLogger(__name__)
 
@@ -182,6 +183,25 @@ class AssistantResult:
     changes: list[str] = field(default_factory=list)
     pending: list[str] = field(default_factory=list)   # SmartCal-built "Waiting for your OK" lines
 
+
+@dataclass
+class _SyncStatus:
+    """What the cache can be trusted for: `window` when every active account synced
+    recently, else `problem` (why not). `oldest` is the stalest successful sync."""
+    window: tuple[datetime, datetime] | None = None
+    problem: str | None = None
+    oldest: datetime | None = None
+    stale: bool = False
+
+    def age_text(self, now: datetime) -> str:
+        if self.oldest is None:
+            return ""
+        delta = now - self.oldest
+        when = "just now" if delta < timedelta(minutes=1) else f"{ago_text(delta)} ago"
+        return f"calendar data last synced {when}"
+
+
+UNSYNCED_BLOCK = "(not reliably synced — do not answer availability questions from this block)"
 
 BUSY_TEXT = "Still working on your last message."
 MAX_PENDING = 1      # one approval per action: a "yes" can never approve a bundle
@@ -645,7 +665,7 @@ class Assistant:
         them; free-slot search excludes them separately (Actions.free_slots)."""
         return agenda.visible_events(self.cache, self.settings, events, include_declined=True)
 
-    def calendar_block(self, now: datetime) -> str:
+    def calendar_block(self, now: datetime, status: "_SyncStatus | None" = None) -> str:
         lines = ["Accounts and calendars:"]
         for account, cals in self._active().items():
             names = ", ".join(f"{_ctx(c.name, 80)} (id {_ctx(c.id, 200)}"
@@ -670,9 +690,13 @@ class Assistant:
             lines.append(f"- id={_ctx(e.id, 200)} | account={_ctx(e.account, 200)} | "
                          f"calendar={_ctx(e.calendar_name, 80)} (id {_ctx(e.calendar_id, 200)})"
                          f" | {when} | title: {_ctx(e.title, CONTEXT_TITLE)}{loc}{declined}")
-        if not events:
+        status = status or self._sync_status(now)
+        if status.problem:   # an empty list here must never read as "free"
+            age = status.age_text(now) if status.stale else ""
+            lines.append(UNSYNCED_BLOCK + (f" ({age})" if age else ""))
+        elif not events:
             lines.append("(none)")
-        elif len(events) > MAX_CONTEXT_EVENTS:
+        if len(events) > MAX_CONTEXT_EVENTS:
             lines.append(f"({len(events) - MAX_CONTEXT_EVENTS} more not shown; use list_events)")
         return "\n".join(lines)
 
@@ -681,35 +705,50 @@ class Assistant:
         local = now.astimezone(zone) if zone else now.astimezone()
         zone_name = getattr(zone, "key", None) or local.tzname() or "local"
         offset = local.strftime("%z")
-        known = self._known_window(now)
-        if isinstance(known, str):
-            synced = f"{known}; SmartCal cannot see the owner's events yet."
+        status = self._sync_status(now)
+        if status.problem:
+            synced = f"{status.problem}; SmartCal cannot see the owner's events reliably."
         else:
-            first, last = self._window_days(known, now)
+            first, last = self._window_days(status.window, now)
             synced = (f"SmartCal only has the owner's events from {first.isoformat()} "
                       f"to {last.isoformat()}.")
+        age = status.age_text(now)
+        if age:
+            synced += f" {age[0].upper()}{age[1:]}."
         return SYSTEM_PROMPT.format(
             now=f"{local:%A, %B} {local.day}, {local:%Y} {local:%H:%M}",
             zone=f"{zone_name} (UTC{offset[:3]}:{offset[3:]})",
-            synced=synced, calendar=self.calendar_block(now))
+            synced=synced, calendar=self.calendar_block(now, status))
 
-    def _known_window(self, now: datetime) -> tuple[datetime, datetime] | str:
-        """[start, end) that every active account actually synced, or why there is none.
+    def _sync_status(self, now: datetime) -> "_SyncStatus":
+        """The [start, end) every active account actually synced, or why there is none.
 
         This is what the cache really holds, not the range the clock suggests: an
-        account that needs re-auth, was offline for days or has not finished its
-        first sync (e.g. right after an upgrade or adding an account) narrows it or
-        empties it."""
+        account that has not finished its first sync (e.g. right after an upgrade or
+        adding an account), or whose last successful sync is older than STALE_AFTER
+        (token revoked, PC offline), blocks date and availability answers."""
         active = self._sync_accounts()
         if not active:
-            return "no calendars synced yet"
-        windows = self.cache.sync_windows()
-        missing = [a for a in active if a not in windows]
+            return _SyncStatus(problem="no calendars synced yet")
+        states = self.cache.sync_states()
+        missing = [a for a in active if a not in states]
+        known = self.cache.synced_window([a for a in active if a in states]) \
+            if len(missing) < len(active) else None
+        oldest = known[2] if known else None
         if missing:
-            return " and ".join(_line(a, 200) for a in missing) + \
-                (" hasn't" if len(missing) == 1 else " haven't") + " finished syncing yet"
-        window = self.cache.synced_window(active)
-        return window if window is not None else "no calendars synced yet"
+            return _SyncStatus(problem=" and ".join(_line(a, 200) for a in missing) +
+                               (" hasn't" if len(missing) == 1 else " haven't") +
+                               " finished syncing yet", oldest=oldest)
+        stale = sorted((states[a][2], a) for a in active if now - states[a][2] > STALE_AFTER)
+        if stale:
+            at, account = stale[0]
+            return _SyncStatus(problem=f"{_line(account, 200)} last synced "
+                                       f"{ago_text(now - at)} ago (it may need you to sign in "
+                                       f"again) — I can't check availability reliably",
+                               oldest=oldest, stale=True)
+        if known is None:
+            return _SyncStatus(problem="no calendars synced yet")
+        return _SyncStatus(window=(known[0], known[1]), oldest=oldest)
 
     def _sync_accounts(self) -> list[str]:
         """Accounts whose sync must have finished before dates can be answered: every
@@ -732,17 +771,21 @@ class Assistant:
                         end: datetime | None = None) -> None:
         """Refuse dates the cache does not hold: there, "no events" would be a lie.
         A start must lie in [lo, hi); an (exclusive) end in (lo, hi]."""
-        known = self._known_window(now)
-        if isinstance(known, str):
-            raise _ToolError(f"{known}, so SmartCal cannot see that date; never assume it is free")
-        lo, hi = known
+        status = self._sync_status(now)
+        if status.stale:
+            raise _ToolError(f"{status.problem}. Never assume a time is free")
+        if status.problem:
+            raise _ToolError(f"{status.problem}, so SmartCal cannot see that date; "
+                             f"never assume it is free")
+        lo, hi = status.window
         bad = (start is not None and not lo <= start < hi) or \
               (end is not None and not lo < end <= hi)
         if bad:
-            first, last = self._window_days(known, now)
+            first, last = self._window_days(status.window, now)
             raise _ToolError(f"that date is outside the synced range "
                              f"({first.isoformat()}..{last.isoformat()}); "
                              f"SmartCal only knows events in that window")
+        return status
 
     # -- tools ---------------------------------------------------------------
     def _run_tools(self, uses, turn: _Turn, now: datetime):
@@ -833,15 +876,16 @@ class Assistant:
         start, end = self._dt(args, "start", now), self._dt(args, "end", now)
         if not end > start or end - start > timedelta(days=31):
             raise _ToolError("end must be after start and at most 31 days later")
-        self._require_synced(now, start, end)
-        events =self._visible(self.cache.events_between(start, end))
+        status = self._require_synced(now, start, end)
+        events = self._visible(self.cache.events_between(start, end))
         out = [{"id": e.id, "title": _line(e.title, CONTEXT_TITLE),
                 "start": e.start.isoformat(), "end": e.end.isoformat(), "all_day": e.all_day,
                 "account": e.account, "calendar": _line(e.calendar_name, 80),
                 "calendar_id": e.calendar_id, "location": _line(e.location, CONTEXT_LOCATION),
                 "declined": e.declined}
                for e in events[:MAX_CONTEXT_EVENTS]]
-        return {"events": out, "more": max(0, len(events) - MAX_CONTEXT_EVENTS)}
+        return {"events": out, "more": max(0, len(events) - MAX_CONTEXT_EVENTS),
+                "data_age": status.age_text(now)}
 
     def _free_slots(self, args, turn, now):
         try:
@@ -856,9 +900,10 @@ class Assistant:
         except (OverflowError, ValueError):
             raise _ToolError("date is out of range") from None
         # Nothing cached there (or an account never synced): never report a free day.
-        self._require_synced(now, *bounds)
+        status = self._require_synced(now, *bounds)
         slots = self.actions.free_slots(day, timedelta(minutes=minutes), (h0, h1), now=now)
-        return {"free": [[s.isoformat(), e.isoformat()] for s, e in slots[:20]]}
+        return {"free": [[s.isoformat(), e.isoformat()] for s, e in slots[:20]],
+                "data_age": status.age_text(now)}
 
     def _target(self, args) -> tuple[str, str | None]:
         active = self._active()

@@ -88,10 +88,24 @@ def test_lock_permission_error_still_starts(qtbot, tmp_path, caplog):
         inst, log = make_instance(tmp_path, lock)
         with caplog.at_level("WARNING"):
             assert inst.acquire() is True
-        assert not log and not inst.took_over      # never waited on a "first instance"
+        assert log and not inst.took_over          # asked once, nobody answered: start
         assert "starting without it" in caplog.text
         inst.release()
         assert not lock.unlocked                   # we never held it
+
+
+def test_unusable_lock_still_pings_existing_instance(qtbot, tmp_path):
+    lock = FakeLock(tmp_path / "l", error=Err.PermissionError)
+    inst, log = make_instance(tmp_path, lock, answers=True)
+    assert inst.acquire() is False                 # a copy answered: show it, exit
+    assert log == ["connect", b"show\n"]
+    lone = FakeLock(tmp_path / "m", error=Err.UnknownError)
+    inst2, log2 = make_instance(tmp_path, lone, answers=False)
+    try:
+        assert inst2.acquire() is True and not inst2.took_over   # nobody there: start
+        assert log2 and lone.tries == 1
+    finally:
+        inst2.release()
 
 
 def test_stale_lock_removed_and_retried(qtbot, tmp_path):

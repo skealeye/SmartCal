@@ -18,6 +18,19 @@ log = logging.getLogger(__name__)
 # Everything that reads or prunes the cache (window, assistant, sync) uses sync_window.
 SYNC_PAST_DAYS = 7
 SYNC_FUTURE_DAYS = 60
+# An account whose last successful sync is older than this is not trusted for
+# availability: its token may be revoked or the PC was offline.
+STALE_AFTER = timedelta(hours=2)
+
+
+def ago_text(delta: timedelta) -> str:
+    """'just now', '5 minutes', '3 hours', '2 days' (no 'ago')."""
+    secs = max(0, int(delta.total_seconds()))
+    for unit, size in (("day", 86400), ("hour", 3600), ("minute", 60)):
+        if secs >= size * (2 if unit == "day" else 1):
+            n = secs // size
+            return f"{n} {unit}{'' if n == 1 else 's'}"
+    return "less than a minute"
 
 
 def synced_days(now: datetime) -> tuple[date, date]:

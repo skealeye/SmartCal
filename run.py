@@ -137,7 +137,7 @@ def main() -> int:
 
     tray = TrayController(popup, worker, cache, settings, on_accounts_changed=drop_clients,
                           on_open_settings=open_settings, reminders=reminders,
-                          on_before_exit=window.save_state)
+                          on_before_exit=window.save_state, instance=instance)
     toast.tray = tray
     window.tray_geometry = tray.tray_geometry   # first open: next to the tray icon
     popup.chat_attention.connect(guarded(tray.notify_attention))

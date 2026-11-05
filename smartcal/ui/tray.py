@@ -72,9 +72,10 @@ class TrayController(QSystemTrayIcon):
     def __init__(self, popup, worker, cache, settings, parent=None,
                  on_accounts_changed=None, add_account_fn=None, on_open_settings=None, reminders=None,
                  on_before_exit=None, exit_fn=os._exit, cancel_signin_fn=None,
-                 clock=time.monotonic):
+                 clock=time.monotonic, instance=None):
         super().__init__(parent)
         self.popup, self.worker = popup, worker
+        self._instance = instance   # SingleInstance: released first thing on Quit
         self._on_before_exit = on_before_exit
         self._exit = exit_fn
         self._quit_app = QApplication.quit
@@ -275,7 +276,15 @@ class TrayController(QSystemTrayIcon):
     def quit(self) -> None:
         """Stop the sync thread and quit. A thread stuck in a request (HTTP timeout is
         20 s) is never terminate()d mid-write: state is flushed and the process exits.
-        Every state file is written atomically, so nothing is left half-written."""
+        Every state file is written atomically, so nothing is left half-written.
+
+        The single-instance lock and server are released first: a relaunch during the
+        wait below must start a new copy, not hand over to this exiting one."""
+        if self._instance is not None:
+            try:
+                self._instance.release()
+            except Exception:  # noqa: BLE001
+                log.exception("releasing the single-instance lock failed")
         self.worker.stop()
         if not self.worker.wait(STOP_WAIT_MS):
             log.warning("sync thread did not stop; exiting without waiting for it")
