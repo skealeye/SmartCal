@@ -7,14 +7,15 @@ from datetime import date, datetime, timedelta
 from PyQt6.QtCore import QByteArray, QRect, QSettings, QSize, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QGuiApplication, QPainter
 from PyQt6.QtWidgets import (QButtonGroup, QDialog, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QLabel,
-                             QMainWindow, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
+                             QMainWindow, QPushButton, QScrollArea, QSizePolicy,
                              QStackedWidget, QVBoxLayout, QWidget)
 
 from .. import agenda
 from ..config import data_dir
 from ..sync import synced_days
-from ..textutil import html_to_text, meeting_label
-from . import layout, placement, theme
+from ..textutil import html_to_text, meeting_label, safe_http_url
+from . import layout, meeting_menus, placement, theme
+from .linktext import LinkText
 
 HOUR_H = 48
 GUTTER_W = 52
@@ -39,6 +40,10 @@ def plain_tip(text: str) -> str:
     return f"<p style='white-space:pre'>{html.escape(text)}</p>"
 
 
+def _calendar_color(event) -> str:
+    return theme.stripe_color(event.color)
+
+
 def _clear(lay) -> None:
     while lay.count():
         item = lay.takeAt(0)
@@ -53,10 +58,12 @@ class EventChip(QLabel):
 
     clicked = pyqtSignal(object)
 
-    def __init__(self, event, text: str, wrap: bool = False, parent=None):
+    def __init__(self, event, text: str, wrap: bool = False, parent=None,
+                 color: str | None = None):
         super().__init__(text, parent)
         self.event = event
-        color = theme.stripe_color(event.color)
+        color = theme.stripe_color(color or event.color)
+        self.color = color
         self.setTextFormat(Qt.TextFormat.PlainText)
         self.setWordWrap(wrap)
         self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
@@ -127,16 +134,19 @@ class TimelineColumn(QWidget):
     """One day's 24-hour column; event blocks are positioned from layout.Block."""
 
     def __init__(self, day: date, blocks: list[layout.Block], is_today: bool,
-                 now_min: int | None, ref: datetime, on_click, parent=None):
+                 now_min: int | None, ref: datetime, on_click, parent=None,
+                 color_for=None):
         super().__init__(parent)
         self.day, self.blocks, self.is_today, self.now_min = day, blocks, is_today, now_min
         self.setFixedHeight(24 * HOUR_H)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.chips: list[EventChip] = []
+        color_for = color_for or _calendar_color
         for b in blocks:
             ev = b.event
             s = layout.to_local(ev.start, ref)
-            chip = EventChip(ev, f"{layout.short_time(s)} {ev.title}", wrap=True, parent=self)
+            chip = EventChip(ev, f"{layout.short_time(s)} {ev.title}", wrap=True, parent=self,
+                             color=color_for(ev))
             chip.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
             chip.clicked.connect(on_click)
             chip.show()
@@ -195,6 +205,7 @@ class TimeView(QWidget):
         self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._outer.addWidget(self._scroll, 1)
         self._want_scroll: int | None = None
+        self.color_for = _calendar_color
 
     def set_data(self, dates: list[date], by_day: dict[date, list], ref: datetime,
                  reset_scroll: bool) -> None:
@@ -234,7 +245,7 @@ class TimeView(QWidget):
             sl.setSpacing(1)
             for ev in by_day.get(d, []):
                 if ev.all_day:
-                    chip = EventChip(ev, ev.title)
+                    chip = EventChip(ev, ev.title, color=self.color_for(ev))
                     chip.clicked.connect(self.event_clicked)
                     sl.addWidget(chip)
                     self.allday_chips.append(chip)
@@ -246,7 +257,7 @@ class TimeView(QWidget):
                 n = layout.to_local(ref, ref)
                 now_min = n.hour * 60 + n.minute
             col = TimelineColumn(d, layout.day_blocks(timed, d, ref), is_today, now_min,
-                                 ref, self.event_clicked.emit)
+                                 ref, self.event_clicked.emit, color_for=self.color_for)
             self.columns.append(col)
             hbox.addWidget(col, 1)
 
@@ -303,11 +314,12 @@ class DayCell(QFrame):
         self._lay.addWidget(self.number)
         self.dimmed = not in_month
 
-    def set_events(self, events: list, on_click, ref: datetime) -> None:
+    def set_events(self, events: list, on_click, ref: datetime, color_for=None) -> None:
         shown, more = layout.split_for_month(events)
+        color_for = color_for or _calendar_color
         for ev in shown:
             text = ev.title if ev.all_day else f"{layout.short_time(layout.to_local(ev.start, ref))} {ev.title}"
-            chip = EventChip(ev, text)
+            chip = EventChip(ev, text, color=color_for(ev))
             if self.dimmed:
                 chip.set_opacity(0.5 if not chip.declined else 0.3)
             chip.clicked.connect(on_click)
@@ -339,6 +351,7 @@ class MonthView(QWidget):
         self._grid = QGridLayout(self)
         self._grid.setContentsMargins(0, 0, 0, 0)
         self._grid.setSpacing(0)
+        self.color_for = _calendar_color
 
     def set_data(self, dates: list[date], month: int, by_day: dict[date, list], ref: datetime):
         _clear(self._grid)
@@ -352,7 +365,7 @@ class MonthView(QWidget):
             self._grid.setColumnStretch(c, 1)
         for i, d in enumerate(dates):
             cell = DayCell(d, d.month == month, d == today)
-            cell.set_events(by_day.get(d, []), self.event_clicked.emit, ref)
+            cell.set_events(by_day.get(d, []), self.event_clicked.emit, ref, self.color_for)
             cell.clicked.connect(self.day_clicked)
             self._grid.addWidget(cell, 1 + i // 7, i % 7)
             self.cells[d] = cell
@@ -363,15 +376,23 @@ class MonthView(QWidget):
 class EventDetails(QDialog):
     """Read-only details for one event."""
 
-    def __init__(self, event, ref: datetime, parent=None):
+    hide_requested = pyqtSignal(object, str)      # event, scope ("event" / "series")
+    color_requested = pyqtSignal(object, object)  # event, "#rrggbb" or None (reset)
+
+    def __init__(self, event, ref: datetime, parent=None, settings=None):
         super().__init__(parent)
         self.event = event
+        self.settings = settings
+        self._menu = None
         self.setWindowTitle(event.title or "Event")
         self.setMinimumWidth(340)
         self.setStyleSheet(f"QDialog{{background:{theme.BG};}}"
                            f"QLabel{{color:{theme.TEXT};}}"
-                           f"QPlainTextEdit{{background:{theme.BG};color:{theme.TEXT};"
-                           f"border:1px solid {theme.BORDER};}}")
+                           f"QTextBrowser{{background:{theme.BG};color:{theme.TEXT};"
+                           f"border:1px solid {theme.BORDER};}}"
+                           f"QPushButton{{background:{theme.BORDER};color:{theme.TEXT};"
+                           f"border:none;padding:5px 12px;border-radius:4px;}}"
+                           f"QPushButton:hover{{background:#4a4d51;}}")
         lay = QVBoxLayout(self)
         self.title_label = QLabel(event.title)
         self.title_label.setTextFormat(Qt.TextFormat.PlainText)
@@ -380,10 +401,9 @@ class EventDetails(QDialog):
         self.time_label = QLabel(layout.format_range(event, ref))
         self.time_label.setTextFormat(Qt.TextFormat.PlainText)
         self.time_label.setWordWrap(True)
-        color = theme.stripe_color(event.color)
-        self.calendar_label = QLabel(
-            f'<span style="color:{color};">&#9632;</span> ' + _esc(event.calendar_name))
+        self.calendar_label = QLabel()
         self.calendar_label.setTextFormat(Qt.TextFormat.RichText)
+        self.update_color()
         lay.addWidget(self.title_label)
         lay.addWidget(self.time_label)
         self.join_button = None
@@ -414,14 +434,51 @@ class EventDetails(QDialog):
         self.description_box = None
         description = html_to_text(event.description or "")
         if description:
-            self.description_box = QPlainTextEdit(description)
-            self.description_box.setReadOnly(True)
+            # Plain text with clickable http(s) links; see linktext.LinkText.
+            self.description_box = LinkText(description)
             self.description_box.setMinimumHeight(90)
             lay.addWidget(self.description_box, 1)
+        self.hide_button = self.color_button = None
+        if settings is not None:
+            row = QHBoxLayout()
+            self.hide_button = QPushButton("Hide…")
+            self.hide_button.setToolTip("Hide in SmartCal only (Google is not changed)")
+            self.hide_button.clicked.connect(lambda _c=False: self.show_hide_menu())
+            self.color_button = QPushButton(meeting_menus.color_button_text(event))
+            self.color_button.setToolTip("Color in SmartCal only (Google is not changed)")
+            self.color_button.clicked.connect(lambda _c=False: self.show_color_menu())
+            row.addWidget(self.hide_button)
+            row.addWidget(self.color_button)
+            row.addStretch(1)
+            lay.addLayout(row)
+
+    def update_color(self) -> None:
+        color = theme.effective_color(self.event, self.settings)
+        self.calendar_label.setText(
+            f'<span style="color:{color};">&#9632;</span> ' + _esc(self.event.calendar_name))
+
+    # -- Hide… / Color… -------------------------------------------------------
+    def menu(self):
+        return self._menu
+
+    def _popup_menu(self, menu, button) -> None:
+        self._menu = menu
+        menu.popup(button.mapToGlobal(button.rect().bottomLeft()))
+
+    def show_hide_menu(self) -> None:
+        self._popup_menu(meeting_menus.hide_menu(
+            self, self.event, lambda scope: self.hide_requested.emit(self.event, scope)),
+            self.hide_button)
+
+    def show_color_menu(self) -> None:
+        current = self.settings.event_color(self.event) if self.settings is not None else None
+        self._popup_menu(meeting_menus.color_menu(
+            self, self.event, current, lambda c: self.color_requested.emit(self.event, c)),
+            self.color_button)
 
     @staticmethod
     def open_link(url: str) -> None:
-        if url.lower().startswith(("http://", "https://")):
+        if safe_http_url(url) is not None:
             QDesktopServices.openUrl(QUrl(url))
 
 
@@ -430,6 +487,8 @@ def _esc(text: str) -> str:
 
 
 class CalendarWindow(QMainWindow):
+    meetings_changed = pyqtSignal()   # a meeting was hidden or recolored here
+
     def __init__(self, cache, settings, qsettings: QSettings | None = None, parent=None):
         super().__init__(parent)
         self.cache, self.settings = cache, settings
@@ -483,9 +542,16 @@ class CalendarWindow(QMainWindow):
         self.unsynced_label.setStyleSheet(f"color:{theme.WARN};padding:4px 2px;")
         self.unsynced_label.hide()
         root.addWidget(self.unsynced_label)
+        self.notice_label = QLabel()
+        self.notice_label.setObjectName("notice")
+        self.notice_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.notice_label.setStyleSheet(f"color:{theme.MUTED};padding:4px 2px;")
+        self.notice_label.hide()
+        root.addWidget(self.notice_label)
         self.stack = QStackedWidget()
         self.time_view = TimeView()
         self.month_view = MonthView()
+        self.time_view.color_for = self.month_view.color_for = self._color_for
         self.stack.addWidget(self.time_view)
         self.stack.addWidget(self.month_view)
         root.addWidget(self.stack, 1)
@@ -581,7 +647,10 @@ class CalendarWindow(QMainWindow):
         return agenda.visible_events(
             self.cache, self.settings,
             self.cache.events_between(first - timedelta(days=1), last + timedelta(days=1)),
-            include_declined=True)
+            include_declined=True, hide_user_hidden=True)
+
+    def _color_for(self, event) -> str:
+        return theme.effective_color(event, self.settings)
 
     def refresh(self, reset_scroll: bool = False) -> None:
         """Re-read and rebuild. While hidden, just remember to do it on show."""
@@ -631,10 +700,37 @@ class CalendarWindow(QMainWindow):
         if self.details is not None:
             self.details.close()
             self.details.deleteLater()
-        self.details = EventDetails(event, self.now(), self)
+        self.details = EventDetails(event, self.now(), self, settings=self.settings)
+        self.details.hide_requested.connect(self.hide_meeting)
+        self.details.color_requested.connect(self.color_meeting)
         placement.center_over(self.details, self)   # opened from the window: over it
         self.details.show()
         self.details.raise_()
+
+    # -- hide / color (SmartCal-local) ---------------------------------------------
+    def show_notice(self, text: str) -> None:
+        self.notice_label.setText(text)
+        self.notice_label.setVisible(bool(text))
+
+    def notice_text(self) -> str:
+        return self.notice_label.text() if not self.notice_label.isHidden() else ""
+
+    def hide_meeting(self, event, scope: str) -> None:
+        self.settings.hide_event(event, scope)
+        self._close_details()
+        self.show_notice(meeting_menus.HIDDEN_NOTICE)
+        self.refresh()
+        self.meetings_changed.emit()
+
+    def color_meeting(self, event, color) -> None:
+        if color is None:
+            self.settings.clear_event_color(event)
+        else:
+            self.settings.set_event_color(event, color)
+        if self.details is not None and self.details.event is event:
+            self.details.update_color()
+        self.refresh()
+        self.meetings_changed.emit()
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -647,6 +743,7 @@ class CalendarWindow(QMainWindow):
     def hideEvent(self, e):
         self._save_geometry()
         self._close_details()
+        self.show_notice("")
         super().hideEvent(e)
 
     def closeEvent(self, e):

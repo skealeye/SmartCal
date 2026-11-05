@@ -6,6 +6,10 @@ SmartCal is a Windows tray calendar app. It merges your personal and work Google
 
 - **Synced range:** SmartCal keeps your events from 7 days ago (or from the start of this month's grid, if that is earlier, so the current month view is always complete) to 60 days ahead, refreshed every 5 minutes. The week and month windows show **Not synced for these dates** past that range. The assistant only trusts the dates every account has actually synced: if an account needs you to sign in again, was offline, or has not finished its first sync, it says it cannot see those dates (or that the account hasn't finished syncing yet) instead of calling them free. If any account's last successful sync is more than 2 hours old, it will not answer availability questions and says how long ago that account last synced; its answers always say how old the calendar data is.
 - **Join buttons and plain-text descriptions:** meetings with a Zoom, Google Meet or Teams link show a prominent "Join Zoom meeting" (or Meet/Teams) button in the event details and a compact "Join" button on the agenda popup row. Event descriptions from Google are shown as plain text (HTML tags are converted to line breaks, never rendered).
+- **Clickable links in meeting notes:** `http://` and `https://` addresses in a description are clickable in the event details and in the popup's expanded meeting, and open in your browser. Nothing else becomes a link (no `javascript:`, `file:`, `mailto:` or bare `www.`), and hovering a link shows its full address.
+- **Meeting details in the popup:** click a meeting in the tray popup (or Tab to it and press Enter or Space) to expand it: time, calendar, location, notes (scrolls after about 8 lines), the Join button, and **Hide…** / **Color…**. One meeting is open at a time; click it again or press Esc to collapse it. The small "Join" button on the row joins without expanding.
+- **Hide a meeting:** **Hide…** (popup or event details) offers **Hide this meeting** and, for a recurring meeting, **Hide all in this series**. A hidden meeting disappears from the popup, the next-up line, the Day/Week/Month window and reminder toasts. Hiding is local to SmartCal: nothing changes in Google, and the assistant still sees the meeting (it still counts as busy for free-time and availability answers). Undo it in **Settings > Meetings**.
+- **Color a meeting:** **Color…** picks one of 10 colors (or **Reset to calendar color**). A recurring meeting's color applies to the whole series, so every occurrence keeps the same color; a one-off meeting is colored on its own. The color shows in the popup stripe, the window and the event details. Local to SmartCal only; Google is not changed.
 - **One copy running:** starting SmartCal again (for example from the Start Menu while it already started at login) just opens the running copy's popup. If the running copy does not answer within about 1.5 seconds (it hung, or a stale lock was left behind), the new copy starts anyway and says so in a tray message, so you are never left with no SmartCal.
 - **Declined meetings** are left out of the agenda, reminders and free-time search; the week and month windows show them dimmed and struck through.
 - **Shared calendars** (for example your personal calendar also subscribed in the work account) count once: events and reminders are not doubled, and in Settings the calendar is set up under the account that owns it.
@@ -81,6 +85,10 @@ Autostart from source runs `pythonw.exe run.py`. If the repo is on the Z: networ
 
 Open from the tray icon menu: accounts (add/remove), reminder lead time, start with Windows, and the other options shown in the dialog.
 
+**Meetings** tab: lists hidden meetings (title, "this meeting" or "whole series", date) with an **Unhide** button each, and colored meetings with a **Reset** button each. Changes apply when you click **OK**.
+
+Hidden meetings and meeting colors are stored in `%APPDATA%\SmartCal\settings.json` (keys `hidden_events`, `event_colors`, `event_color_titles`; at most 500 of each). They are never sent to Google.
+
 ## Troubleshooting
 
 - Log: `%APPDATA%\SmartCal\smartcal.log`.
@@ -92,7 +100,7 @@ Open from the tray icon menu: accounts (add/remove), reminder lead time, start w
 
 - Approvals in chat understand English only.
 - Google Calendar only.
-- The week and month windows are read-only.
+- The week and month windows are read-only (apart from SmartCal-local Hide… and Color…).
 
 ## Spike script
 

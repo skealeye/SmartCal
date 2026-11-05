@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout, 
                              QWidget)
 
 from .. import agenda
+from . import theme
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ class SettingsDialog(QDialog):
         self._cal_layout = QVBoxLayout(self._cal_tab)
         tabs.addTab(self._cal_tab, "Calendars")
         tabs.addTab(self._build_general(), "General")
+        tabs.addTab(self._build_meetings(), "Meetings")
         tabs.addTab(self._build_accounts(), "Accounts")
         self._build_calendars()
 
@@ -137,6 +139,91 @@ class SettingsDialog(QDialog):
         form.addRow("Claude model", self.model_edit)
         return w
 
+    # -- meetings tab (hidden meetings, meeting colors; local to SmartCal) ---
+    def _build_meetings(self) -> QWidget:
+        """Lists what was hidden or colored. Unhide / Reset apply on OK."""
+        self._unhide: set[str] = set()
+        self._reset_colors: set[str] = set()
+        # key -> (title label, Unhide/Reset button)
+        self.hidden_rows: dict[str, tuple[QLabel, QPushButton]] = {}
+        self.color_rows: dict[str, tuple[QLabel, QPushButton]] = {}
+        w = QWidget()
+        outer = QVBoxLayout(w)
+        note = QLabel("Hidden and colored meetings are kept in SmartCal only; "
+                      "nothing changes in Google Calendar.")
+        note.setWordWrap(True)
+        outer.addWidget(note)
+        inner = QWidget()
+        lay = QVBoxLayout(inner)
+
+        def heading(text: str) -> None:
+            head = QLabel(text)
+            head.setStyleSheet("font-weight:bold;margin-top:8px;")
+            lay.addWidget(head)
+
+        def add_row(text: str, detail: str, button_text: str, on_click) -> tuple:
+            row = QHBoxLayout()
+            label = QLabel(text)
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            label.setWordWrap(True)
+            sub = QLabel(detail)
+            sub.setTextFormat(Qt.TextFormat.PlainText)
+            sub.setEnabled(False)
+            button = QPushButton(button_text)
+            button.clicked.connect(lambda _c=False: on_click())
+            row.addWidget(label, 1)
+            row.addWidget(sub)
+            row.addWidget(button)
+            lay.addLayout(row)
+            return label, button
+
+        heading("Hidden meetings")
+        if not self.settings.hidden_events:
+            lay.addWidget(QLabel("No hidden meetings. Use Hide… on a meeting to hide it."))
+        for key, info in reversed(list(self.settings.hidden_events.items())):
+            scope = "whole series" if info.get("scope") == "series" else "this meeting"
+            label, button = add_row(info.get("title") or "(no title)",
+                                    f"{scope} · {info.get('when', '')}", "Unhide",
+                                    lambda k=key: self._mark(k, self._unhide, self.hidden_rows))
+            self.hidden_rows[key] = (label, button)
+
+        heading("Colored meetings")
+        if not self.settings.event_colors:
+            lay.addWidget(QLabel("No colored meetings. Use Color… on a meeting to color it."))
+        for key, color in reversed(list(self.settings.event_colors.items())):
+            title = self.settings.event_color_titles.get(key) or "(no title)"
+            scope = "whole series" if key.startswith("s:") else "this meeting"
+            label, button = add_row(title, scope, "Reset",
+                                    lambda k=key: self._mark(k, self._reset_colors,
+                                                             self.color_rows))
+            swatch = QLabel()
+            swatch.setFixedSize(14, 14)
+            swatch.setStyleSheet(f"background:{theme.stripe_color(color)};border-radius:3px;")
+            swatch.setAccessibleName(f"color {theme.stripe_color(color)}")
+            lay.itemAt(lay.count() - 1).layout().insertWidget(0, swatch)
+            self.color_rows[key] = (label, button)
+        lay.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(inner)
+        outer.addWidget(scroll, 1)
+        return w
+
+    def _mark(self, key: str, pending: set, rows: dict) -> None:
+        """Toggle a pending Unhide/Reset; nothing is saved until OK."""
+        label, button = rows[key]
+        verb = "Unhide" if rows is self.hidden_rows else "Reset"
+        if key in pending:
+            pending.discard(key)
+            button.setText(verb)
+        else:
+            pending.add(key)
+            button.setText(f"Undo {verb.lower()}")
+        font = label.font()
+        font.setStrikeOut(key in pending)
+        label.setFont(font)
+
     # -- accounts tab ------------------------------------------------------
     def _build_accounts(self) -> QWidget:
         w = QWidget()
@@ -214,7 +301,8 @@ class SettingsDialog(QDialog):
 
     # -- apply -------------------------------------------------------------
     _FIELDS = ("hidden_calendars", "shown_calendars", "lead_minutes", "default_lead_minutes",
-               "muted", "autostart", "claude_model")
+               "muted", "autostart", "claude_model", "hidden_events", "event_colors",
+               "event_color_titles")
 
     def accept(self) -> None:
         s = self.settings
@@ -228,6 +316,11 @@ class SettingsDialog(QDialog):
                 s.lead_minutes[cid] = spin.value()
         s.autostart = self.autostart_box.isChecked()
         s.claude_model = self.model_edit.text().strip() or s.claude_model
+        for key in self._unhide:
+            s.hidden_events.pop(key, None)
+        for key in self._reset_colors:
+            s.event_colors.pop(key, None)
+            s.event_color_titles.pop(key, None)
         try:
             s.save()
         except OSError as exc:
