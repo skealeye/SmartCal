@@ -156,10 +156,12 @@ class GoogleClient:
                          for a in raw.get("attendees", []) if isinstance(a, dict)))
 
     @_locked
-    def list_events(self, start: datetime, end: datetime) -> list[Event]:
-        """Events from every calendar in [start, end), recurrences expanded."""
+    def list_events(self, start: datetime, end: datetime,
+                    calendars: list[CalendarInfo] | None = None) -> list[Event]:
+        """Events from every calendar in [start, end), recurrences expanded. Pass
+        calendars (from list_calendars) to skip fetching the list again."""
         events: list[Event] = []
-        for cal in self.list_calendars():
+        for cal in (self.list_calendars() if calendars is None else calendars):
             page = None
             while True:
                 resp = _exec(self.service.events().list(

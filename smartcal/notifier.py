@@ -86,9 +86,9 @@ class Notifier:
                     continue
                 mins = max(1, math.ceil((ev.start - now).total_seconds() / 60))
                 lead_text = f"Starts in {mins} min"
-                body = f"{lead_text} · {ev.start.astimezone():%H:%M} · {ev.calendar_name}"
+                body = f"{lead_text} · {agenda.clock_text(ev.start.astimezone())} · {ev.calendar_name}"
             elif now < ev.end and now - ev.start <= CATCH_UP_WINDOW:
-                body = f"Started {ev.start.astimezone():%H:%M} · {ev.calendar_name}"
+                body = f"Started {agenda.clock_text(ev.start.astimezone())} · {ev.calendar_name}"
             else:
                 continue  # over, or began too long ago to be news: dropped silently
             # Mark before sending: a failing toast must not repeat every 30 s.

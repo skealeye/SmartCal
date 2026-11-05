@@ -237,9 +237,7 @@ class AgendaPopup(QWidget):
     def _resize(self) -> None:
         """Cap the list height (header/footer stay visible), then re-anchor if shown."""
         lay = self.layout()
-        if self._scroll.isHidden() and not self._rows:
-            pass
-        else:
+        if not (self._scroll.isHidden() and not self._rows):
             max_total = min(MAX_HEIGHT, self._area().height() - 24)
             self._scroll.setFixedHeight(0)
             lay.activate()

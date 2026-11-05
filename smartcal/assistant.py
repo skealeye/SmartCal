@@ -943,6 +943,8 @@ class Assistant:
             try:
                 current = self.actions.client(account).get_event(event_id,
                                                                  calendar_id=calendar_id)
+            except ReauthRequired:
+                raise                   # "sign in again", not "not found"
             except Exception as exc:  # noqa: BLE001
                 log.info("delete_event lookup failed: %s", type(exc).__name__)
                 raise EventNotFoundError(event_id) from None

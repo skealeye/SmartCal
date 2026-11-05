@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
+from ..agenda import clock_text
 from PyQt6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 
@@ -36,7 +37,8 @@ class RemindersDialog(QDialog):
             row = QWidget()
             h = QHBoxLayout(row)
             h.setContentsMargins(0, 0, 0, 0)
-            label = QLabel(f"{r.fire_at.astimezone():%Y-%m-%d %H:%M}  {r.text}")
+            when = r.fire_at.astimezone()
+            label = QLabel(f"{when:%Y-%m-%d} {clock_text(when)}  {r.text}")
             label.setTextFormat(Qt.TextFormat.PlainText)
             label.setWordWrap(True)
             btn = QPushButton("Cancel")

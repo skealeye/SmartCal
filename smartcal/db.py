@@ -135,6 +135,17 @@ class Cache:
             con.execute("DELETE FROM events WHERE account = ?", (account,))
             con.execute("DELETE FROM calendars WHERE account = ?", (account,))
 
+    def purge_orphans(self, accounts) -> int:
+        """Delete events and calendars of accounts not in `accounts` (e.g. rows a sync
+        in flight re-inserted after the account was removed). Returns rows deleted."""
+        keep = sorted(set(accounts))
+        marks = ",".join("?" * len(keep))
+        where = f"account NOT IN ({marks})" if keep else "1"
+        with closing(self._connect()) as con, con:
+            n = con.execute(f"DELETE FROM events WHERE {where}", keep).rowcount
+            n += con.execute(f"DELETE FROM calendars WHERE {where}", keep).rowcount
+        return n
+
     def calendars_by_account(self) -> dict[str, list[CalendarInfo]]:
         with closing(self._connect()) as con:
             rows = con.execute(

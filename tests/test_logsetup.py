@@ -43,7 +43,7 @@ class OkClient:
     def list_calendars(self):
         return [CalendarInfo("primary", "Me", "#111", True)]
 
-    def list_events(self, start, end):
+    def list_events(self, start, end, calendars=None):
         return []
 
 

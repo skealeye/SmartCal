@@ -7,7 +7,7 @@ from smartcal.db import Cache
 from smartcal.google_auth import ReauthRequired
 from smartcal.models import CalendarInfo, Event
 from smartcal.settings import Settings
-from smartcal.sync import SyncWorker
+from smartcal.live_sync import LiveSyncWorker
 
 
 def _ev(id, cal="p"):
@@ -25,7 +25,7 @@ class FakeClient:
             raise self.error
         return [CalendarInfo("p", "Me", "#1", True), CalendarInfo("ooo", "OOO", "#2", False)]
 
-    def list_events(self, start, end):
+    def list_events(self, start, end, calendars=None):
         if self.error:
             raise self.error
         return self.events
@@ -37,7 +37,7 @@ def cache(tmp_path):
 
 
 def worker(cache, client, tmp_path):
-    return SyncWorker(cache, {"a": client}, Settings(tmp_path / "s.json"))
+    return LiveSyncWorker(cache, lambda account: client, accounts_fn=lambda: ["a"])
 
 
 def _cached(cache):
@@ -82,7 +82,7 @@ def test_worker_emits_signals(qtbot, cache, tmp_path):
 def test_unhiding_calendar_shows_cached_events_without_resync(cache, tmp_path):
     from smartcal import agenda
     st = Settings(tmp_path / "s.json")
-    w = SyncWorker(cache, {"a": FakeClient([_ev("1"), _ev("2", "ooo")])}, st)
+    w = worker(cache, FakeClient([_ev("1"), _ev("2", "ooo")]), tmp_path)
     assert w.sync_account("a") == "ok"
     now = datetime.now().astimezone()
     assert agenda.next_event(cache, st, now).id == "1"
@@ -96,7 +96,7 @@ def test_sync_window_is_last_week_to_two_months_ahead(cache, tmp_path):
     seen = []
 
     class Recording(FakeClient):
-        def list_events(self, start, end):
+        def list_events(self, start, end, calendars=None):
             seen.append((start, end))
             return []
 

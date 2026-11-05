@@ -2,6 +2,14 @@
 
 SmartCal is a Windows tray calendar app. It merges your personal and work Google calendars into one agenda popup, shows week and month views, sends toast reminders before meetings, and has a chat assistant (Claude) that can add, move and delete events, set reminders and find free time.
 
+## How it works
+
+- **Synced range:** SmartCal keeps your events from 7 days ago to 60 days ahead (refreshed every 5 minutes). The week and month windows show **Not synced for these dates** past that range, and the assistant says it cannot see those dates instead of calling them free.
+- **One copy running:** starting SmartCal again (for example from the Start Menu while it already started at login) just opens the running copy's popup.
+- **Declined meetings** are left out of the agenda, reminders and free-time search; the week and month windows show them dimmed and struck through.
+- **Shared calendars** (for example your personal calendar also subscribed in the work account) count once: events and reminders are not doubled, and in Settings the calendar is set up under the account that owns it.
+- **Sign-in:** while a Google sign-in waits for the browser, the tray menu shows **Cancel Google sign-in** (and Settings > Accounts shows **Signing in… Cancel**), so closing the browser window never blocks a retry.
+
 ## One-time setup
 
 ### Google Cloud project
@@ -62,7 +70,7 @@ Autostart from source runs `pythonw.exe run.py`. If the repo is on the Z: networ
 ## What the assistant does
 
 - Asks before deleting or changing meetings that have attendees, and asks one confirmation at a time.
-- Every change can be reversed with **Undo** (the last 20 changes are kept).
+- Every change can be reversed with **Undo** (the last 20 changes are kept). If the event was changed in Google since (for example a guest replied), Undo stops and offers **Undo anyway**, which overwrites those changes after you confirm.
 - Never emails attendees.
 - Handles reminders ("remind me to call Sam in 20 minutes") and adds a Maps link when you ask for directions.
 

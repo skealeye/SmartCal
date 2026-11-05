@@ -264,6 +264,7 @@ class ChatWidget(QWidget):
             self._add_error(GENERIC_ERROR)
         finally:
             self._pending_worker = None
+            worker.deleteLater()     # parented to the widget: free it once done
             self._set_busy(False)
             self._scroll_bottom()
 

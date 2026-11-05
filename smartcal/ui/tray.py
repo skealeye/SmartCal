@@ -30,6 +30,17 @@ def dialog_visible(dlg) -> bool:
         return False
 
 
+def track_dialog(holder: list, dlg) -> None:
+    """Remember `dlg` in `holder` (a 1-item list) until it is destroyed. A late
+    `destroyed` from an older dialog never clears a newer one."""
+    holder[:] = [dlg]
+
+    def forget(*_args, d=dlg) -> None:
+        if holder and holder[0] is d:
+            holder.clear()
+    dlg.destroyed.connect(forget)
+
+
 def make_icon(day: int) -> QIcon:
     """A small calendar-style icon showing the day number (drawn, no image files)."""
     size = 64
@@ -75,7 +86,7 @@ class TrayController(QSystemTrayIcon):
         self._add_gen = 0
         self._on_open_settings = on_open_settings
         self.reminders = reminders
-        self._reminders_dialog = None
+        self._reminders_ref: list = []
         self._adding = False
         self._attention = False
         self._icon_day = 0
@@ -168,9 +179,12 @@ class TrayController(QSystemTrayIcon):
             return
         dlg = RemindersDialog(self.reminders)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self._reminders_dialog = dlg
-        dlg.destroyed.connect(lambda *_: setattr(self, "_reminders_dialog", None))
+        track_dialog(self._reminders_ref, dlg)
         dlg.show()
+
+    @property
+    def _reminders_dialog(self):
+        return self._reminders_ref[0] if self._reminders_ref else None
 
     def refresh_reminders(self) -> None:
         if dialog_visible(self._reminders_dialog):

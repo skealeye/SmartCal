@@ -23,13 +23,13 @@ from smartcal.undo import UndoStore
 from smartcal.toast import ToastSender, register_app_id
 from smartcal.ui.popup import AgendaPopup
 from smartcal.ui.settings_dialog import SettingsDialog
-from smartcal.ui.tray import TrayController, dialog_visible
+from smartcal.ui.tray import TrayController, dialog_visible, track_dialog
 from smartcal.ui.window import CalendarWindow
 
 
 def main() -> int:
+    install_excepthooks()   # first: even a failure while setting up logging is caught
     setup_logging(data_dir() / "smartcal.log")
-    install_excepthooks()
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("SmartCal")
@@ -40,6 +40,7 @@ def main() -> int:
         return 0
 
     cache = Cache(data_dir() / "cache.db")
+    cache.purge_orphans(list_accounts())
     settings = Settings()
     autostart.apply_at_startup(settings)  # on by default, first run only
     try:
@@ -55,7 +56,7 @@ def main() -> int:
     def drop_clients() -> None:
         clients.clear()
 
-    worker = LiveSyncWorker(cache, client_for, settings)
+    worker = LiveSyncWorker(cache, client_for)
 
     popup = AgendaPopup(cache, settings)
     popup.set_no_accounts(not list_accounts())
@@ -108,8 +109,7 @@ def main() -> int:
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.applied.connect(on_settings_applied)
         tray.signin_changed.connect(dlg.refresh_signin)
-        dialog_ref[:] = [dlg]
-        dlg.destroyed.connect(lambda *_: dialog_ref.clear())
+        track_dialog(dialog_ref, dlg)
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()
@@ -142,6 +142,7 @@ def main() -> int:
     @guarded
     def on_synced(_account: str) -> None:
         accounts = list_accounts()
+        cache.purge_orphans(accounts)   # a sync in flight during removal re-adds rows
         popup.set_no_accounts(not accounts)
         popup.prune_accounts(accounts)
         popup.refresh()

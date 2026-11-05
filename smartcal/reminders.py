@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from .agenda import clock_text
 from .config import data_dir
 
 log = logging.getLogger(__name__)
@@ -197,7 +198,7 @@ class ReminderFirer:
         for r in claimed:
             body = r.text
             if now - r.fire_at > LATE_AFTER:
-                body = f"(was due {r.fire_at.astimezone():%H:%M}) {r.text}"
+                body = f"(was due {clock_text(r.fire_at.astimezone())}) {r.text}"
             try:
                 self.send_toast("Reminder", body, None)
             except Exception:  # noqa: BLE001

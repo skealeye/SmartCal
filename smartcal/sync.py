@@ -48,20 +48,19 @@ class SyncWorker(QThread):
     synced = pyqtSignal(str)
     status = pyqtSignal(str, str)
 
-    def __init__(self, cache, clients, settings=None, interval_seconds: int = 300, parent=None):
+    def __init__(self, cache, client_for, interval_seconds: int = 300, parent=None):
         super().__init__(parent)
         self.cache = cache
-        self._clients = clients
-        self.settings = settings
+        self._client_for = client_for   # account -> GoogleClient
         self.interval_seconds = interval_seconds
         self._wake = threading.Event()
         self._stop = threading.Event()
 
     def _accounts(self) -> list[str]:
-        return list(self._clients) if isinstance(self._clients, dict) else []
+        return []   # LiveSyncWorker reads the stored accounts
 
     def _client(self, account: str):
-        return self._clients[account] if isinstance(self._clients, dict) else self._clients(account)
+        return self._client_for(account)
 
     def sync_account(self, account: str) -> str:
         """One sync of one account; returns "ok", "offline", "reauth" or "error".
@@ -72,7 +71,7 @@ class SyncWorker(QThread):
         try:
             client = self._client(account)
             calendars = client.list_calendars()
-            events = client.list_events(start, end)
+            events = client.list_events(start, end, calendars=calendars)
         except ReauthRequired:
             return "reauth"
         except Exception as exc:  # noqa: BLE001 - classified below

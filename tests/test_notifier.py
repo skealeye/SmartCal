@@ -47,7 +47,7 @@ def test_toast_fires_at_lead_time_once(tmp_path):
     r.notifier.check(T0 - timedelta(minutes=10))
     assert len(r.toasts) == 1
     assert r.toasts[0][0] == "Event e1" and r.toasts[0][2] == "https://meet.example/x"
-    assert r.toasts[0][1] == "Starts in 10 min · 09:00 · Main"
+    assert r.toasts[0][1] == "Starts in 10 min · 9:00 AM · Main"
     r.notifier.check(T0 - timedelta(minutes=9, seconds=30))
     r.notifier.check(T0 - timedelta(minutes=2))
     assert len(r.toasts) == 1
@@ -96,7 +96,7 @@ def test_after_wake_shows_missed_toast_for_event_in_progress_only(tmp_path):
                        ev("going", start=T0 + timedelta(minutes=5), minutes=60)])
     r.notifier.check(T0 + timedelta(minutes=45))  # woke up: "over" ended, "going" in progress
     assert [t[0] for t in r.toasts] == ["Event going"]
-    assert r.toasts[0][1].startswith("Started 09:05")
+    assert r.toasts[0][1].startswith("Started 9:05 AM")
     r.notifier.check(T0 + timedelta(minutes=46))
     assert len(r.toasts) == 1
 
@@ -168,7 +168,7 @@ def test_long_running_event_started_days_ago_toasts_once(tmp_path):
     start = T0 - timedelta(hours=5)
     r = Rig(tmp_path, [ev(start=start, minutes=60 * 24 * 6)])
     r.notifier.check(T0)  # started 5 h ago, still running: one catch-up toast
-    assert len(r.toasts) == 1 and r.toasts[0][1].startswith("Started 04:00")
+    assert len(r.toasts) == 1 and r.toasts[0][1].startswith("Started 4:00 AM")
     for days in (1, 2, 3, 4, 5):
         r.notifier.check(T0 + timedelta(days=days))
         r.make().check(T0 + timedelta(days=days, minutes=1))  # also after a restart
@@ -205,7 +205,7 @@ def test_zero_lead_does_not_say_started_early(tmp_path):
     r.notifier.check(T0 - timedelta(seconds=30))
     assert r.toasts == []
     r.notifier.check(T0)
-    assert len(r.toasts) == 1 and r.toasts[0][1].startswith("Started 09:00")
+    assert len(r.toasts) == 1 and r.toasts[0][1].startswith("Started 9:00 AM")
 
 
 def test_corrupt_notified_json_loads_empty(tmp_path):
@@ -217,12 +217,26 @@ def test_corrupt_notified_json_loads_empty(tmp_path):
     assert len(r.toasts) == 1
 
 
-def test_canceled_event_not_toasted():
-    # Cancelled events are dropped in google_client (status == "cancelled") and
-    # never reach the cache, so the Notifier has no status to check.
-    import inspect
-    from smartcal import google_client
-    assert 'cancelled' in inspect.getsource(google_client)
+def test_canceled_event_not_toasted(tmp_path):
+    # A cancelled event is dropped by the client mapping, so it never reaches the
+    # cache (and the Notifier never sees it); the live one beside it does toast.
+    from test_google_client import FakeService
+    from smartcal.google_client import GoogleClient
+
+    def raw(id, status):
+        s = T0 + timedelta(minutes=5)
+        return {"id": id, "summary": f"Event {id}", "status": status,
+                "start": {"dateTime": s.isoformat()},
+                "end": {"dateTime": (s + timedelta(hours=1)).isoformat()}}
+
+    svc = FakeService([raw("gone", "cancelled"), raw("live", "confirmed")],
+                      calendars=[{"id": "primary", "summary": "Main", "primary": True}])
+    client = GoogleClient("a@x.com", service=svc)
+    events = client.list_events(T0 - timedelta(days=1), T0 + timedelta(days=1))
+    r = Rig(tmp_path, events)
+    assert [e.id for e in r.cache.events_between(T0, T0 + timedelta(days=1))] == ["live"]
+    r.notifier.check(T0)
+    assert [t[0] for t in r.toasts] == ["Event live"]
 
 
 def test_settings_nan_lead_ignored(tmp_path):
@@ -233,29 +247,32 @@ def test_settings_nan_lead_ignored(tmp_path):
     assert s.lead_for("a") == 10 and s.lead_for("b") == 10 and s.lead_for("c") == 7
 
 
-def test_first_run_enables_autostart_once(tmp_path):
+def _startup(settings, current=None, frozen=False):
     from smartcal import autostart
     calls = []
-    s = Settings(tmp_path / "s.json")
-    autostart.apply_at_startup(s, calls.append)
-    assert calls == [True] and Settings(tmp_path / "s.json").first_run_done
+    autostart.apply_at_startup(settings, read=lambda: current,
+                               enable_fn=lambda: calls.append("enable"),
+                               disable_fn=lambda: calls.append("disable"), frozen=frozen)
+    return calls
 
 
-def test_autostart_not_reenabled_after_user_disabled(tmp_path):
-    from smartcal import autostart
+def test_first_run_enables_autostart_once(tmp_path, monkeypatch):
+    monkeypatch.delenv("SMARTCAL_NO_SYSTEM_WRITES", raising=False)
     s = Settings(tmp_path / "s.json")
-    autostart.apply_at_startup(s, lambda e: None)
+    assert _startup(s) == ["enable"] and Settings(tmp_path / "s.json").first_run_done
+
+
+def test_autostart_not_reenabled_after_user_disabled(tmp_path, monkeypatch):
+    monkeypatch.delenv("SMARTCAL_NO_SYSTEM_WRITES", raising=False)
+    s = Settings(tmp_path / "s.json")
+    _startup(s)
     s.set_autostart(False)
-    calls = []
-    autostart.apply_at_startup(Settings(tmp_path / "s.json"), calls.append)
-    assert calls == [False]
+    assert _startup(Settings(tmp_path / "s.json")) == []
 
 
-def test_corrupt_settings_does_not_enable_autostart(tmp_path):
-    from smartcal import autostart
+def test_corrupt_settings_does_not_enable_autostart(tmp_path, monkeypatch):
+    monkeypatch.delenv("SMARTCAL_NO_SYSTEM_WRITES", raising=False)
     p = tmp_path / "s.json"
     p.write_text("{broken")
     s = Settings(p)
-    calls = []
-    autostart.apply_at_startup(s, calls.append)
-    assert calls == [] and s.first_run_done and not s.autostart
+    assert _startup(s) == [] and s.first_run_done and not s.autostart

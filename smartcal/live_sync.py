@@ -12,8 +12,8 @@ log = logging.getLogger(__name__)
 class LiveSyncWorker(SyncWorker):
     """Picks up accounts added while running; one bad account never stops the thread."""
 
-    def __init__(self, cache, client_for, settings=None, accounts_fn=list_accounts, **kw):
-        super().__init__(cache, client_for, settings, **kw)
+    def __init__(self, cache, client_for, accounts_fn=list_accounts, **kw):
+        super().__init__(cache, client_for, **kw)
         self._accounts_fn = accounts_fn
 
     def _accounts(self) -> list[str]:

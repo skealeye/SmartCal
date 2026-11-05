@@ -7,6 +7,7 @@ import pytest
 from PyQt6.QtCore import QEvent, Qt
 from PyQt6.QtWidgets import QApplication
 
+from smartcal.agenda import clock_text
 from smartcal.reminders import ReminderFirer, Reminders
 from smartcal.toast import ToastSender
 from smartcal.ui.reminders_dialog import RemindersDialog
@@ -71,7 +72,7 @@ def test_late_reminder_body_shows_original_due_time(tmp_path):
 
     assert body_at(timedelta(0)) == "Call Sam"
     assert body_at(timedelta(minutes=5)) == "Call Sam"
-    assert body_at(timedelta(minutes=5, seconds=1)) == f"(was due {T0.astimezone():%H:%M}) Call Sam"
+    assert body_at(timedelta(minutes=5, seconds=1)) == f"(was due {clock_text(T0.astimezone())}) Call Sam"
     assert body_at(timedelta(hours=8)).startswith("(was due ")
 
 
@@ -296,7 +297,7 @@ def test_dialog_refresh_drops_fired_row(qtbot, tmp_path):
     dlg = RemindersDialog(r)
     qtbot.addWidget(dlg)
     assert len(dlg.rows()) == 2
-    assert dlg.rows()[0].label.text().startswith("2026-11-04 08:")
+    assert dlg.rows()[0].label.text().startswith("2026-11-04 8:")
     r.claim_due(T0)
     dlg.refresh()
     assert len(dlg.rows()) == 1 and "two" in dlg.rows()[0].label.text()

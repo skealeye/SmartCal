@@ -69,8 +69,7 @@ def title_for(view: str, anchor: date) -> str:
     return f"{anchor:%a}, {month_short(anchor)} {anchor.day}, {anchor.year}"
 
 
-def clock_text(dt: datetime) -> str:
-    return f"{dt.hour % 12 or 12}:{dt.minute:02d} {'AM' if dt.hour < 12 else 'PM'}"
+clock_text = agenda.clock_text   # one 12-hour format for the UI and the toasts
 
 
 def short_time(dt: datetime) -> str:

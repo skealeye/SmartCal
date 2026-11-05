@@ -4,6 +4,7 @@ from __future__ import annotations
 import functools
 import logging
 import sys
+import tempfile
 import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -11,11 +12,24 @@ from pathlib import Path
 log = logging.getLogger("smartcal")
 
 
-def setup_logging(path: str | Path) -> RotatingFileHandler:
-    """Log to a rotating file (512 KB x 3). Returns the handler (so tests can remove it)."""
-    path = Path(path)
+def _file_handler(path: Path) -> logging.Handler:
     path.parent.mkdir(parents=True, exist_ok=True)
-    handler = RotatingFileHandler(path, maxBytes=512 * 1024, backupCount=3, encoding="utf-8")
+    return RotatingFileHandler(path, maxBytes=512 * 1024, backupCount=3, encoding="utf-8")
+
+
+def setup_logging(path: str | Path) -> logging.Handler:
+    """Log to a rotating file (512 KB x 3). Returns the handler (so tests can remove it).
+
+    Never raises: if the log folder is unwritable it falls back to smartcal.log in
+    the temp folder, and failing that to no logging at all."""
+    handler: logging.Handler
+    try:
+        handler = _file_handler(Path(path))
+    except OSError:
+        try:
+            handler = _file_handler(Path(tempfile.gettempdir()) / "smartcal.log")
+        except OSError:
+            handler = logging.NullHandler()
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     root = logging.getLogger()
     root.addHandler(handler)
@@ -25,7 +39,7 @@ def setup_logging(path: str | Path) -> RotatingFileHandler:
 
 
 # These log full URLs at INFO: the OAuth URL carries the state and PKCE challenge.
-NOISY_LOGGERS = ("google_auth_oauthlib.flow",)
+NOISY_LOGGERS = ("google_auth_oauthlib.flow", "googleapiclient.discovery", "googleapiclient.http")
 
 
 def quiet_noisy_loggers() -> None:

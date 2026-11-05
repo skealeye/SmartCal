@@ -63,14 +63,43 @@ def apply(enabled: bool) -> None:
         logging.getLogger(__name__).exception("could not update autostart")
 
 
-def apply_at_startup(settings, apply_fn=apply) -> None:
-    """Default-on autostart exactly once (first run); afterwards obey the user's setting.
+def current_value(key_path: str = RUN_KEY) -> str | None:
+    """The Run-key command now registered for SmartCal, or None."""
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_QUERY_VALUE) as key:
+            value, _ = winreg.QueryValueEx(key, VALUE_NAME)
+    except FileNotFoundError:
+        return None
+    return str(value) if value else None
+
+
+def startup_action(enabled: bool, current: str | None, wanted: str, frozen: bool) -> str | None:
+    """What to do to the Run key at startup: "enable", "disable" or None.
+
+    A missing value is added when autostart is on. An existing value is only
+    rewritten (or removed when autostart is off) by the packaged exe: a run from
+    source (e.g. a dev checkout on the Z: share) never repoints login at itself.
+    Toggling the setting in Settings always applies (see `apply`)."""
+    if enabled:
+        if current is None:
+            return "enable"
+        return "enable" if frozen and current != wanted else None
+    return "disable" if frozen and current is not None else None
+
+
+def apply_at_startup(settings, read=current_value, enable_fn=enable, disable_fn=disable,
+                     frozen: bool | None = None) -> None:
+    """Default-on autostart exactly once (first run); afterwards keep the Run key in
+    line with the setting without rewriting it on every start (see startup_action).
 
     Corrupt settings leave the registry alone.
     """
     import logging
+    from smartcal.config import no_system_writes
+    log = logging.getLogger(__name__)
     if settings.load_failed:
-        logging.getLogger(__name__).warning("settings unreadable; autostart left unchanged")
+        log.warning("settings unreadable; autostart left unchanged")
         return
     if not settings.first_run_done:
         settings.autostart = True
@@ -78,5 +107,15 @@ def apply_at_startup(settings, apply_fn=apply) -> None:
         try:
             settings.save()
         except OSError:
-            logging.getLogger(__name__).exception("could not save settings")
-    apply_fn(settings.autostart)
+            log.exception("could not save settings")
+    if no_system_writes():
+        return
+    frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    try:
+        action = startup_action(settings.autostart, read(), default_command(), frozen)
+        if action == "enable":
+            enable_fn()
+        elif action == "disable":
+            disable_fn()
+    except OSError:
+        log.exception("could not update autostart")
