@@ -122,7 +122,7 @@ def test_click_event_shows_details(qtbot, tmp_path):
     assert d.time_label.text() == "Wed, Nov 4, 2026 · 10:00 AM – 10:30 AM"
     assert "Primary" in d.calendar_label.text()
     assert d.location_label.text() == "Room 4"
-    assert "https://meet.example/abc" in d.link_label.text()
+    assert d.join_button.text() == "Join meeting" and "https://meet.example/abc" in d.join_button.toolTip()
     assert d.description_box.toPlainText() == "Bring notes" and d.description_box.isReadOnly()
     # also from the month view
     w.set_view("month")
@@ -206,7 +206,7 @@ def test_html_in_title_and_location_renders_verbatim(qtbot, tmp_path):
     doc = QTextDocument()
     doc.setHtml(d.calendar_label.text())
     assert doc.toPlainText().endswith("<i>c</i>")
-    assert d.description_box.toPlainText() == "<i>d</i>"
+    assert d.description_box.toPlainText() == "d"   # descriptions are converted to plain text
 
 
 def test_open_link_rejects_javascript_and_file_schemes(monkeypatch):
@@ -306,3 +306,39 @@ def test_window_geometry_stored_in_data_dir_ini(qtbot, tmp_path, monkeypatch):
     qtbot.addWidget(w)
     assert Path(w._qs.fileName()) == tmp_path / "data" / "window.ini"
     assert w._qs.format() == QSettings.Format.IniFormat
+
+
+def test_details_panel_description_is_plain_text(qtbot, tmp_path):
+    html_desc = ("<b>One session only. Pick one and decline the rest.</b><br><b>Do not forward "
+                 "this invite or share the Zoom link.</b><script>alert(1)</script>")
+    e = ev("1", "S", datetime(2026, 11, 4, 10, tzinfo=NY), datetime(2026, 11, 4, 11, tzinfo=NY),
+           description=html_desc)
+    w = make(qtbot, tmp_path, [e], "week")
+    qtbot.mouseClick(w.time_view.columns[3].chips[0], Qt.MouseButton.LeftButton)
+    box = w.details.description_box
+    assert box.toPlainText() == ("One session only. Pick one and decline the rest.\n"
+                                 "Do not forward this invite or share the Zoom link.")
+    assert "<" not in box.toPlainText()
+    assert e.description == html_desc
+
+
+def test_details_panel_has_join_zoom_button(qtbot, tmp_path, monkeypatch):
+    opened = []
+
+    class Stub:
+        @staticmethod
+        def openUrl(url):
+            opened.append(url.toString())
+
+    monkeypatch.setattr(window_mod, "QDesktopServices", Stub)
+    z = "https://us02web.zoom.us/j/123?pwd=abc"
+    e = ev("1", "S", datetime(2026, 11, 4, 10, tzinfo=NY), datetime(2026, 11, 4, 11, tzinfo=NY),
+           meeting_url=z)
+    w = make(qtbot, tmp_path, [e], "week")
+    qtbot.mouseClick(w.time_view.columns[3].chips[0], Qt.MouseButton.LeftButton)
+    b = w.details.join_button
+    assert b is not None and b.text() == "Join Zoom meeting"
+    lay = w.details.layout()
+    assert lay.indexOf(b) == lay.indexOf(w.details.time_label) + 1
+    b.click()
+    assert opened == [z]

@@ -298,3 +298,35 @@ def test_get_cancelled_event_without_times():
     svc.get = lambda **kw: _Req({"id": "e1", "status": "cancelled"})
     e = GoogleClient("me@x.com", service=svc).get_event("e1", calendar_id="me@x.com")
     assert e.status == "cancelled"
+
+
+def _urls(*evs):
+    return {e.id: e.meeting_url for e in _client(list(evs)).list_events(*_range())}
+
+
+def test_meeting_url_from_conference_data_entry_point():
+    z = "https://us02web.zoom.us/j/999?pwd=xyz"
+    cd = {"entryPoints": [{"entryPointType": "phone", "uri": "tel:+15551234"},
+                          {"entryPointType": "video", "uri": z}]}
+    assert _urls(_ev(id="a", description="", conferenceData=cd)) == {"a": z}
+    assert _urls(_ev(id="b", conferenceData={"entryPoints": [{"entryPointType": "video",
+                                                             "uri": "javascript:alert(1)"}]})) == {"b": None}
+
+
+def test_meeting_url_zoom_in_href_with_query_kept():
+    z = "https://us02web.zoom.us/j/123?pwd=abc"
+    desc = f'<a href="{z}">Join Zoom Meeting</a><br>Meeting ID 123'
+    assert _urls(_ev(id="a", description=desc)) == {"a": z}
+    esc = '<a href="https://x.zoom.us/j/123?pwd=abc&amp;uname=me">here</a>'
+    assert _urls(_ev(id="b", description=esc)) == {"b": "https://x.zoom.us/j/123?pwd=abc&uname=me"}
+    plain = "Join: https://x.zoom.us/j/123?pwd=abc."
+    assert _urls(_ev(id="c", description=plain)) == {"c": "https://x.zoom.us/j/123?pwd=abc"}
+
+
+def test_meeting_url_prefers_conference_data_over_description():
+    cd = {"entryPoints": [{"entryPointType": "video", "uri": "https://meet.google.com/aaa"}]}
+    got = _urls(_ev(id="a", conferenceData=cd, hangoutLink="https://meet.google.com/zzz",
+                    description="https://x.zoom.us/j/1"),
+                _ev(id="b", hangoutLink="https://meet.google.com/zzz",
+                    description="https://x.zoom.us/j/1"))
+    assert got == {"a": "https://meet.google.com/aaa", "b": "https://meet.google.com/zzz"}

@@ -270,3 +270,48 @@ def test_reanchors_when_height_changes_while_visible(qtbot, tmp_path):
     bottom = popup.geometry().bottom()
     popup.set_account_status("a@x.com", "error")
     assert popup.geometry().bottom() == bottom
+
+
+def _popup_with(qtbot, tmp_path, url):
+    e = ev("1", "Zoom call", 10)
+    e.meeting_url = url
+    cache, settings = make(tmp_path, [e])
+    popup = AgendaPopup(cache, settings)
+    qtbot.addWidget(popup)
+    popup.refresh(NOW)
+    popup.show_near_tray(QRect(700, 570, 20, 20))
+    return popup
+
+
+def _join_buttons(popup):
+    from PyQt6.QtWidgets import QPushButton
+    return [b for r in popup.row_widgets() for b in r.findChildren(QPushButton)]
+
+
+def test_popup_row_join_button_opens_link_and_ignores_non_http(qtbot, tmp_path, monkeypatch):
+    from smartcal.ui import popup as popup_mod
+    opened = []
+
+    class Stub:
+        @staticmethod
+        def openUrl(url):
+            opened.append(url.toString())
+
+    monkeypatch.setattr(popup_mod, "QDesktopServices", Stub)
+    z = "https://us02web.zoom.us/j/123?pwd=abc"
+    popup = _popup_with(qtbot, tmp_path, z)
+    [b] = _join_buttons(popup)
+    assert b.text() == "Join" and b.toolTip() == "Join Zoom meeting"
+    assert popup.isVisible()
+    b.click()
+    assert opened == [z] and not popup.isVisible()
+    # non-http(s): no button, and the handler refuses anyway
+    popup2 = _popup_with(qtbot, tmp_path, "javascript:alert(1)")
+    assert _join_buttons(popup2) == []
+    popup2._join("file:///C:/Windows/notepad.exe")
+    assert opened == [z] and popup2.isVisible()
+
+
+def test_popup_row_without_link_has_no_join_button(qtbot, tmp_path):
+    popup = _popup_with(qtbot, tmp_path, None)
+    assert _join_buttons(popup) == []

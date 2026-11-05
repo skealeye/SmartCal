@@ -2,25 +2,43 @@
 from __future__ import annotations
 
 import functools
+import html
 import re
 import threading
 from datetime import date, datetime, time
 
 from smartcal.google_auth import ReauthRequired
 from smartcal.models import CalendarInfo, Event
+from smartcal.textutil import html_to_text, meeting_label  # noqa: F401  (re-exported)
 
 _ZOOM_RE = re.compile(r"https?://(?:[\w-]+\.)?zoom\.us/[^\s<>\"')]+")
 _TEAMS_RE = re.compile(r"https?://teams\.(?:microsoft|live)\.com/[^\s<>\"')]+")
 
 
+_HREF_RE = re.compile(r"""href\s*=\s*["']([^"']+)["']""", re.I)
+
+
 def _meeting_url(raw: dict) -> str | None:
+    """Best join link: conference video entry point, hangoutLink, then Zoom/Teams in text."""
+    cd = raw.get("conferenceData")
+    entry_points = cd.get("entryPoints") if isinstance(cd, dict) else None
+    for ep in entry_points if isinstance(entry_points, list) else []:
+        uri = ep.get("uri") if isinstance(ep, dict) else None
+        if (isinstance(ep, dict) and ep.get("entryPointType") == "video"
+                and isinstance(uri, str) and uri.lower().startswith(("http://", "https://"))):
+            return uri
     if raw.get("hangoutLink"):
         return raw["hangoutLink"]
-    text = f"{raw.get('location', '')}\n{raw.get('description', '')}"
+    location = raw.get("location") or ""
+    desc = raw.get("description") or ""
+    unescaped = html.unescape(desc)
+    sources = [location, unescaped, html_to_text(desc)]
+    sources += [m.group(1) for m in _HREF_RE.finditer(unescaped)]
     for rx in (_ZOOM_RE, _TEAMS_RE):
-        m = rx.search(text)
-        if m:
-            return m.group(0).rstrip(".,;")
+        for text in sources:
+            m = rx.search(text)
+            if m:
+                return m.group(0).rstrip(".,;")
     return None
 
 

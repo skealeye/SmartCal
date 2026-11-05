@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (QButtonGroup, QDialog, QFrame, QGraphicsOpacityEffe
 from .. import agenda
 from ..config import data_dir
 from ..sync import synced_days
+from ..textutil import html_to_text, meeting_label
 from . import layout, placement, theme
 
 HOUR_H = 48
@@ -383,8 +384,22 @@ class EventDetails(QDialog):
         self.calendar_label = QLabel(
             f'<span style="color:{color};">&#9632;</span> ' + _esc(event.calendar_name))
         self.calendar_label.setTextFormat(Qt.TextFormat.RichText)
-        for w in (self.title_label, self.time_label, self.calendar_label):
-            lay.addWidget(w)
+        lay.addWidget(self.title_label)
+        lay.addWidget(self.time_label)
+        self.join_button = None
+        url = event.meeting_url
+        if url and url.lower().startswith(("http://", "https://")):
+            self.join_button = QPushButton(meeting_label(url))
+            self.join_button.setObjectName("join")
+            self.join_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.join_button.setStyleSheet(
+                f"QPushButton{{background:{theme.LINK};color:#0b0d10;font-weight:bold;"
+                "padding:7px 16px;border:none;border-radius:4px;}"
+                "QPushButton:hover{background:#a9c8ff;}")
+            self.join_button.setToolTip(plain_tip(url))
+            self.join_button.clicked.connect(lambda _c=False, u=url: self.open_link(u))
+            lay.addWidget(self.join_button)
+        lay.addWidget(self.calendar_label)
         if getattr(event, "declined", False):
             declined = QLabel("You declined this meeting.")
             declined.setStyleSheet(f"color:{theme.MUTED};")
@@ -395,18 +410,11 @@ class EventDetails(QDialog):
             self.location_label.setTextFormat(Qt.TextFormat.PlainText)
             self.location_label.setWordWrap(True)
             lay.addWidget(self.location_label)
-        self.link_label = None
-        url = event.meeting_url
-        if url and url.lower().startswith(("http://", "https://")):
-            self.link_label = QLabel(
-                f'<a href="{_esc(url)}" style="color:{theme.LINK};">Join meeting</a>')
-            self.link_label.setTextFormat(Qt.TextFormat.RichText)
-            self.link_label.setToolTip(plain_tip(url))
-            self.link_label.linkActivated.connect(self.open_link)
-            lay.addWidget(self.link_label)
+        self.link_label = self.join_button   # kept for older callers/tests
         self.description_box = None
-        if event.description:
-            self.description_box = QPlainTextEdit(event.description)
+        description = html_to_text(event.description or "")
+        if description:
+            self.description_box = QPlainTextEdit(description)
             self.description_box.setReadOnly(True)
             self.description_box.setMinimumHeight(90)
             lay.addWidget(self.description_box, 1)

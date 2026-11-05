@@ -5,12 +5,13 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 
-from PyQt6.QtCore import QEvent, QPoint, QRect, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QCursor
+from PyQt6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QCursor, QDesktopServices
 from PyQt6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QPushButton,
                              QScrollArea, QVBoxLayout, QWidget)
 
 from .. import __version__, agenda
+from ..textutil import meeting_label
 from . import placement, theme
 
 WIDTH = 250
@@ -276,7 +277,25 @@ class AgendaPopup(QWidget):
         col.addWidget(top)
         col.addWidget(sub)
         lay.addLayout(col, 1)
+        url = getattr(ev, "meeting_url", None)
+        if url and url.lower().startswith(("http://", "https://")):
+            join = QPushButton("Join")
+            join.setObjectName("join")
+            join.setToolTip(meeting_label(url))
+            join.setCursor(Qt.CursorShape.PointingHandCursor)
+            join.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            join.setStyleSheet(
+                f"QPushButton{{background:{theme.LINK};color:#0b0d10;font-size:11px;"
+                "font-weight:bold;padding:2px 8px;border:none;border-radius:3px;}"
+                "QPushButton:hover{background:#a9c8ff;}")
+            join.clicked.connect(lambda _c=False, u=url: self._join(u))
+            lay.addWidget(join, 0, Qt.AlignmentFlag.AlignVCenter)
         return row
+
+    def _join(self, url: str) -> None:
+        if url.lower().startswith(("http://", "https://")):
+            QDesktopServices.openUrl(QUrl(url))
+            self.hide()
 
     # -- placement / focus ---------------------------------------------------
     def compute_position(self, tray: QRect | None, area: QRect) -> QPoint:
