@@ -87,8 +87,14 @@ def main() -> int:
         window.refresh()
         tray.update_tooltip()
 
-    # Hiding or coloring a meeting (popup row or window details) updates every view.
-    popup.meetings_changed.connect(refresh_views)
+    @guarded
+    def refresh_others() -> None:
+        window.refresh()
+        tray.update_tooltip()
+
+    # Hiding or coloring a meeting (popup details or window details) updates every view.
+    # The popup has already refreshed itself: once is enough.
+    popup.meetings_changed.connect(refresh_others)
     window.meetings_changed.connect(refresh_views)
 
     autostart_watcher = autostart.SettingsWatcher(settings)   # after apply_at_startup

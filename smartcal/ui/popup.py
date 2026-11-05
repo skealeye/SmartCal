@@ -21,6 +21,8 @@ from . import meeting_menus, placement, theme
 WIDTH = 250
 MARGIN = 8
 MAX_HEIGHT = 480
+WATCHDOG_MS = 1500            # visible but inactive with no menu/modal up: close the group
+RECLAIM_CHECK_MS = 250        # after taking focus back from the flyout: did it work?
 BG_SELECTED = "#3a3f4b"       # the selected meeting (the next-up one stays BG_NEXT blue)
 
 
@@ -57,6 +59,19 @@ class AgendaPopup(QWidget):
         self._flyout = None             # DetailsFlyout, built on the first selection
         self.flyout_side = ""           # where it went last: "left", "right" or "over"
         self._watched_modals: list = []
+        self._refreshing = False
+        # Failsafe: if the group is ever left up while the app is not active (e.g. Windows
+        # refused to give the popup focus back), nothing would ever deactivate it.
+        self.watchdog = QTimer(self)
+        self.watchdog.setInterval(WATCHDOG_MS)
+        self.watchdog.timeout.connect(self._watchdog_tick)
+        # After close_flyout asks for focus back. Not one event-loop pass: Qt learns about
+        # the activation asynchronously, so right after hiding the active flyout there is
+        # briefly no active window at all, which must not count as "focus went elsewhere".
+        self.reclaim_check = QTimer(self)
+        self.reclaim_check.setSingleShot(True)
+        self.reclaim_check.setInterval(RECLAIM_CHECK_MS)
+        self.reclaim_check.timeout.connect(self._settle_after_close)
         self.last_hidden_at = -1e9
         self.last_hidden_cursor = QPoint()
         self._anchored = False
@@ -106,6 +121,7 @@ class AgendaPopup(QWidget):
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setStyleSheet("QScrollArea{background:transparent;}")
         self._scroll.setWidget(self._content)
+        self._scroll.verticalScrollBar().valueChanged.connect(self._list_scrolled)
         self._scroll.hide()
         self._empty = QLabel()
         self._empty.setTextFormat(Qt.TextFormat.PlainText)
@@ -237,6 +253,14 @@ class AgendaPopup(QWidget):
         return placement.area_for(self._tray_geom)
 
     def refresh(self, now: datetime | None = None) -> None:
+        self._refreshing = True        # rows are rebuilt: list scrolling means nothing yet
+        try:
+            self._refresh(now)
+        finally:
+            self._refreshing = False
+        self._place_flyout()
+
+    def _refresh(self, now: datetime | None) -> None:
         now = now or self.now()
         events = agenda.today(self.cache, self.settings, now)
         nxt = agenda.next_event(self.cache, self.settings, now)
@@ -263,7 +287,9 @@ class AgendaPopup(QWidget):
         if selected is not None:   # a refresh keeps the selected meeting's details open
             selected.set_selected(True)
             if self.flyout_open():
-                self._flyout.set_event(selected.event)   # swapped in place
+                # Rebuilt only if what it shows changed (the 30 s tick and syncs mostly
+                # change nothing: scroll position, selection and presses survive).
+                self._flyout.set_event(selected.event)
         elif self._selected_key is not None:
             self.close_flyout(restore_focus=False)   # gone: hidden, deleted, synced away
         if events:
@@ -275,7 +301,6 @@ class AgendaPopup(QWidget):
             self._empty.show()
         self._scroll.setVisible(bool(events))
         self._resize()
-        self._place_flyout()
 
     def _resize(self) -> None:
         """Cap the list height (header/footer stay visible), then re-anchor if shown."""
@@ -374,11 +399,15 @@ class AgendaPopup(QWidget):
         fly = self._flyout
         if fly is None or fly.isHidden():
             return
-        reclaim = fly.isActiveWindow() or (restore_focus and not self.isActiveWindow())
+        active = self.active_window()
+        reclaim = active is fly or (restore_focus and active is not self)
         fly.hide()
         if reclaim and self.isVisible():
             self.raise_()
             self.activateWindow()
+            # If Windows refuses the activation (foreground lock), the popup would stay
+            # up inactive with no WindowDeactivate ever to come: check shortly.
+            self.reclaim_check.start()
         if restore_focus and self.isVisible():
             (row or self).setFocus()
 
@@ -403,8 +432,40 @@ class AgendaPopup(QWidget):
         top = row.mapToGlobal(QPoint(0, 0)).y()
         anchor = QRect(self.pos(), self.size())
         pos, self.flyout_side = placement.beside(fly.size(), anchor, top, area)
+        if self.flyout_side == "over":
+            pos = self._overlay_clear_of(row, fly, pos, area)
         if fly.pos() != pos:
             fly.move(pos)
+
+    def _overlay_clear_of(self, row, fly, pos: QPoint, area: QRect) -> QPoint:
+        """Over the popup (narrow screens): below the selected row, or above it, so the
+        row stays clickable to close the details; shrunk to the larger space if needed."""
+        m, gap = placement.MARGIN, placement.GAP
+        rtop = row.mapToGlobal(QPoint(0, 0)).y()
+        rbottom = rtop + row.height() - 1
+        below = area.bottom() + 1 - m - (rbottom + 1 + gap)
+        above = rtop - gap - (area.top() + m)
+        h = fly.height()
+        if h > below and h > above:
+            fly.fit_to(area, max(below, above))
+            h = fly.height()
+        if h <= below:
+            return QPoint(pos.x(), rbottom + 1 + gap)
+        return QPoint(pos.x(), max(area.top() + m, rtop - gap - h))
+
+    def _list_scrolled(self, _value: int) -> None:
+        """The details follow their row; a row scrolled out of view closes them."""
+        if self._refreshing or not self.flyout_open():
+            return
+        row = self.selected_row()
+        view = self._scroll.viewport()
+        if row is None:
+            return
+        top_left = row.mapTo(view, QPoint(0, 0))
+        if not QRect(top_left, row.size()).intersects(view.rect()):
+            self.close_flyout(restore_focus=False)
+            return
+        self._place_flyout()
 
     def moveEvent(self, e):
         super().moveEvent(e)
@@ -446,6 +507,13 @@ class AgendaPopup(QWidget):
         if self.active_modal() is not None or meeting_menus.is_open(self._menu):
             return                      # something else still holds focus on purpose
         active = self.active_window()
+        if active is not None and active is self._flyout and not self.flyout_open() \
+                and self.app_active():
+            # Focus is still on the flyout that was just closed, on its way back to the
+            # popup: ask again (the watchdog closes the group if that never happens).
+            self.raise_()
+            self.activateWindow()
+            return
         if active is None or not self.app_active() or not self._is_group_window(active):
             self.hide()                 # hides the flyout too
             return
@@ -572,7 +640,25 @@ class AgendaPopup(QWidget):
             self._settle_after_close()
         finished.connect(done)
 
+    def showEvent(self, e):
+        super().showEvent(e)
+        self.watchdog.start()
+
+    def _watchdog_tick(self) -> None:
+        """Every WATCHDOG_MS while shown: if the app is not active (or no window is) and
+        no menu or modal box of the group is up, settle (closes the group if still so)."""
+        if not self.isVisible():
+            self.watchdog.stop()
+            return
+        if self.active_modal() is not None or meeting_menus.is_open(self._menu) \
+                or self._owns(self.active_popup()):
+            return
+        if not self.app_active() or self.active_window() is None:
+            self._settle_after_close()
+
     def hideEvent(self, e):
+        self.watchdog.stop()
+        self.reclaim_check.stop()
         self.last_hidden_at = self.clock()
         self.last_hidden_cursor = self.cursor_pos()
         self.close_flyout(restore_focus=False)   # never outlives the popup

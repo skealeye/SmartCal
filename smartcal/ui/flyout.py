@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import html
 
-from PyQt6.QtCore import QEvent, QRect, Qt
+from PyQt6.QtCore import QEvent, QRect, Qt, QTimer
 from PyQt6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QPushButton,
-                             QScrollArea, QSizePolicy, QStyle, QVBoxLayout, QWidget)
+                             QScrollArea, QSizePolicy, QStyle, QTextBrowser, QVBoxLayout,
+                             QWidget)
 
 from ..textutil import html_to_text, meeting_label, safe_http_url
 from . import layout, meeting_menus, placement, theme
@@ -22,6 +23,13 @@ DESCRIPTION_LINES = 10          # longer descriptions scroll
 HEADER_TEXT = "Meeting details"
 # Tab order inside the flyout (whichever exist for the meeting).
 TAB_CHAIN = ("bigjoin", "hide", "color", "close")
+
+
+def _set_scroll(box, value: int) -> None:
+    try:
+        box.verticalScrollBar().setValue(value)
+    except RuntimeError:                # the box was replaced meanwhile
+        pass
 
 
 def _scrollbar_w() -> int:
@@ -38,6 +46,8 @@ class DetailsFlyout(QWidget):
         self._popup = popup
         self._hiding = False
         self.event_shown = None
+        self._shown_key = None
+        self.builds = 0                 # content builds so far (tests: no needless rebuilds)
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
                             | Qt.WindowType.WindowStaysOnTopHint)
         # A mouse selection keeps the popup active; the keyboard path activates explicitly.
@@ -84,23 +94,60 @@ class DetailsFlyout(QWidget):
     def body(self) -> QWidget | None:
         return self._scroll.widget()
 
-    def set_event(self, ev) -> None:
-        """Show `ev` (swapping out the previous meeting's content, which is freed).
-        Keyboard focus inside the old content moves to the same control in the new."""
+    def content_key(self, ev) -> tuple:
+        """Everything the details show. Same key: the shown content is still right."""
+        return ((ev.account, ev.calendar_id, ev.id), ev.title, ev.start, ev.end,
+                ev.all_day, ev.calendar_name, ev.location, ev.description,
+                getattr(ev, "meeting_url", None),
+                theme.effective_color(ev, self._popup.settings),
+                meeting_menus.color_button_text(ev), bool(getattr(ev, "declined", False)))
+
+    def set_event(self, ev) -> bool:
+        """Show `ev`. If its content is what is shown already, nothing is rebuilt (a
+        refresh keeps scroll position, selected text and a press in progress). Else the
+        previous content is swapped out and freed; keyboard focus inside it moves to the
+        same control in the new content, and the description keeps its scroll position
+        when it is the same meeting. Returns True if the content was rebuilt."""
+        key = self.content_key(ev)
+        self.event_shown = ev
+        if key == self._shown_key and self.body() is not None:
+            return False
+        same_meeting = self._shown_key is not None and self._shown_key[0] == key[0]
+        self._shown_key = key
         focus = QApplication.focusWidget()
         old = self.body()
         refocus = focus.objectName() if focus is not None and old is not None \
             and old.isAncestorOf(focus) else ""
+        scroll = None
         if old is not None:
+            box = old.findChild(QTextBrowser, "description")
+            if same_meeting and box is not None:
+                scroll = box.verticalScrollBar().value()
             self._scroll.takeWidget()
             old.hide()
             old.deleteLater()
-        self.event_shown = ev
+        self.builds += 1
         self._scroll.setWidget(self._build(ev))
         self._fix_tab_order()
         if refocus:
             w = self.body().findChild(QWidget, refocus)
             (w or self.first_control()).setFocus()
+        if scroll:
+            self._restore_description_scroll(scroll)
+        return True
+
+    def description_box(self):
+        body = self.body()
+        return body.findChild(QTextBrowser, "description") if body is not None else None
+
+    def _restore_description_scroll(self, value: int) -> None:
+        box = self.description_box()
+        if box is None:
+            return
+        bar = box.verticalScrollBar()
+        bar.setValue(value)
+        if bar.value() != value:        # the range is set once the box is laid out
+            QTimer.singleShot(0, lambda b=box, v=value: _set_scroll(b, v))
 
     def _build(self, ev) -> QWidget:
         popup = self._popup
@@ -224,8 +271,9 @@ class DetailsFlyout(QWidget):
     def inner_width(self) -> int:
         return WIDTH - 2 * MARGINS
 
-    def fit_to(self, area: QRect) -> None:
-        """Height: the whole content, at most the work area's height (then it scrolls)."""
+    def fit_to(self, area: QRect, max_height: int | None = None) -> None:
+        """Height: the whole content, at most the work area's height (or `max_height`;
+        then it scrolls)."""
         lay = self.layout()
         body = self.body()
         self._scroll.setFixedHeight(0)
@@ -239,6 +287,8 @@ class DetailsFlyout(QWidget):
             content_h = bl.totalHeightForWidth(w) if bl.hasHeightForWidth() \
                 else bl.sizeHint().height()
         max_total = max(80, area.height() - 2 * placement.MARGIN)
+        if max_height is not None:
+            max_total = max(80, min(max_total, max_height))
         self._scroll.setFixedHeight(max(20, min(content_h, max_total - chrome)))
         lay.activate()
         self.resize(WIDTH, min(lay.sizeHint().height(), max_total))
@@ -254,7 +304,8 @@ class DetailsFlyout(QWidget):
             self._hiding = False
 
     def event(self, e):
-        if e.type() == QEvent.Type.WindowDeactivate and self.isVisible()                 and not getattr(self, "_hiding", False):
+        if (e.type() == QEvent.Type.WindowDeactivate and self.isVisible()
+                and not self._hiding):
             self._popup._group_deactivated(self)
         return super().event(e)
 
