@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import agenda
 from .config import data_dir
+from .textutil import calendar_label
 
 log = logging.getLogger(__name__)
 
@@ -70,8 +71,8 @@ class Notifier:
             now = now.astimezone()
         changed = self._prune(now)
         horizon = now + timedelta(minutes=MAX_LEAD_MINUTES + 1)
-        # Deduped (a shared calendar toasts once); hidden calendars, declined meetings
-        # and meetings hidden in SmartCal dropped.
+        # Deduped (a shared calendar toasts once); hidden calendars, declined meetings,
+        # meetings hidden in SmartCal and hidden accounts' events dropped.
         for ev in agenda.visible_events(self.cache, self.settings,
                                         self.cache.events_between(now, horizon),
                                         hide_user_hidden=True):
@@ -88,11 +89,14 @@ class Notifier:
                     continue
                 mins = max(1, math.ceil((ev.start - now).total_seconds() / 60))
                 lead_text = f"Starts in {mins} min"
-                body = f"{lead_text} · {agenda.clock_text(ev.start.astimezone())} · {ev.calendar_name}"
+                body = f"{lead_text} · {agenda.clock_text(ev.start.astimezone())}"
             elif now < ev.end and now - ev.start <= CATCH_UP_WINDOW:
-                body = f"Started {agenda.clock_text(ev.start.astimezone())} · {ev.calendar_name}"
+                body = f"Started {agenda.clock_text(ev.start.astimezone())}"
             else:
                 continue  # over, or began too long ago to be news: dropped silently
+            cal_name = calendar_label(ev.calendar_name)   # never just the owner's email
+            if cal_name:
+                body += f" · {cal_name}"
             # Mark before sending: a failing toast must not repeat every 30 s.
             self.fired[key] = (ev.end.timestamp(), now.timestamp())
             changed = True

@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (QApplication, QBoxLayout, QFrame, QLabel, QPushButt
                              QScrollArea, QSizePolicy, QStyle, QTextBrowser, QVBoxLayout,
                              QWidget)
 
-from ..textutil import html_to_text, meeting_label, safe_http_url
+from ..textutil import calendar_label, html_to_text, meeting_label, safe_http_url
 from . import layout, meeting_menus, motion, theme
 from .linktext import LinkText, plain_tip
 from .popup import WIDTH   # one source of truth: the panel is as wide as the popup
@@ -229,10 +229,12 @@ class DetailsFlyout(QWidget):
         title.setStyleSheet("font-weight:bold;font-size:13px;")
         lay.addWidget(title)
         lay.addWidget(self._label(layout.format_range(ev, popup.now()), "when"))
-        lay.addWidget(self._label(
-            f'<span style="color:{theme.effective_color(ev, popup.settings)};">'
-            f'&#9632;</span> {html.escape(ev.calendar_name or "")}', "calendar",
-            Qt.TextFormat.RichText))
+        cal_name = calendar_label(ev.calendar_name)
+        if cal_name:                    # an email as the name: no calendar line at all
+            lay.addWidget(self._label(
+                f'<span style="color:{theme.effective_color(ev, popup.settings)};">'
+                f'&#9632;</span> {html.escape(cal_name)}', "calendar",
+                Qt.TextFormat.RichText))
         if ev.location:
             loc = self._label(ev.location, "location")
             loc.setStyleSheet(f"color:{theme.MUTED};")

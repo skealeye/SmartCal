@@ -142,7 +142,7 @@ def test_popup_view_signal(qtbot, tmp_path):
     assert sig.args == ["week"]
 
 
-def test_row_shows_stripe_color_calendar_name_and_all_day_text(qtbot, tmp_path):
+def test_row_shows_stripe_color_and_all_day_text_but_no_calendar_line(qtbot, tmp_path):
     allday = Event(id="ad", account="a", calendar_id="work", calendar_name="Work",
                    color="#0b8043", title="Holiday",
                    start=datetime(2026, 11, 4, tzinfo=NY), end=datetime(2026, 11, 5, tzinfo=NY),
@@ -153,7 +153,7 @@ def test_row_shows_stripe_color_calendar_name_and_all_day_text(qtbot, tmp_path):
     popup.refresh(NOW)
     first, second = popup.row_widgets()
     assert "#0b8043" in first.findChild(QFrame, "stripe").styleSheet()
-    assert first.findChild(QLabel, "calname").text() == "Work"
+    assert first.findChild(QLabel, "calname") is None    # v0.7.0: no calendar/email line
     assert _plain(first.findChild(QLabel, "title").text()).startswith("All day")
     assert "#ff0000" in second.findChild(QFrame, "stripe").styleSheet()
     assert _plain(second.findChild(QLabel, "title").text()).startswith("10:00 AM")

@@ -90,6 +90,9 @@ class Settings:
         self.lead_minutes: dict[str, int] = {}
         self.default_lead_minutes: int = DEFAULT_LEAD_MINUTES
         self.muted: set[str] = set()
+        # Accounts (emails) whose events SmartCal does not show (popup, windows, toasts).
+        # Still synced, and still busy time for the assistant and free-slot search.
+        self.hidden_accounts: set[str] = set()
         self.autostart: bool = True
         self.first_run_done: bool = False
         self.claude_model: str = DEFAULT_CLAUDE_MODEL
@@ -119,6 +122,7 @@ class Settings:
                               for k, v in leads.items() if isinstance(k, str)}
                              if isinstance(leads, dict) else {})
         self.muted = self._str_set(data.get("muted"))
+        self.hidden_accounts = self._str_set(data.get("hidden_accounts"))
         if isinstance(data.get("autostart"), bool):
             self.autostart = data["autostart"]
         self.first_run_done = data.get("first_run_done") is True
@@ -180,6 +184,7 @@ class Settings:
                 "lead_minutes": dict(sorted(self.lead_minutes.items())),
                 "default_lead_minutes": self.default_lead_minutes,
                 "muted": sorted(self.muted),
+                "hidden_accounts": sorted(self.hidden_accounts),
                 "autostart": self.autostart,
                 "first_run_done": self.first_run_done,
                 "claude_model": self.claude_model,
@@ -230,6 +235,26 @@ class Settings:
         (self.muted.add if muted else self.muted.discard)(calendar_id)
         self.save()
 
+    # -- account visibility ----------------------------------------------------
+    def is_account_hidden(self, account) -> bool:
+        return account in self.hidden_accounts
+
+    def set_account_hidden(self, account: str, hidden: bool) -> None:
+        """Show or hide an account's events; saved at once. On a failed save the change
+        is rolled back and the OSError re-raised."""
+        if not isinstance(account, str):
+            raise TypeError("account must be a str")
+        before = set(self.hidden_accounts)
+        (self.hidden_accounts.add if hidden else self.hidden_accounts.discard)(account)
+        if self.hidden_accounts == before:
+            return
+        try:
+            self.save()
+        except OSError:
+            self.hidden_accounts = before
+            log.warning("could not save %s; account visibility rolled back", self.path)
+            raise
+
     def set_autostart(self, enabled: bool) -> None:
         self.autostart = bool(enabled)
         self.save()
@@ -274,6 +299,14 @@ class Settings:
         self.hidden_events = _evict_hidden(hidden, date.today(), keep=key)
         self._save_or_rollback(before)
         return key
+
+    def unhide_all(self) -> None:
+        """Restore every hidden meeting and series (one save; rolled back on failure)."""
+        if not self.hidden_events:
+            return
+        before = self._meeting_state()
+        self.hidden_events = {}
+        self._save_or_rollback(before)
 
     def unhide(self, key: str) -> None:
         if key not in self.hidden_events:

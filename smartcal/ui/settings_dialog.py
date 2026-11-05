@@ -10,7 +10,8 @@ import logging
 
 from PyQt6.QtCore import QEvent, Qt, pyqtSignal
 from PyQt6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
-                             QHBoxLayout, QLabel, QLineEdit, QListWidget, QMessageBox,
+                             QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+                             QMessageBox,
                              QPushButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout,
                              QWidget)
 
@@ -175,6 +176,7 @@ class SettingsDialog(QDialog):
     def event(self, e):
         if e.type() == QEvent.Type.WindowActivate:
             self.refresh_meetings()
+            self.sync_account_boxes()
         return super().event(e)
 
     def _fill_meetings(self) -> None:
@@ -256,6 +258,11 @@ class SettingsDialog(QDialog):
     def _build_accounts(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
+        # account -> its "Show in SmartCal" box, and the state that box started from:
+        # only boxes the owner changed here are applied on OK (a change made meanwhile
+        # from the tray's Accounts menu is never overwritten).
+        self.account_shown: dict[str, QCheckBox] = {}
+        self._account_orig: dict[str, bool] = {}
         self.account_list = QListWidget()
         layout.addWidget(self.account_list)
         row = QHBoxLayout()
@@ -273,6 +280,11 @@ class SettingsDialog(QDialog):
         row.addStretch(1)
         layout.addLayout(row)
         layout.addWidget(QLabel("Adding or removing an account takes effect immediately."))
+        hint = QLabel("Show in SmartCal: a hidden account keeps syncing, and its meetings "
+                      "still count as busy for Claude; they are just not shown. Applies on "
+                      "OK.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
         self.refresh_accounts()
         self.refresh_signin()
         return w
@@ -293,9 +305,41 @@ class SettingsDialog(QDialog):
             self._on_cancel_signin()
         self.refresh_signin()
 
+    def _account_changed(self, account: str) -> bool:
+        box = self.account_shown.get(account)
+        return box is not None and box.isChecked() != self._account_orig.get(account)
+
     def refresh_accounts(self) -> None:
+        """(Re)list the accounts, each with its "Show in SmartCal" box; boxes already
+        changed in the dialog keep their pending state."""
+        pending = {a: b.isChecked() for a, b in self.account_shown.items()
+                   if self._account_changed(a)}
         self.account_list.clear()
-        self.account_list.addItems(list(self._accounts_provider()))
+        self.account_shown, self._account_orig = {}, {}
+        for account in self._accounts_provider():
+            item = QListWidgetItem(account)
+            self.account_list.addItem(item)
+            row = QWidget()
+            row_lay = QHBoxLayout(row)
+            row_lay.setContentsMargins(0, 0, 4, 0)
+            row_lay.addStretch(1)
+            box = QCheckBox("Show in SmartCal")
+            box.setToolTip("Show this account's meetings in SmartCal")
+            shown = not self.settings.is_account_hidden(account)
+            self._account_orig[account] = shown
+            box.setChecked(pending.get(account, shown))
+            row_lay.addWidget(box)
+            item.setSizeHint(row.sizeHint())
+            self.account_list.setItemWidget(item, row)
+            self.account_shown[account] = box
+
+    def sync_account_boxes(self) -> None:
+        """Boxes the owner did not touch follow changes made elsewhere (the tray)."""
+        for account, box in self.account_shown.items():
+            if not self._account_changed(account):
+                shown = not self.settings.is_account_hidden(account)
+                self._account_orig[account] = shown
+                box.setChecked(shown)
 
     def _ask_confirm(self, account: str) -> bool:
         box = QMessageBox(QMessageBox.Icon.Question, "Remove account",
@@ -330,7 +374,7 @@ class SettingsDialog(QDialog):
     # -- apply -------------------------------------------------------------
     _FIELDS = ("hidden_calendars", "shown_calendars", "lead_minutes", "default_lead_minutes",
                "muted", "autostart", "claude_model", "hidden_events", "event_colors",
-               "event_color_titles")
+               "event_color_titles", "hidden_accounts")
 
     def accept(self) -> None:
         s = self.settings
@@ -344,6 +388,10 @@ class SettingsDialog(QDialog):
                 s.lead_minutes[cid] = spin.value()
         s.autostart = self.autostart_box.isChecked()
         s.claude_model = self.model_edit.text().strip() or s.claude_model
+        for account, box in self.account_shown.items():
+            if self._account_changed(account):   # only what was changed here
+                (s.hidden_accounts.discard if box.isChecked()
+                 else s.hidden_accounts.add)(account)
         for key in self._unhide:
             s.hidden_events.pop(key, None)
         for key in self._reset_colors:

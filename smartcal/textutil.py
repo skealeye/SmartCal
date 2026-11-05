@@ -197,3 +197,19 @@ def meeting_label(url: str | None) -> str:
     if host in ("teams.microsoft.com", "teams.live.com"):
         return "Join Teams meeting"
     return "Join meeting"
+
+
+_EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+
+
+def looks_like_email(text) -> bool:
+    """True for `x@y.z` (a calendar named after its account, e.g. the primary one)."""
+    return isinstance(text, str) and _EMAIL.fullmatch(text.strip()) is not None
+
+
+def calendar_label(name) -> str:
+    """The calendar name to show in the UI, or "" when it is only an email address
+    (an account's primary calendar is named after the account: no information)."""
+    if not isinstance(name, str) or looks_like_email(name):
+        return ""
+    return name.strip()

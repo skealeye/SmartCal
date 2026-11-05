@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
-from PyQt6.QtCore import QByteArray, QRect, QSettings, QSize, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import (QByteArray, QPoint, QRect, QSettings, QSize, Qt, QTimer, QUrl,
+                          pyqtSignal)
 from PyQt6.QtGui import QColor, QDesktopServices, QGuiApplication, QPainter
 from PyQt6.QtWidgets import (QButtonGroup, QDialog, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QLabel,
                              QMainWindow, QPushButton, QScrollArea, QSizePolicy,
@@ -11,8 +12,9 @@ from PyQt6.QtWidgets import (QButtonGroup, QDialog, QFrame, QGraphicsOpacityEffe
 
 from .. import agenda
 from ..config import data_dir
+from ..settings import color_key
 from ..sync import synced_days
-from ..textutil import html_to_text, meeting_label, plain_tip, safe_http_url
+from ..textutil import calendar_label, html_to_text, meeting_label, plain_tip, safe_http_url
 from . import layout, meeting_menus, placement, theme
 from .linktext import LinkText
 
@@ -51,6 +53,7 @@ class EventChip(QLabel):
     """A colored, clickable label for one event."""
 
     clicked = pyqtSignal(object)
+    menu_requested = pyqtSignal(object, QPoint)   # event, global position (right-click)
 
     def __init__(self, event, text: str, wrap: bool = False, parent=None,
                  color: str | None = None):
@@ -86,6 +89,13 @@ class EventChip(QLabel):
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton and self.rect().contains(e.position().toPoint()):
             self.clicked.emit(self.event)
+        e.accept()
+
+    def contextMenuEvent(self, e):
+        pos = e.globalPos()
+        if e.reason() == e.Reason.Keyboard:
+            pos = self.mapToGlobal(self.rect().center())
+        self.menu_requested.emit(self.event, pos)
         e.accept()
 
 
@@ -129,7 +139,7 @@ class TimelineColumn(QWidget):
 
     def __init__(self, day: date, blocks: list[layout.Block], is_today: bool,
                  now_min: int | None, ref: datetime, on_click, parent=None,
-                 color_for=None):
+                 color_for=None, on_menu=None):
         super().__init__(parent)
         self.day, self.blocks, self.is_today, self.now_min = day, blocks, is_today, now_min
         self.setFixedHeight(24 * HOUR_H)
@@ -143,6 +153,8 @@ class TimelineColumn(QWidget):
                              color=color_for(ev))
             chip.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
             chip.clicked.connect(on_click)
+            if on_menu is not None:
+                chip.menu_requested.connect(on_menu)
             chip.show()
             self.chips.append(chip)
         self._place()
@@ -179,6 +191,7 @@ class TimeView(QWidget):
     """Day (1 column) or week (7 columns) view with an all-day strip on top."""
 
     event_clicked = pyqtSignal(object)
+    event_menu_requested = pyqtSignal(object, QPoint)
     day_clicked = pyqtSignal(object)
 
     def __init__(self, parent=None):
@@ -241,6 +254,7 @@ class TimeView(QWidget):
                 if ev.all_day:
                     chip = EventChip(ev, ev.title, color=self.color_for(ev))
                     chip.clicked.connect(self.event_clicked)
+                    chip.menu_requested.connect(self.event_menu_requested)
                     sl.addWidget(chip)
                     self.allday_chips.append(chip)
             grid.addWidget(strip, 1, i + 1)
@@ -251,7 +265,8 @@ class TimeView(QWidget):
                 n = layout.to_local(ref, ref)
                 now_min = n.hour * 60 + n.minute
             col = TimelineColumn(d, layout.day_blocks(timed, d, ref), is_today, now_min,
-                                 ref, self.event_clicked.emit, color_for=self.color_for)
+                                 ref, self.event_clicked.emit, color_for=self.color_for,
+                                 on_menu=self.event_menu_requested.emit)
             self.columns.append(col)
             hbox.addWidget(col, 1)
 
@@ -308,7 +323,8 @@ class DayCell(QFrame):
         self._lay.addWidget(self.number)
         self.dimmed = not in_month
 
-    def set_events(self, events: list, on_click, ref: datetime, color_for=None) -> None:
+    def set_events(self, events: list, on_click, ref: datetime, color_for=None,
+                   on_menu=None) -> None:
         shown, more = layout.split_for_month(events)
         color_for = color_for or _calendar_color
         for ev in shown:
@@ -317,6 +333,8 @@ class DayCell(QFrame):
             if self.dimmed:
                 chip.set_opacity(0.5 if not chip.declined else 0.3)
             chip.clicked.connect(on_click)
+            if on_menu is not None:
+                chip.menu_requested.connect(on_menu)
             self._lay.addWidget(chip)
             self.chips.append(chip)
         if more:
@@ -337,6 +355,7 @@ class DayCell(QFrame):
 
 class MonthView(QWidget):
     event_clicked = pyqtSignal(object)
+    event_menu_requested = pyqtSignal(object, QPoint)
     day_clicked = pyqtSignal(object)
 
     def __init__(self, parent=None):
@@ -359,7 +378,8 @@ class MonthView(QWidget):
             self._grid.setColumnStretch(c, 1)
         for i, d in enumerate(dates):
             cell = DayCell(d, d.month == month, d == today)
-            cell.set_events(by_day.get(d, []), self.event_clicked.emit, ref, self.color_for)
+            cell.set_events(by_day.get(d, []), self.event_clicked.emit, ref, self.color_for,
+                            self.event_menu_requested.emit)
             cell.clicked.connect(self.day_clicked)
             self._grid.addWidget(cell, 1 + i // 7, i % 7)
             self.cells[d] = cell
@@ -447,9 +467,15 @@ class EventDetails(QDialog):
             lay.addLayout(row)
 
     def update_color(self) -> None:
+        name = calendar_label(self.event.calendar_name)
+        # An email as the calendar name says nothing: no calendar line (nor swatch).
+        self.calendar_label.setVisible(bool(name))
+        if not name:
+            self.calendar_label.setText("")
+            return
         color = theme.effective_color(self.event, self.settings)
         self.calendar_label.setText(
-            f'<span style="color:{color};">&#9632;</span> ' + _esc(self.event.calendar_name))
+            f'<span style="color:{color};">&#9632;</span> ' + _esc(name))
 
     # -- Hide… / Color… -------------------------------------------------------
     def menu(self):
@@ -553,7 +579,9 @@ class CalendarWindow(QMainWindow):
         root.addWidget(self.stack, 1)
         for v in (self.time_view, self.month_view):
             v.event_clicked.connect(self.show_details)
+            v.event_menu_requested.connect(self.show_event_menu)
             v.day_clicked.connect(self._open_day)
+        self._menu = None
 
         self._restore_geometry()
         self._pending_reset = True
@@ -704,6 +732,20 @@ class CalendarWindow(QMainWindow):
         self.details.raise_()
 
     # -- hide / color (SmartCal-local) ---------------------------------------------
+    def menu(self):
+        """The open right-click menu of an event (None until the first one)."""
+        return self._menu
+
+    def show_event_menu(self, event, global_pos: QPoint) -> None:
+        """Right-click on an event: Hide / Hide series / Color ▸, as in the popup."""
+        meeting_menus.discard(self._menu)
+        self._menu = meeting_menus.context_menu(
+            self, event, self.settings.event_color(event),
+            lambda scope, e=event: self.hide_meeting(e, scope),
+            lambda color, e=event: self.color_meeting(e, color))
+        meeting_menus.delete_when_closed(self._menu)
+        self._menu.popup(global_pos)
+
     def show_notice(self, text: str) -> None:
         self.notice_label.setText(text)
         self.notice_label.setVisible(bool(text))
@@ -717,7 +759,8 @@ class CalendarWindow(QMainWindow):
         except OSError:                 # rolled back by Settings; say so, change nothing
             self.show_notice(meeting_menus.SAVE_FAILED)
             return
-        self._close_details()
+        if self.details is not None and self.settings.is_event_hidden(self.details.event):
+            self._close_details()       # its meeting is gone
         self.show_notice(meeting_menus.HIDDEN_NOTICE)
         self.refresh()
         self.meetings_changed.emit()
@@ -731,7 +774,7 @@ class CalendarWindow(QMainWindow):
         except OSError:
             self.show_notice(meeting_menus.SAVE_FAILED)
             return
-        if self.details is not None and self.details.event is event:
+        if self.details is not None and color_key(self.details.event) == color_key(event):
             self.details.update_color()
         self.refresh()
         self.meetings_changed.emit()

@@ -63,7 +63,7 @@ def main() -> int:
     worker = LiveSyncWorker(cache, client_for)
 
     popup = AgendaPopup(cache, settings)
-    popup.set_no_accounts(not list_accounts())
+    popup.set_accounts(list_accounts())
     popup.refresh()
     window = CalendarWindow(cache, settings)
 
@@ -109,7 +109,7 @@ def main() -> int:
     def remove_account_and_refresh(account: str) -> None:
         remove_account(account, cache)
         drop_clients()
-        popup.set_no_accounts(not list_accounts())
+        popup.set_accounts(list_accounts())
         popup.prune_accounts(list_accounts())
         refresh_views()
 
@@ -145,9 +145,21 @@ def main() -> int:
     popup.attach_chat(assistant_factory)
     popup.chat_changed.connect(on_chat_changed)
 
+    @guarded
+    def on_visibility_changed() -> None:
+        # The tray menu showed/hid an account or restored a hidden meeting; the tray
+        # has already refreshed the popup and its tooltip.
+        window.refresh()
+        notifier.check()
+        if dialog_ref and dialog_visible(dialog_ref[0]):
+            dialog_ref[0].refresh_meetings()
+            dialog_ref[0].sync_account_boxes()
+
     tray = TrayController(popup, worker, cache, settings, on_accounts_changed=drop_clients,
                           on_open_settings=open_settings, reminders=reminders,
-                          on_before_exit=window.save_state, instance=instance)
+                          on_before_exit=window.save_state, instance=instance,
+                          accounts_fn=list_accounts,
+                          on_visibility_changed=on_visibility_changed)
     toast.tray = tray
     window.tray_geometry = tray.tray_geometry   # first open: next to the tray icon
     popup.chat_attention.connect(guarded(tray.notify_attention))
@@ -160,7 +172,7 @@ def main() -> int:
     def on_synced(_account: str) -> None:
         accounts = list_accounts()
         cache.purge_orphans(accounts)   # a sync in flight during removal re-adds rows
-        popup.set_no_accounts(not accounts)
+        popup.set_accounts(accounts)
         popup.prune_accounts(accounts)
         popup.refresh()
         window.refresh()

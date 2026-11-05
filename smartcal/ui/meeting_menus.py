@@ -13,7 +13,8 @@ from . import theme
 HIDE_ONE = "Hide this meeting"
 HIDE_SERIES = "Hide all in this series"
 RESET_COLOR = "Reset to calendar color"
-HIDDEN_NOTICE = "Hidden. Undo in Settings > Meetings."
+COLOR_SUBMENU = "Color"
+HIDDEN_NOTICE = "Hidden. Restore from the tray icon."
 SAVE_FAILED = "Couldn't save — your settings file is not writable"
 
 
@@ -49,6 +50,28 @@ def _menu(parent) -> QMenu:
 def hide_menu(parent, event, on_hide) -> QMenu:
     """on_hide(scope) with scope "event" or "series"."""
     menu = _menu(parent)
+    _add_hide_actions(menu, event, on_hide)
+    return menu
+
+
+def context_menu(parent, event, current: str | None, on_hide, on_pick) -> QMenu:
+    """The right-click menu of a meeting (popup row, window chip): the Hide actions,
+    a separator, then "Color" ▸ (the Color… menu as a submenu). Hiding asks nothing."""
+    menu = _menu(parent)
+    _add_hide_actions(menu, event, on_hide)
+    menu.addSeparator()
+    sub = color_menu(menu, event, current, on_pick)
+    sub.setTitle(COLOR_SUBMENU)
+    menu.addMenu(sub)
+    return menu
+
+
+def submenu(menu: QMenu, title: str) -> QMenu | None:
+    return next((a.menu() for a in menu.actions()
+                 if a.menu() is not None and a.text() == title), None)
+
+
+def _add_hide_actions(menu: QMenu, event, on_hide) -> None:
     one = QAction(HIDE_ONE, menu)
     one.triggered.connect(lambda _c=False: on_hide("event"))
     menu.addAction(one)
@@ -56,7 +79,6 @@ def hide_menu(parent, event, on_hide) -> QMenu:
         series = QAction(HIDE_SERIES, menu)
         series.triggered.connect(lambda _c=False: on_hide("series"))
         menu.addAction(series)
-    return menu
 
 
 def color_menu(parent, event, current: str | None, on_pick) -> QMenu:

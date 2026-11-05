@@ -309,7 +309,7 @@ def test_hide_this_occurrence_only_from_popup(qtbot, tmp_path):
                                                       meeting_menus.HIDE_SERIES]
     _menu_action(p, meeting_menus.HIDE_ONE).trigger()
     assert titles(p) == ["Lunch"] and changed == [1]
-    assert p.notice_text() == "Hidden. Undo in Settings > Meetings."
+    assert p.notice_text() == "Hidden. Restore from the tray icon."
     assert p.settings.is_event_hidden(SERIES[0]) and not p.settings.is_event_hidden(SERIES[1])
     p.now = lambda: NOW + timedelta(days=1)
     p.refresh()
@@ -328,7 +328,7 @@ def test_hide_series_from_window_details(qtbot, tmp_path):
     _menu_action(d, meeting_menus.HIDE_SERIES).trigger()
     assert [c for col in w.time_view.columns for c in col.chips] == []
     assert not d.isVisible() and changed == [1]
-    assert w.notice_text() == "Hidden. Undo in Settings > Meetings."
+    assert w.notice_text() == "Hidden. Restore from the tray icon."
 
 
 def test_one_off_meeting_has_no_series_option(qtbot, tmp_path):

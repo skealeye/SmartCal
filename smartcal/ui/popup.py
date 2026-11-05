@@ -30,6 +30,9 @@ MAX_HEIGHT = 480
 WATCHDOG_MS = 1500            # visible but inactive with no menu/modal up: close the group
 RECLAIM_CHECK_MS = 250        # after taking focus back from the flyout: did it work?
 BG_SELECTED = "#3a3f4b"       # the selected meeting (the next-up one stays BG_NEXT blue)
+NOTICE_MS = 8000              # the "Hidden." notice (and its Undo) clears itself after this
+NO_ACCOUNTS_TEXT = "No calendars connected — right-click the tray icon > Add Google account…"
+ALL_HIDDEN_TEXT = "All accounts hidden — right-click the tray icon > Accounts"
 
 
 @dataclass
@@ -104,6 +107,7 @@ class AgendaPopup(QWidget):
         self._rows: list[RowInfo] = []
         self._next_line = ""
         self._no_accounts = False
+        self._accounts: list[str] | None = None
         self._chat = None
         self._chat_factory = None
         self._ask = None
@@ -124,12 +128,38 @@ class AgendaPopup(QWidget):
         self._status.setStyleSheet(f"color:{theme.WARN};font-size:11px;")
         self._status.setWordWrap(True)
         self._status.hide()
+        # One line under the header after a hide or a failed save: the text and, for a
+        # hide, an Undo button. Part of the layout (its height is counted in the list's
+        # height budget, see _resize); it clears itself after NOTICE_MS.
+        self._notice_box = QWidget()
+        self._notice_box.setObjectName("noticebox")
+        self._notice_box.setStyleSheet("background:transparent;")
+        nl = QHBoxLayout(self._notice_box)
+        nl.setContentsMargins(0, 0, 0, 0)
+        nl.setSpacing(6)
         self._notice = QLabel()
         self._notice.setObjectName("notice")
         self._notice.setTextFormat(Qt.TextFormat.PlainText)
         self._notice.setStyleSheet(f"color:{theme.MUTED};font-size:11px;")
         self._notice.setWordWrap(True)
-        self._notice.hide()
+        self._notice_undo = QPushButton("Undo")
+        self._notice_undo.setObjectName("undo")
+        self._notice_undo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._notice_undo.setStyleSheet(
+            f"QPushButton{{background:{theme.BORDER};color:{theme.TEXT};font-size:11px;"
+            "padding:1px 8px;border:none;border-radius:3px;}"
+            "QPushButton:hover{background:#4a4d51;}"
+            f"QPushButton:focus{{border:1px solid {theme.LINK};}}")
+        self._notice_undo.clicked.connect(lambda _c=False: self._undo_notice())
+        self._notice_undo.hide()
+        nl.addWidget(self._notice, 1)
+        nl.addWidget(self._notice_undo, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._notice_box.hide()
+        self._notice_action = None
+        self.notice_timer = QTimer(self)
+        self.notice_timer.setSingleShot(True)
+        self.notice_timer.setInterval(NOTICE_MS)
+        self.notice_timer.timeout.connect(lambda: self.show_notice(""))
         self._next = QLabel()
         self._next.setTextFormat(Qt.TextFormat.PlainText)
         self._next.setStyleSheet(f"color:{theme.LINK};")
@@ -159,7 +189,7 @@ class AgendaPopup(QWidget):
         self._footer.setObjectName("footer")
         self._footer.setTextFormat(Qt.TextFormat.RichText)
         self._footer.linkActivated.connect(self.request_view)
-        for w in (self._header, self._status, self._notice, self._next, self._scroll,
+        for w in (self._header, self._status, self._notice_box, self._next, self._scroll,
                   self._empty, self._footer):
             outer.addWidget(w)
         self._outer = outer
@@ -242,6 +272,23 @@ class AgendaPopup(QWidget):
     def set_no_accounts(self, value: bool) -> None:
         self._no_accounts = value
 
+    def set_accounts(self, accounts) -> None:
+        """The connected accounts (run.py: token files). Until set, the accounts that
+        have calendars in the cache."""
+        self._accounts = list(accounts)
+        self._no_accounts = not self._accounts
+
+    def _known_accounts(self) -> list[str]:
+        if self._accounts is not None:
+            return list(self._accounts)
+        return list(self.cache.calendars_by_account())
+
+    def all_accounts_hidden(self) -> bool:
+        accounts = self._known_accounts()
+        is_hidden = getattr(self.settings, "is_account_hidden", None)
+        return bool(accounts) and is_hidden is not None \
+            and all(is_hidden(a) for a in accounts)
+
     def _update_status(self) -> None:
         notes = []
         if any(s == "offline" for s in self._statuses.values()):
@@ -306,6 +353,10 @@ class AgendaPopup(QWidget):
             self._rows.append(RowInfo(ev.title, is_next, time_text))
             row = self._make_row(ev, time_text, is_next)
             self._rows_box.addWidget(row)
+            # Shown now, not on Qt's deferred show: a row added to a visible popup stays
+            # hidden until the next event-loop pass, and a layout skips hidden widgets,
+            # so _resize below would measure an empty list and size it to one row.
+            row.show()
             if self._selected_key is not None and _row_key(ev) == self._selected_key:
                 selected = row
         if selected is not None:   # a refresh keeps the selected meeting's details open
@@ -319,9 +370,13 @@ class AgendaPopup(QWidget):
         if events:
             self._empty.hide()
         else:
-            self._empty.setText("No calendars connected — right-click the tray icon "
-                                "> Add Google account…" if self._no_accounts
-                                else "Nothing scheduled today")
+            if self._no_accounts:
+                text = NO_ACCOUNTS_TEXT
+            elif self.all_accounts_hidden():
+                text = ALL_HIDDEN_TEXT
+            else:
+                text = "Nothing scheduled today"
+            self._empty.setText(text)
             self._empty.show()
         self._scroll.setVisible(bool(events))
         self._resize()
@@ -333,7 +388,10 @@ class AgendaPopup(QWidget):
             max_total = min(MAX_HEIGHT, self._area().height() - 24)
             self._scroll.setFixedHeight(0)
             lay.activate()
-            chrome = lay.sizeHint().height()
+            # Everything but the list (header, status, notice, next line, chat, footer),
+            # word-wrapped lines measured at the popup's real width.
+            chrome = (lay.totalHeightForWidth(WIDTH) if lay.hasHeightForWidth()
+                      else lay.sizeHint().height())
             inner_w = WIDTH - 20
             rows_lay = self._rows_box
             content_h = max(rows_lay.sizeHint().height(),
@@ -341,7 +399,14 @@ class AgendaPopup(QWidget):
                             else 0)
             self._scroll.setFixedHeight(max(40, min(content_h, max_total - chrome)))
         lay.activate()
-        self.adjustSize()
+        if lay.hasHeightForWidth():
+            # Not adjustSize(): it measures wrapped lines at the layout's preferred
+            # width (wider than the popup's fixed WIDTH), so a wrapped "Next:" line or
+            # notice got fewer lines than it needs and the popup came out too short.
+            self.resize(WIDTH, max(lay.totalHeightForWidth(WIDTH),
+                                   lay.minimumSize().height()))
+        else:
+            self.adjustSize()
         if self.isVisible() and self._anchored:
             self._place()
 
@@ -362,6 +427,7 @@ class AgendaPopup(QWidget):
             row.head_layout.addWidget(join, 0, Qt.AlignmentFlag.AlignVCenter)
             row.join_button = join
         row.toggle_requested.connect(self.toggle_row)
+        row.menu_requested.connect(self.show_row_menu)
         return row
 
     def _join(self, url: str) -> None:
@@ -546,12 +612,27 @@ class AgendaPopup(QWidget):
         return self._menu
 
     def _show_menu(self, menu, button) -> None:
+        self._open_menu(menu, button.mapToGlobal(button.rect().bottomLeft()))
+
+    def _open_menu(self, menu, global_pos: QPoint) -> None:
+        """Every menu of the group (Hide…, Color…, a row's right-click menu) goes through
+        here: one open menu at a time, owned by the popup, settled when it closes."""
         if self._menu is not menu:
             meeting_menus.discard(self._menu)
         self._menu = menu
         menu.aboutToHide.connect(self._settle_after_close)
         meeting_menus.delete_when_closed(menu)
-        menu.popup(button.mapToGlobal(button.rect().bottomLeft()))
+        menu.popup(global_pos)
+
+    def show_row_menu(self, row: "AgendaRow", global_pos: QPoint) -> None:
+        """Right-click on a row: Hide / Hide series / Color ▸. Never selects the row."""
+        if not self.isVisible():
+            return
+        ev = row.event
+        self._open_menu(meeting_menus.context_menu(
+            self, ev, self.settings.event_color(ev),
+            lambda scope, e=ev: self.hide_meeting(e, scope),
+            lambda color, e=ev: self.color_meeting(e, color)), global_pos)
 
     def _settle_after_close(self, *_args) -> None:
         """A menu or modal box closed (or activation left the group with nowhere known to
@@ -605,14 +686,27 @@ class AgendaPopup(QWidget):
             lambda color, e=ev: self.color_meeting(e, color)), button)
 
     def hide_meeting(self, ev, scope: str) -> None:
+        """Hide at once (no confirmation); the notice offers Undo."""
         try:
-            self.settings.hide_event(ev, scope)
+            key = self.settings.hide_event(ev, scope)
         except OSError:                 # rolled back by Settings; say so, change nothing
             self.show_notice(meeting_menus.SAVE_FAILED)
             return
-        self.close_flyout(restore_focus=False)   # its meeting is gone
+        row = self.selected_row()
+        if row is not None and self.settings.is_event_hidden(row.event):
+            self.close_flyout(restore_focus=False)   # its meeting is gone
         self.refresh()
-        self.show_notice(meeting_menus.HIDDEN_NOTICE)
+        self.show_notice(meeting_menus.HIDDEN_NOTICE, undo=lambda k=key: self._unhide(k))
+        self.meetings_changed.emit()
+
+    def _unhide(self, key: str) -> None:
+        try:
+            self.settings.unhide(key)
+        except OSError:
+            self.show_notice(meeting_menus.SAVE_FAILED)
+            return
+        self.show_notice("")
+        self.refresh()
         self.meetings_changed.emit()
 
     def color_meeting(self, ev, color) -> None:
@@ -627,13 +721,31 @@ class AgendaPopup(QWidget):
         self.refresh()          # keeps the flyout open, recolored
         self.meetings_changed.emit()
 
-    def show_notice(self, text: str) -> None:
+    def show_notice(self, text: str, undo=None) -> None:
+        """Show `text` (empty: clear) under the header, with an Undo button when `undo`
+        is given. A notice clears itself after NOTICE_MS."""
         self._notice.setText(text)
-        self._notice.setVisible(bool(text))
+        self._notice_action = undo if text else None
+        self._notice_undo.setVisible(self._notice_action is not None)
+        self._notice_box.setVisible(bool(text))
+        if text:
+            self.notice_timer.start()
+        else:
+            self.notice_timer.stop()
         self._resize()
 
     def notice_text(self) -> str:
-        return self._notice.text() if not self._notice.isHidden() else ""
+        return self._notice.text() if not self._notice_box.isHidden() else ""
+
+    def notice_undo_button(self) -> QPushButton | None:
+        """The notice's Undo button while it is offered, else None."""
+        return self._notice_undo if not self._notice_box.isHidden() \
+            and not self._notice_undo.isHidden() else None
+
+    def _undo_notice(self) -> None:
+        action, self._notice_action = self._notice_action, None
+        if action is not None:
+            action()
 
 
     # -- placement / focus ---------------------------------------------------
@@ -856,7 +968,9 @@ class AgendaPopup(QWidget):
         self.last_hidden_cursor = self.cursor_pos()
         # Never outlives the popup: hidden at once, even mid-slide.
         self.close_flyout(restore_focus=False, animate=False)
-        self._notice.hide()
+        self._notice_box.hide()
+        self._notice_action = None
+        self.notice_timer.stop()
         super().hideEvent(e)
 
     def recently_dismissed_by_tray_click(self, tray: QRect | None, within: float = 0.6) -> bool:
@@ -881,6 +995,7 @@ class AgendaRow(QFrame):
     it and shows its details in the flyout (again: closes them); Join never selects."""
 
     toggle_requested = pyqtSignal(object, bool)   # row, by keyboard
+    menu_requested = pyqtSignal(object, QPoint)   # row, global position (right-click)
 
     def __init__(self, ev, time_text: str, is_next: bool, color: str, parent=None):
         super().__init__(parent)
@@ -913,16 +1028,13 @@ class AgendaRow(QFrame):
         col = QVBoxLayout()
         col.setContentsMargins(0, 3, 0, 3)
         col.setSpacing(0)
+        # Time and title only: the calendar (often just the owner's email) is in the
+        # details panel when it says something; the stripe shows the color.
         top = QLabel(f"<b>{time_text}</b>  {_esc(ev.title)}")
         top.setObjectName("title")
         top.setTextFormat(Qt.TextFormat.RichText)
         top.setWordWrap(True)
-        sub = QLabel(ev.calendar_name)
-        sub.setObjectName("calname")
-        sub.setTextFormat(Qt.TextFormat.PlainText)
-        sub.setStyleSheet(f"color:{theme.MUTED};font-size:10px;")
         col.addWidget(top)
-        col.addWidget(sub)
         self.head_layout.addLayout(col, 1)
         self._body.addWidget(self.head)
         lay.addLayout(self._body, 1)
@@ -952,6 +1064,14 @@ class AgendaRow(QFrame):
         if e.button() == Qt.MouseButton.LeftButton and self.rect().contains(
                 e.position().toPoint()):
             self.toggle_requested.emit(self, False)
+        e.accept()
+
+    def contextMenuEvent(self, e):
+        """Right-click (or the Menu key): Hide / Color menu. Never toggles selection."""
+        pos = e.globalPos()
+        if e.reason() == e.Reason.Keyboard:
+            pos = self.mapToGlobal(self.rect().center())
+        self.menu_requested.emit(self, pos)
         e.accept()
 
     def keyPressEvent(self, e):
