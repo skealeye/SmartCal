@@ -164,3 +164,43 @@ def test_month_view_late_in_month_has_no_banner_for_current_month(qtbot, tmp_pat
     assert not w.unsynced_shown()
     w.go_to(date(2026, 10, 15))                          # last month is still not synced
     assert w.unsynced_shown()
+
+
+# -- connected accounts (token files) count as active -------------------------------
+def test_new_account_without_sync_blocks_free_slots(tmp_path):
+    claude = FakeClaude(tool_msg(free("2026-11-05")), text_msg("ok"))
+    # new@x.com was just added: token file, no calendars cached, no sync yet.
+    a, _, cache, _ = make(tmp_path, claude, [ev()], tokens=("a@x.com", "new@x.com"))
+    res = run(a, claude)[0]
+    assert res["is_error"] and "new@x.com hasn't finished syncing yet" in res["content"]
+    assert "new@x.com hasn't finished syncing yet" in a.system_prompt(NOW)
+
+
+def test_removed_account_does_not_block(tmp_path):
+    claude = FakeClaude(tool_msg(free("2026-11-05")), text_msg("ok"))
+    # gone@x.com still has cached calendars (e.g. rows a sync in flight re-added)
+    # but no token and no sync state: it was removed and must not block.
+    a, _, cache, _ = make(tmp_path, claude, [ev()], accounts=("a@x.com", "gone@x.com"),
+                          tokens=("a@x.com",), synced=False)
+    lo, hi = sync.sync_window(NOW)
+    cache.record_sync("a@x.com", lo, hi, NOW)
+    res = run(a, claude)[0]
+    assert not res.get("is_error") and '"free":[[' in res["content"]
+    assert "events from 2026-10-28 to 2027-01-03" in a.system_prompt(NOW)
+
+
+def test_token_only_account_counts_as_active(tmp_path):
+    # b@x.com's only calendar is hidden, so it has no shown calendars; it is still
+    # connected, so its sync must have finished before dates are answered.
+    claude = FakeClaude(tool_msg(free("2026-11-05")), text_msg("ok"))
+    a, _, cache, _ = make(tmp_path, claude, [ev()], accounts=("a@x.com", "b@x.com"),
+                          hidden=("b@x.com",), synced=False)
+    lo, hi = sync.sync_window(NOW)
+    cache.record_sync("a@x.com", lo, hi, NOW)
+    assert a._sync_accounts() == ["a@x.com", "b@x.com"]
+    res = run(a, claude)[0]
+    assert res["is_error"] and "b@x.com hasn't finished syncing yet" in res["content"]
+    cache.record_sync("b@x.com", lo, hi, NOW)
+    claude.then(tool_msg(free("2026-11-05")), text_msg("ok"))
+    a.reply("again")
+    assert '"free":[[' in tool_results(claude.messages.calls[-1])[0]["content"]

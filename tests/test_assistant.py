@@ -83,7 +83,7 @@ def tool_results(call):
 
 
 def make(tmp_path, claude, events=(), accounts=("a@x.com",), extra_cals=(), clock=None,
-         hidden=(), synced=True):
+         hidden=(), synced=True, tokens=None):
     cache = Cache(tmp_path / "c.db")
     clients = {a: FakeClient(a, [e for e in events if e.account == a]) for a in accounts}
     for a in accounts:
@@ -101,7 +101,10 @@ def make(tmp_path, claude, events=(), accounts=("a@x.com",), extra_cals=(), cloc
         for a in accounts:
             cache.record_sync(a, lo, hi, clock())
     reminders = Reminders(tmp_path / "r.json", clock=clock)
-    a = Assistant(claude, actions, reminders, settings, cache, undo=store, clock=clock)
+    # Token files: by default every account given is connected (never the real folder).
+    tokens = list(accounts) if tokens is None else list(tokens)
+    a = Assistant(claude, actions, reminders, settings, cache, undo=store, clock=clock,
+                  accounts_fn=lambda: tokens)
     return a, clients, cache, reminders
 
 

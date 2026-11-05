@@ -33,7 +33,7 @@ from . import agenda
 from .actions import (AmbiguousEventError, AttendeesRequireConfirmationError,
                       EventNotFoundError, SeriesRefusedError)
 from .config import data_dir
-from .google_auth import ReauthRequired
+from .google_auth import ReauthRequired, list_accounts
 from .google_client import http_status
 from .maps import directions_url
 
@@ -489,8 +489,10 @@ class _Turn:
 # -- assistant ---------------------------------------------------------------
 class Assistant:
     def __init__(self, client, actions, reminders, settings, cache, undo=None,
-                 clock=datetime.now):
+                 clock=datetime.now, accounts_fn=None):
         self.client = client
+        # Connected accounts (token files): a new one blocks date answers until it synced.
+        self._accounts_fn = accounts_fn or list_accounts
         self.actions = actions
         self.reminders = reminders
         self.settings = settings
@@ -696,8 +698,9 @@ class Assistant:
 
         This is what the cache really holds, not the range the clock suggests: an
         account that needs re-auth, was offline for days or has not finished its
-        first sync (e.g. right after an upgrade) narrows it or empties it."""
-        active = list(self._active())
+        first sync (e.g. right after an upgrade or adding an account) narrows it or
+        empties it."""
+        active = self._sync_accounts()
         if not active:
             return "no calendars synced yet"
         windows = self.cache.sync_windows()
@@ -707,6 +710,18 @@ class Assistant:
                 (" hasn't" if len(missing) == 1 else " haven't") + " finished syncing yet"
         window = self.cache.synced_window(active)
         return window if window is not None else "no calendars synced yet"
+
+    def _sync_accounts(self) -> list[str]:
+        """Accounts whose sync must have finished before dates can be answered: every
+        connected account (token file) plus every account with shown cached calendars.
+        A cached account without a token was removed and never blocks."""
+        cached = list(self._active())
+        try:
+            tokens = [str(a) for a in self._accounts_fn()]
+        except Exception:  # noqa: BLE001 - token folder unreadable: fall back to the cache
+            log.warning("could not list accounts for the synced window")
+            return cached
+        return sorted(set(tokens) | {a for a in cached if a in tokens})
 
     @staticmethod
     def _window_days(window: tuple[datetime, datetime], now: datetime) -> tuple[date, date]:
