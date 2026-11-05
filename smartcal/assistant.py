@@ -520,6 +520,13 @@ class Assistant:
         finally:
             self._busy.release()
 
+    def undo_count(self) -> int:
+        """Entries left in the undo store (read-only; the store has its own lock)."""
+        try:
+            return len(self.undo) if self.undo is not None else 0
+        except TypeError:
+            return 0
+
     def _now(self) -> datetime:
         now = self.clock()
         return now.astimezone() if now.tzinfo is None else now

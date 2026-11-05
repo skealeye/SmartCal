@@ -27,6 +27,8 @@ class FakeAssistant:
         self.resets = 0
         self.reset_ok = True
         self.undo_line = "Undone: removed Lunch"
+        self.store = ["older"]         # fake UndoStore: one entry per write
+        self.undo_script = None        # [(line, consumes_entry)]
 
     def reply(self, text):
         self.calls.append(text)
@@ -35,11 +37,22 @@ class FakeAssistant:
             item = item()
         if isinstance(item, BaseException):
             raise item
+        if isinstance(item, AssistantResult):
+            self.store.extend(f"w{len(self.calls)}-{i}" for i in range(len(item.changes)))
         return item
+
+    def undo_count(self):
+        return len(self.store)
 
     def undo_last(self):
         self.undos += 1
-        return self.undo_line
+        if self.undo_script:
+            line, consume = self.undo_script.pop(0)
+        else:
+            line, consume = self.undo_line, self.undo_line.startswith("Undone")
+        if consume and self.store:
+            self.store.pop()
+        return line
 
     def reset(self):
         self.resets += 1
@@ -352,21 +365,20 @@ def test_undo_button_undoes_every_write_of_the_reply(qtbot):
 
 def test_undo_stops_at_first_warning_and_stays_enabled(qtbot):
     w, a = make(qtbot, FakeAssistant([two_changes()]))
-    lines = iter(["Can't undo: the event no longer exists.", "Undone: x"])
-    a.undo_last = lambda: (setattr(a, "undos", a.undos + 1), next(lines))[1]
+    a.undo_script = [("Nothing to undo yet: not saved.", False)]
     say(qtbot, w)
     (undo,) = buttons(w, "Undo (2)")
     undo.click()
     qtbot.waitUntil(lambda: not w.is_busy(), timeout=3000)
     assert a.undos == 1
-    assert "Can't undo" in all_text(w)
+    assert "Nothing to undo yet" in all_text(w)
     assert undo.isEnabled() and undo.text() == "Undo (2)"
 
 
 def test_undo_partial_then_retry_shows_remaining(qtbot):
     w, a = make(qtbot, FakeAssistant([two_changes()]))
-    lines = iter(["Undone: removed B", "Can't undo: nope", "Undone: removed A"])
-    a.undo_last = lambda: next(lines)
+    a.undo_script = [("Undone: removed B", True), ("Can't undo: nope", False),
+                     ("Undone: removed A", True)]
     say(qtbot, w)
     (undo,) = buttons(w, "Undo (2)")
     undo.click()
@@ -409,6 +421,7 @@ def test_changed_not_emitted_when_nothing_undone(qtbot):
     w, a = make(qtbot, FakeAssistant([AssistantResult("ok", True, changes=["Done: x"])]))
     a.undo_line = "Nothing to undo."
     say(qtbot, w)
+    a.store.clear()
     got = []
     w.changed.connect(lambda: got.append(1))
     buttons(w, "Undo")[0].click()
@@ -512,3 +525,46 @@ def test_popup_height_cap_and_input_visible_with_30_events(qtbot, tmp_path):
     bottom = inp.mapTo(popup, inp.rect().bottomLeft()).y()
     assert 0 <= bottom < popup.height()
     assert bottom < popup._footer.geometry().top()
+
+
+def test_discarded_entry_decrements_remaining(qtbot):
+    w, a = make(qtbot, FakeAssistant([two_changes()]))
+    a.undo_script = [("Can't undo: the event no longer exists.", True)]
+    say(qtbot, w)
+    assert a.store == ["older", "w1-0", "w1-1"]
+    (undo,) = buttons(w, "Undo (2)")
+    undo.click()
+    qtbot.waitUntil(lambda: not w.is_busy(), timeout=3000)
+    assert undo.text() == "Undo" and undo.isEnabled()
+    undo.click()
+    qtbot.waitUntil(lambda: not w.is_busy(), timeout=3000)
+    assert a.undos == 2
+    assert a.store == ["older"]
+    assert not undo.isEnabled()
+
+
+def test_warning_that_keeps_entry_does_not_decrement(qtbot):
+    w, a = make(qtbot, FakeAssistant([two_changes()]))
+    a.undo_script = [("Can't undo: Google is unreachable.", False)]
+    say(qtbot, w)
+    (undo,) = buttons(w, "Undo (2)")
+    undo.click()
+    qtbot.waitUntil(lambda: not w.is_busy(), timeout=3000)
+    assert undo.text() == "Undo (2)" and undo.isEnabled()
+    assert len(a.store) == 3
+
+
+def test_undo_never_exceeds_original_n_across_retries(qtbot):
+    w, a = make(qtbot, FakeAssistant([two_changes()]))
+    a.store = ["old1", "old2", "old3"]
+    a.undo_script = [("Can't undo: gone.", True), ("Undone: x", True)]
+    say(qtbot, w)
+    (undo,) = buttons(w, "Undo (2)")
+    undo.click()
+    qtbot.waitUntil(lambda: not w.is_busy(), timeout=3000)
+    undo.click()
+    qtbot.waitUntil(lambda: not w.is_busy(), timeout=3000)
+    undo.click()      # disabled: no effect
+    assert a.undos == 2
+    assert a.store == ["old1", "old2", "old3"]
+    assert not undo.isEnabled()

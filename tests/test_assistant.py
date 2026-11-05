@@ -1041,3 +1041,11 @@ def test_refused_confirmation_does_not_use_write_cap(tmp_path):
     assert "one confirmation at a time" in results[2]["content"]
     assert all('"ok":true' in x["content"] for x in results[3:])
     assert len(r.changes) == 5
+
+
+def test_undo_count_has_no_side_effects(tmp_path):
+    a, *_ = make(tmp_path, FakeClaude())
+    assert a.undo_count() == 0
+    before = a.undo_count()
+    assert before == a.undo_count() == len(a.undo)
+    assert a.history == []

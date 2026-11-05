@@ -335,17 +335,21 @@ class ChatWidget(QWidget):
         n = max(1, item.remaining)
 
         def job(a):
-            lines, err = [], None
-            for _ in range(n):
-                try:
+            lines, err, consumed, left = [], None, 0, n
+            try:
+                while left > 0:
+                    before = a.undo_count()
                     line = str(a.undo_last())
-                except Exception as exc:  # noqa: BLE001 - shown by the UI thread
-                    err = exc
-                    break
-                lines.append(line)
-                if not line.startswith(UNDONE):
-                    break
-            return lines, err
+                    step = max(0, before - a.undo_count())
+                    consumed += step
+                    left -= step
+                    lines.append(line)
+                    if not line.startswith(UNDONE):
+                        break
+                count = a.undo_count()
+            except Exception as exc:  # noqa: BLE001 - shown by the UI thread
+                err, count = exc, None
+            return lines, err, consumed, count
 
         def fail(exc):
             self._on_error(exc)
@@ -360,14 +364,14 @@ class ChatWidget(QWidget):
         item.undo_btn.setEnabled(left > 0 and not gone)
 
     def _on_undone(self, item: _Item, result) -> None:
-        lines, err = result
+        lines, err, consumed, count = result
         for line in lines:
             self._add_plain("claude", "Claude", line)
         done = sum(1 for line in lines if line.startswith(UNDONE))
-        item.remaining = max(0, item.remaining - done)
+        item.remaining = max(0, item.remaining - consumed)
         if err is not None:
             self._on_error(err)
-        self._refresh_undo(item, gone=bool(lines) and lines[-1].startswith(GONE))
+        self._refresh_undo(item, gone=count == 0)
         if done:
             self.changed.emit()
 
