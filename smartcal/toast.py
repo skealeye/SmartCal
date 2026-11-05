@@ -52,6 +52,9 @@ def clean_text(text: str, limit: int = BODY_LIMIT) -> str:
 def register_app_id(key_path: str = APP_ID_KEY) -> None:
     """Register the toast app id (display name) under HKCU; idempotent."""
     import winreg
+    from smartcal.config import no_system_writes
+    if key_path == APP_ID_KEY and no_system_writes():
+        return
     with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as k:
         winreg.SetValueEx(k, "DisplayName", 0, winreg.REG_SZ, APP_ID)
 

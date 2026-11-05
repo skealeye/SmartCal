@@ -48,6 +48,9 @@ def is_enabled(key_path: str = RUN_KEY) -> bool:
 def apply(enabled: bool) -> None:
     """Make the registry match the setting; never raise (registry may be locked down)."""
     import logging
+    from smartcal.config import no_system_writes
+    if no_system_writes():
+        return
     try:
         enable() if enabled else disable()
     except OSError:
