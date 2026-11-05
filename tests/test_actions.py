@@ -16,6 +16,10 @@ def _dt(d, h, m=0):
     return datetime(2026, 11, d, h, m).astimezone()
 
 
+# A fixed present well before the scenario day (Nov 5): never the real clock.
+BEFORE = _dt(3, 9)
+
+
 def make(tmp_path, events=(), settings=None, accounts=("a@x.com",)):
     cache = Cache(tmp_path / "c.db")
     clients = {a: FakeClient(a, [e for e in events if e.account == a]) for a in accounts}
@@ -161,9 +165,9 @@ def test_free_slots_respects_all_accounts_and_working_hours(tmp_path):
            ev("b@x.com", "2", start=_dt(5, 13), end=_dt(5, 14), cal="b@x.com"),
            ev("a@x.com", "3", start=_dt(5, 7), end=_dt(5, 8))]   # before hours
     act, *_ = make(tmp_path, evs, accounts=("a@x.com", "b@x.com"))
-    slots = act.free_slots(date(2026, 11, 5), timedelta(hours=1))
+    slots = act.free_slots(date(2026, 11, 5), timedelta(hours=1), now=BEFORE)
     assert slots == [(_dt(5, 9), _dt(5, 10)), (_dt(5, 11), _dt(5, 13)), (_dt(5, 14), _dt(5, 17))]
-    assert act.free_slots(date(2026, 11, 5), timedelta(hours=3)) == [(_dt(5, 14), _dt(5, 17))]
+    assert act.free_slots(date(2026, 11, 5), timedelta(hours=3), now=BEFORE) == [(_dt(5, 14), _dt(5, 17))]
 
 
 def test_free_slots_partial_overlap_and_merge(tmp_path):
@@ -171,13 +175,13 @@ def test_free_slots_partial_overlap_and_merge(tmp_path):
            ev(id="2", start=_dt(5, 9, 30), end=_dt(5, 11)),        # overlaps previous
            ev(id="3", start=_dt(5, 16), end=_dt(5, 18))]           # spills out
     act, *_ = make(tmp_path, evs)
-    assert act.free_slots(date(2026, 11, 5), timedelta(minutes=30)) == [(_dt(5, 11), _dt(5, 16))]
+    assert act.free_slots(date(2026, 11, 5), timedelta(minutes=30), now=BEFORE) == [(_dt(5, 11), _dt(5, 16))]
 
 
 def test_free_slots_ignores_all_day_events(tmp_path):
     trip = ev(id="t", all_day=True, start=_dt(5, 0), end=_dt(6, 0))
     act, *_ = make(tmp_path, [trip])
-    assert act.free_slots(date(2026, 11, 5), timedelta(hours=1)) == [(_dt(5, 9), _dt(5, 17))]
+    assert act.free_slots(date(2026, 11, 5), timedelta(hours=1), now=BEFORE) == [(_dt(5, 9), _dt(5, 17))]
 
 
 def test_free_slots_dst_day(tmp_path):

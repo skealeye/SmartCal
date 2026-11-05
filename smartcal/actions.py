@@ -255,8 +255,10 @@ class Actions:
         """Gaps >= duration within local working hours on `day`, across every visible
         calendar of every account. Busy = timed events (partial overlap counts);
         all-day events, zero-length events, events Google shows as Free
-        (transparent) and meetings the owner declined are ignored. `now` only supplies
-        the time zone (default: the system zone, resolved per boundary for DST)."""
+        (transparent) and meetings the owner declined are ignored. `now` supplies the
+        time zone (default: the system zone, resolved per boundary for DST) and the
+        present: time before it is never offered (today: from now on; a past day:
+        nothing)."""
         h0, h1 = working_hours
         if not (0 <= h0 < h1 <= 24) or duration <= timedelta(0):
             raise ValueError("bad working hours or duration")
@@ -267,8 +269,7 @@ class Actions:
             return agenda.midnight(d, now) if hour in (0, 24) else _at(d, hour, now)
 
         w0, w1 = at(h0), at(h1)
-        if day == agenda.local_date(now):
-            w0 = max(w0, now)   # never offer time that has already passed
+        w0 = max(w0, now)       # never offer time that has already passed
         if w0 >= w1:
             return []
         busy = sorted((max(e.start, w0), min(e.end, w1))

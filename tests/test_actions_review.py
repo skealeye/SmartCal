@@ -14,6 +14,10 @@ def _dt(d, h, m=0):
     return datetime(2026, 11, d, h, m).astimezone()
 
 
+# A fixed present well before the scenario day (Nov 5): never the real clock.
+BEFORE = _dt(3, 9)
+
+
 def make(tmp_path, events=(), accounts=("a@x.com",)):
     cache = Cache(tmp_path / "c.db")
     clients = {a: FakeClient(a, [e for e in events if e.account == a]) for a in accounts}
@@ -134,7 +138,7 @@ def test_placeholder_title_is_not_written_back(tmp_path):
 
 def test_free_slots_ignores_free_events(tmp_path):
     act, *_ = make(tmp_path, [ev(id="1", start=_dt(5, 10), end=_dt(5, 11), busy=False)])
-    assert act.free_slots(date(2026, 11, 5), timedelta(hours=1)) == [(_dt(5, 9), _dt(5, 17))]
+    assert act.free_slots(date(2026, 11, 5), timedelta(hours=1), now=BEFORE) == [(_dt(5, 9), _dt(5, 17))]
 
 
 def test_busy_flag_survives_cache_roundtrip(tmp_path):
@@ -144,7 +148,7 @@ def test_busy_flag_survives_cache_roundtrip(tmp_path):
 
 def test_free_slots_ignores_zero_length_event(tmp_path):
     act, *_ = make(tmp_path, [ev(id="1", start=_dt(5, 12), end=_dt(5, 12))])
-    assert act.free_slots(date(2026, 11, 5), timedelta(hours=1)) == [(_dt(5, 9), _dt(5, 17))]
+    assert act.free_slots(date(2026, 11, 5), timedelta(hours=1), now=BEFORE) == [(_dt(5, 9), _dt(5, 17))]
 
 
 def test_free_slots_today_excludes_past(tmp_path):
@@ -153,3 +157,35 @@ def test_free_slots_today_excludes_past(tmp_path):
     assert act.free_slots(date(2026, 11, 5), timedelta(hours=1), now=now) == [
         (now, _dt(5, 14)), (_dt(5, 15), _dt(5, 17))]
     assert act.free_slots(date(2026, 11, 5), timedelta(hours=1), now=_dt(5, 18)) == []
+
+
+def test_suite_has_no_wall_clock_dependence_for_free_slots(tmp_path):
+    """The free_slots scenarios with the injected clock the day BEFORE the scenario day
+    (it is still ahead: every slot offered) and the day AFTER (it is past: nothing
+    offered), whatever the real date is."""
+    day = date(2026, 11, 5)
+    scenarios = [  # (events, duration, slots while the day is still ahead)
+        ([ev(id="1", start=_dt(5, 10), end=_dt(5, 11)),
+          ev(id="2", start=_dt(5, 13), end=_dt(5, 14))], timedelta(hours=1),
+         [(_dt(5, 9), _dt(5, 10)), (_dt(5, 11), _dt(5, 13)), (_dt(5, 14), _dt(5, 17))]),
+        ([ev(id="1", start=_dt(5, 8), end=_dt(5, 10)),
+          ev(id="2", start=_dt(5, 9, 30), end=_dt(5, 11)),
+          ev(id="3", start=_dt(5, 16), end=_dt(5, 18))], timedelta(minutes=30),
+         [(_dt(5, 11), _dt(5, 16))]),
+        ([ev(id="t", all_day=True, start=_dt(5, 0), end=_dt(6, 0))], timedelta(hours=1),
+         [(_dt(5, 9), _dt(5, 17))]),
+        ([ev(id="1", start=_dt(5, 10), end=_dt(5, 11), busy=False)], timedelta(hours=1),
+         [(_dt(5, 9), _dt(5, 17))]),
+        ([ev(id="1", start=_dt(5, 12), end=_dt(5, 12))], timedelta(hours=1),
+         [(_dt(5, 9), _dt(5, 17))]),
+    ]
+    day_before = [_dt(4, 0, 1), _dt(4, 12), _dt(4, 23, 59)]
+    day_after = [_dt(6, 0, 1), _dt(6, 12), _dt(6, 23, 59)]
+    for i, (events, duration, ahead) in enumerate(scenarios):
+        sub = tmp_path / str(i)
+        sub.mkdir()
+        act, *_ = make(sub, events)
+        for now in day_before:
+            assert act.free_slots(day, duration, now=now) == ahead, (i, now)
+        for now in day_after:
+            assert act.free_slots(day, duration, now=now) == [], (i, now)
