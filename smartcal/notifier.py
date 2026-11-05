@@ -107,6 +107,22 @@ class Notifier:
         if changed:
             self._save()
 
+    def mark_in_progress(self, now: datetime | None = None) -> None:
+        """Something just became visible (an account shown again, a meeting restored):
+        meetings already in progress count as notified, so no late "Started" toast."""
+        now = now or self.clock()
+        if now.tzinfo is None:
+            now = now.astimezone()
+        changed = False
+        for ev in agenda.visible_events(self.cache, self.settings,
+                                        self.cache.events_between(now, now + timedelta(seconds=1)),
+                                        hide_user_hidden=True):
+            if not ev.all_day and ev.start <= now < ev.end and self._key(ev) not in self.fired:
+                self.fired[self._key(ev)] = (ev.end.timestamp(), now.timestamp())
+                changed = True
+        if changed:
+            self._save()
+
     def _prune(self, now: datetime) -> bool:
         """Drop entries once the event has ended and 2 days have passed since firing."""
         t = now.timestamp()

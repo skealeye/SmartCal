@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QPushBut
                              QScrollArea, QVBoxLayout, QWidget)
 
 from .. import __version__, agenda
-from ..textutil import meeting_label, safe_http_url
+from ..textutil import meeting_label, plain_line, safe_http_url
 from . import meeting_menus, motion, placement, theme
 
 log = logging.getLogger(__name__)
@@ -283,11 +283,15 @@ class AgendaPopup(QWidget):
             return list(self._accounts)
         return list(self.cache.calendars_by_account())
 
+    def hidden_account_count(self) -> int:
+        is_hidden = getattr(self.settings, "is_account_hidden", None)
+        if is_hidden is None:
+            return 0
+        return sum(1 for a in self._known_accounts() if is_hidden(a))
+
     def all_accounts_hidden(self) -> bool:
         accounts = self._known_accounts()
-        is_hidden = getattr(self.settings, "is_account_hidden", None)
-        return bool(accounts) and is_hidden is not None \
-            and all(is_hidden(a) for a in accounts)
+        return bool(accounts) and self.hidden_account_count() == len(accounts)
 
     def _update_status(self) -> None:
         notes = []
@@ -376,6 +380,9 @@ class AgendaPopup(QWidget):
                 text = ALL_HIDDEN_TEXT
             else:
                 text = "Nothing scheduled today"
+                n = self.hidden_account_count()
+                if n:
+                    text += f" ({n} account{'s' if n != 1 else ''} hidden)"
             self._empty.setText(text)
             self._empty.show()
         self._scroll.setVisible(bool(events))
@@ -394,9 +401,10 @@ class AgendaPopup(QWidget):
                       else lay.sizeHint().height())
             inner_w = WIDTH - 20
             rows_lay = self._rows_box
-            content_h = max(rows_lay.sizeHint().height(),
-                            rows_lay.totalHeightForWidth(inner_w) if rows_lay.hasHeightForWidth()
-                            else 0)
+            # Measured at the list's real width when the rows wrap (the plain size hint
+            # assumes other line counts: a list that fits would get a blank band).
+            content_h = (rows_lay.totalHeightForWidth(inner_w) if rows_lay.hasHeightForWidth()
+                         else rows_lay.sizeHint().height())
             self._scroll.setFixedHeight(max(40, min(content_h, max_total - chrome)))
         lay.activate()
         if lay.hasHeightForWidth():
@@ -724,6 +732,7 @@ class AgendaPopup(QWidget):
     def show_notice(self, text: str, undo=None) -> None:
         """Show `text` (empty: clear) under the header, with an Undo button when `undo`
         is given. A notice clears itself after NOTICE_MS."""
+        text = plain_line(text)
         self._notice.setText(text)
         self._notice_action = undo if text else None
         self._notice_undo.setVisible(self._notice_action is not None)

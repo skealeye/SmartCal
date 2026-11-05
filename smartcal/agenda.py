@@ -98,11 +98,17 @@ def visible_events(cache, settings, events: list[Event],
     dropped (settings=None: no hiding), declined meetings dropped unless asked for.
 
     hide_user_hidden=True also drops meetings hidden in SmartCal (Hide this meeting /
-    Hide all in this series) and the events of accounts hidden in SmartCal (by the
-    account whose copy is kept after deduping). Only the agenda, windows and toasts pass
-    it: a hidden meeting or account is still a real commitment, so the assistant, find
-    and free time see it."""
+    Hide all in this series) and every copy that comes from an account hidden in
+    SmartCal. Hidden accounts' copies are dropped BEFORE deduping, so a calendar that a
+    shown account also has (a team calendar, a holidays calendar, or the hidden
+    account's own calendar subscribed in the shown account) stays visible through the
+    shown account's copy; only what reaches SmartCal solely through hidden accounts
+    disappears. Only the agenda, windows and toasts pass it: a hidden meeting or account
+    is still a real commitment, so the assistant, find and free time see it."""
     owners = calendar_owners(cache)
+    accounts = getattr(settings, "hidden_accounts", None) if settings is not None else None
+    if hide_user_hidden and accounts:
+        events = [e for e in events if e.account not in accounts]
     out = dedupe(events, owners)
     if not include_declined:
         out = [e for e in out if not e.declined]
@@ -112,9 +118,6 @@ def visible_events(cache, settings, events: list[Event],
         hidden = getattr(settings, "is_event_hidden", None)
         if hide_user_hidden and hidden is not None:
             out = [e for e in out if not hidden(e)]
-        accounts = getattr(settings, "hidden_accounts", None)
-        if hide_user_hidden and accounts:
-            out = [e for e in out if e.account not in accounts]
     return out
 
 

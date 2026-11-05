@@ -255,6 +255,19 @@ class Settings:
             log.warning("could not save %s; account visibility rolled back", self.path)
             raise
 
+    def prune_hidden_accounts(self, accounts) -> None:
+        """Forget hidden marks of accounts that are no longer connected (removed, or no
+        token left), so a later re-add starts shown. A failed save is only logged."""
+        keep = {a for a in self.hidden_accounts if a in set(accounts)}
+        if keep == self.hidden_accounts:
+            return
+        before, self.hidden_accounts = self.hidden_accounts, keep
+        try:
+            self.save()
+        except OSError:
+            self.hidden_accounts = before
+            log.warning("could not save %s; stale hidden accounts kept", self.path)
+
     def set_autostart(self, enabled: bool) -> None:
         self.autostart = bool(enabled)
         self.save()

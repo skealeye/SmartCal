@@ -213,3 +213,13 @@ def calendar_label(name) -> str:
     if not isinstance(name, str) or looks_like_email(name):
         return ""
     return name.strip()
+
+
+def plain_line(text) -> str:
+    """One line of plain text for a label or menu entry: control, bidi-override and
+    zero-width characters removed (the same set as descriptions), whitespace (tabs,
+    newlines, line separators) collapsed to single spaces."""
+    if not isinstance(text, str):
+        return ""
+    text = re.sub(r"[\s  ]+", " ", text)
+    return _BAD_CHARS.sub("", text).strip()

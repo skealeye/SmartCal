@@ -46,6 +46,7 @@ def main() -> int:
     cache = Cache(data_dir() / "cache.db")
     cache.purge_orphans(list_accounts())
     settings = Settings()
+    settings.prune_hidden_accounts(list_accounts())   # no token left: not hidden either
     autostart.apply_at_startup(settings)  # on by default, first run only
     try:
         register_app_id()
@@ -89,6 +90,7 @@ def main() -> int:
 
     @guarded
     def refresh_others() -> None:
+        notifier.mark_in_progress()   # e.g. Undo restored a meeting: no late toast
         window.refresh()
         tray.update_tooltip()
 
@@ -102,12 +104,13 @@ def main() -> int:
     @guarded
     def on_settings_applied() -> None:
         autostart_watcher.settings_applied()   # Run key only when the box was toggled
+        notifier.mark_in_progress()   # unhidden in Settings: no late "Started" toast
         refresh_views()
         notifier.check()
 
     @guarded
     def remove_account_and_refresh(account: str) -> None:
-        remove_account(account, cache)
+        remove_account(account, cache, settings)
         drop_clients()
         popup.set_accounts(list_accounts())
         popup.prune_accounts(list_accounts())
@@ -150,6 +153,7 @@ def main() -> int:
         # The tray menu showed/hid an account or restored a hidden meeting; the tray
         # has already refreshed the popup and its tooltip.
         window.refresh()
+        notifier.mark_in_progress()   # shown again: no late "Started" toast
         notifier.check()
         if dialog_ref and dialog_visible(dialog_ref[0]):
             dialog_ref[0].refresh_meetings()

@@ -181,11 +181,14 @@ def add_account(label: str) -> str:
     return SIGN_IN.run(label)
 
 
-def remove_account(account: str, cache=None) -> None:
-    """Forget an account: delete its token file and purge its cached data."""
+def remove_account(account: str, cache=None, settings=None) -> None:
+    """Forget an account: delete its token file, purge its cached data, and (with
+    `settings`) drop its "hidden in SmartCal" mark."""
     token_path(account).unlink(missing_ok=True)
     if cache is not None:
         cache.delete_account(account)
+    if settings is not None:
+        settings.prune_hidden_accounts(list_accounts())
 
 
 def load_credentials(account: str):

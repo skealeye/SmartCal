@@ -9,7 +9,7 @@ import pytest
 from PyQt6.QtCore import QEvent, QPoint, QRect, Qt
 from PyQt6.QtGui import QContextMenuEvent
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QFrame, QLabel, QMessageBox,
-                             QPushButton)
+                             QPushButton, QTabWidget)
 
 from smartcal import agenda
 from smartcal.actions import Actions
@@ -346,7 +346,8 @@ def test_settings_accounts_tab_checkbox_applies_on_ok_without_losing_tray_change
     assert set(boxes) == set(accounts)
     assert all(isinstance(b, QCheckBox) and b.text() == "Show in SmartCal" and b.isChecked()
                for b in boxes.values())
-    assert [dlg.account_list.item(i).text() for i in range(2)] == accounts
+    assert [dlg.account_list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(2)] == accounts
     boxes["me@y.com"].setChecked(False)               # changed here
     assert not settings.is_account_hidden("me@y.com")   # nothing before OK
     settings.set_account_hidden("work@x.com", True)   # meanwhile, from the tray
@@ -635,3 +636,169 @@ def test_tray_restore_save_failure_says_so(qtbot, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "save", lambda: (_ for _ in ()).throw(OSError("ro")))
     restore_entries(tray)[0].trigger()
     assert settings.is_event_hidden(a) and changed == [] and messages
+
+
+# == v0.7.1 review fixes ===================================================================
+TEAM = "team123@group.calendar.google.com"
+
+
+def shared_setup(tmp_path):
+    """a@x.com and b@x.com: each its own primary calendar, both subscribe to a team
+    calendar, and b also subscribes to a's primary calendar."""
+    cache = Cache(tmp_path / "c.db")
+    cache.upsert_calendars("a@x.com", [CalendarInfo("a@x.com", "a@x.com", "#111", True),
+                                       CalendarInfo(TEAM, "Team", "#333", False)])
+    cache.upsert_calendars("b@x.com", [CalendarInfo("b@x.com", "b@x.com", "#222", True),
+                                       CalendarInfo(TEAM, "Team", "#333", False),
+                                       CalendarInfo("a@x.com", "a@x.com", "#111", False)])
+    start = NOW + timedelta(hours=1)
+
+    def e(account, cal_id, eid, title, h=0):
+        s0 = start + timedelta(hours=h)
+        return Event(eid, account, cal_id, cal_id, "#123", title, s0,
+                     s0 + timedelta(minutes=30))
+    team = [e(acct, TEAM, "t1", "Team standup") for acct in ("a@x.com", "b@x.com")]
+    a_own = [e("a@x.com", "a@x.com", "a1", "A private", 1),
+             e("b@x.com", "a@x.com", "a1", "A private", 1)]    # a's calendar, also in b
+    b_own = [e("b@x.com", "b@x.com", "b1", "B only", 2)]
+    for item in team + a_own + b_own:
+        cache.upsert_events(item.account, [item])
+    settings = Settings(tmp_path / "s.json")
+    settings.set_hidden_nosave(TEAM, False)                    # the team calendar is shown
+    return cache, settings
+
+
+def shown(cache, settings):
+    return [(e.id, e.account) for e in agenda.today(cache, settings, NOW)]
+
+
+@pytest.mark.parametrize("hidden", ["a@x.com", "b@x.com"])   # sorts first, and last
+def test_shared_third_party_calendar_stays_visible_when_other_account_hidden(tmp_path,
+                                                                            hidden):
+    cache, settings = shared_setup(tmp_path)
+    other = "b@x.com" if hidden == "a@x.com" else "a@x.com"
+    settings.set_account_hidden(hidden, True)
+    got = shown(cache, settings)
+    assert ("t1", other) in got and [i for i, _ in got].count("t1") == 1
+
+
+def test_owned_calendar_subscribed_in_visible_account_still_shown(tmp_path):
+    cache, settings = shared_setup(tmp_path)
+    settings.set_account_hidden("a@x.com", True)
+    got = shown(cache, settings)
+    assert ("a1", "b@x.com") in got                  # through b's subscription
+    assert [i for i, _ in got].count("a1") == 1
+
+
+def test_hide_account_with_own_calendar_removes_only_its_own(tmp_path):
+    cache, settings = shared_setup(tmp_path)
+    settings.set_account_hidden("b@x.com", True)
+    got = shown(cache, settings)
+    assert "b1" not in [i for i, _ in got]           # only in b: gone
+    assert ("t1", "a@x.com") in got and ("a1", "a@x.com") in got
+    settings.set_account_hidden("a@x.com", True)
+    assert shown(cache, settings) == []
+    settings.set_account_hidden("a@x.com", False)
+    settings.set_account_hidden("b@x.com", False)
+    assert sorted(i for i, _ in shown(cache, settings)) == ["a1", "b1", "t1"]
+
+
+def test_removed_account_not_left_hidden(tmp_path, monkeypatch):
+    from smartcal import google_auth
+    monkeypatch.setenv("SMARTCAL_DATA_DIR", str(tmp_path / "data"))
+    for acct in ("a@x.com", "b@x.com"):
+        google_auth.token_path(acct).write_text("{}")
+    settings = Settings(tmp_path / "s.json")
+    settings.set_account_hidden("a@x.com", True)
+    settings.set_account_hidden("b@x.com", True)
+    google_auth.remove_account("a@x.com", None, settings)
+    assert Settings(tmp_path / "s.json").hidden_accounts == {"b@x.com"}
+    # At startup: marks for accounts with no token left are dropped.
+    google_auth.token_path("b@x.com").unlink()
+    s2 = Settings(tmp_path / "s.json")
+    s2.prune_hidden_accounts(google_auth.list_accounts())
+    assert Settings(tmp_path / "s.json").hidden_accounts == set()
+
+
+def test_menu_and_notice_text_strip_bidi_and_zero_width(qtbot, tmp_path):
+    from smartcal.ui.tray import menu_text
+    evil = "Pay‮roll​ review now & co\x07"
+    assert menu_text(evil) == "Payroll review now && co"
+    e = ev("1", evil, 10)
+    tray, p, *_ = tray_with_hidden(qtbot, tmp_path, [e], [(e, "event")])
+    [entry] = restore_entries(tray)
+    assert entry.text() == "Payroll review now && co (Nov 4)"
+    p.show_notice("Hidden ‮​x⁦")
+    assert p.notice_text() == "Hidden x"
+
+
+def test_nothing_scheduled_says_how_many_accounts_hidden(qtbot, tmp_path):
+    cache, settings, work, personal = two_accounts(tmp_path)
+    cache.delete_account("work@x.com")
+    cache.upsert_calendars("work@x.com", [CalendarInfo("work@x.com", "work@x.com", "#111",
+                                                       True)])
+    p = AgendaPopup(cache, settings)
+    p.now = lambda: NOW
+    qtbot.addWidget(p)
+    p.set_accounts(["work@x.com", "me@y.com", "z@z.com"])
+    settings.set_account_hidden("me@y.com", True)
+    p.refresh()
+    assert p.empty_text() == "Nothing scheduled today (1 account hidden)"
+    settings.set_account_hidden("z@z.com", True)
+    p.refresh()
+    assert p.empty_text() == "Nothing scheduled today (2 accounts hidden)"
+    settings.set_account_hidden("me@y.com", False)
+    settings.set_account_hidden("z@z.com", False)
+    p.refresh()
+    assert titles(p) == ["Dentist"]
+
+
+def test_short_list_has_no_blank_band(qtbot, tmp_path):
+    p = popup_at(qtbot, tmp_path, [ev("1", "A", 10), ev("2", "B", 11), ev("3", "C", 12)])
+    rs = rows(p)
+    want = sum(r.height() for r in rs) + p._rows_box.spacing() * (len(rs) - 1)
+    assert abs(p._scroll.height() - want) <= 1
+    assert p._scroll.verticalScrollBar().maximum() == 0
+    last = rs[-1]
+    bottom = last.mapTo(p._scroll.viewport(), QPoint(0, last.height())).y()
+    assert p._scroll.viewport().height() - bottom <= 1   # nothing blank under the list
+
+
+def test_mark_in_progress_suppresses_late_started_toast(tmp_path):
+    cache, settings, work, personal = two_accounts(tmp_path)
+    later = NOW + timedelta(minutes=7)               # both meetings in progress
+    settings.set_account_hidden("me@y.com", True)
+    sent = []
+    n = Notifier(cache, settings, lambda *a: sent.append(a[0]), clock=lambda: later,
+                 fired_path=tmp_path / "n.json")
+    n.check(later)
+    assert sent == ["Work sync"]                     # catch-up toast for the shown one
+    settings.set_account_hidden("me@y.com", False)   # shown again mid-meeting
+    n.mark_in_progress(later)
+    n.check(later)
+    assert sent == ["Work sync"]                     # no late "Started" for Dentist
+
+
+def test_accounts_tab_elides_long_emails(qtbot, tmp_path):
+    cache, settings, *_ = two_accounts(tmp_path)
+    long_mail = "a.very.long.first.and.last.name.for.testing@subdomain.example-company.com"
+    dlg = SettingsDialog(settings, cache, lambda: [long_mail], lambda: None, lambda a: None)
+    qtbot.addWidget(dlg)
+    row = dlg.account_list.itemWidget(dlg.account_list.item(0))
+    label = row.findChild(QLabel, "account")
+    box = dlg.account_shown[long_mail]
+    tabs = dlg.findChild(QTabWidget)
+    tabs.setCurrentIndex(tabs.count() - 1)                # Accounts
+    dlg.resize(420, 400)
+    dlg.show()
+    qtbot.waitExposed(dlg)
+    QApplication.processEvents()
+    assert label.full_text() == long_mail and "…" in label.text()
+    assert label.text() != long_mail and label.textFormat() == Qt.TextFormat.PlainText
+    assert label.fontMetrics().horizontalAdvance(label.text()) <= label.width()
+    # Never runs under the checkbox.
+    assert label.geometry().right() < box.geometry().left()
+    assert long_mail in label.toolTip()
+    dlg.resize(1600, 400)
+    QApplication.processEvents()
+    assert label.text() == long_mail

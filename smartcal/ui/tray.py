@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import threading
 import time
 from datetime import date, datetime
@@ -13,6 +12,7 @@ from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from .. import agenda, google_auth
+from ..textutil import plain_line
 from . import meeting_menus, placement
 
 log = logging.getLogger(__name__)
@@ -29,14 +29,15 @@ RESTORE_TITLE_MAX = 40
 
 
 def menu_text(text: str) -> str:
-    """Plain text for a QAction label: whitespace (tabs, newlines) collapsed, and `&`
-    doubled so Qt never reads it as a mnemonic."""
-    return re.sub(r"\s+", " ", text).strip().replace("&", "&&")
+    """Plain text for a QAction label: control/bidi/zero-width characters removed,
+    whitespace collapsed (textutil.plain_line), and `&` doubled so Qt never reads it
+    as a mnemonic."""
+    return plain_line(text).replace("&", "&&")
 
 
 def restore_label(info: dict) -> str:
     """'Title (series)' or 'Title (Nov 4)', the title shortened to RESTORE_TITLE_MAX."""
-    title = re.sub(r"\s+", " ", str(info.get("title") or "")).strip() or "(no title)"
+    title = plain_line(str(info.get("title") or "")) or "(no title)"
     if len(title) > RESTORE_TITLE_MAX:
         title = title[:RESTORE_TITLE_MAX - 1].rstrip() + "…"
     if info.get("scope") == "series":

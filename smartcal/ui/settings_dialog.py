@@ -11,14 +11,42 @@ import logging
 from PyQt6.QtCore import QEvent, Qt, pyqtSignal
 from PyQt6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
                              QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-                             QMessageBox,
-                             QPushButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout,
-                             QWidget)
+                             QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
+                             QTabWidget, QVBoxLayout, QWidget)
 
 from .. import agenda
+from ..textutil import plain_tip
 from . import theme
 
 log = logging.getLogger(__name__)
+
+
+ACCOUNT_ROLE = Qt.ItemDataRole.UserRole
+
+
+class ElidedLabel(QLabel):
+    """Plain text elided in the middle ("first.last…@example.com") to its width; the
+    full text is in the tooltip."""
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(parent)
+        self._full = text
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(40)
+        self.setToolTip(plain_tip(text))
+        self._elide()
+
+    def full_text(self) -> str:
+        return self._full
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._elide()
+
+    def _elide(self) -> None:
+        self.setText(self.fontMetrics().elidedText(
+            self._full, Qt.TextElideMode.ElideMiddle, max(0, self.width())))
 
 
 def _spin(value: int) -> QSpinBox:
@@ -317,12 +345,17 @@ class SettingsDialog(QDialog):
         self.account_list.clear()
         self.account_shown, self._account_orig = {}, {}
         for account in self._accounts_provider():
-            item = QListWidgetItem(account)
+            # The email is drawn by the row's own label (elided in the middle when
+            # long, never under the checkbox); the item keeps the account as data.
+            item = QListWidgetItem()
+            item.setData(ACCOUNT_ROLE, account)
             self.account_list.addItem(item)
             row = QWidget()
             row_lay = QHBoxLayout(row)
-            row_lay.setContentsMargins(0, 0, 4, 0)
-            row_lay.addStretch(1)
+            row_lay.setContentsMargins(4, 0, 4, 0)
+            label = ElidedLabel(account)
+            label.setObjectName("account")
+            row_lay.addWidget(label, 1)
             box = QCheckBox("Show in SmartCal")
             box.setToolTip("Show this account's meetings in SmartCal")
             shown = not self.settings.is_account_hidden(account)
@@ -359,7 +392,7 @@ class SettingsDialog(QDialog):
         item = self.account_list.currentItem()
         if item is None:
             return
-        account = item.text()
+        account = item.data(ACCOUNT_ROLE)
         if not self.confirm(account):
             return
         try:
