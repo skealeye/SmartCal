@@ -5,6 +5,10 @@ $root = Split-Path -Parent $PSScriptRoot
 $src = Join-Path $root "dist\SmartCal"
 if (-not (Test-Path (Join-Path $src "SmartCal.exe"))) { throw "Run scripts\build.ps1 first." }
 
+if (Get-Process SmartCal -ErrorAction SilentlyContinue) {
+    Write-Host "Close SmartCal (right-click the tray icon > Quit) and run this again."
+    exit 1
+}
 $dest = Join-Path $env:LOCALAPPDATA "Programs\SmartCal"
 New-Item -ItemType Directory -Force $dest | Out-Null
 Copy-Item -Path (Join-Path $src "*") -Destination $dest -Recurse -Force

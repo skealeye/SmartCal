@@ -22,12 +22,18 @@ def default_command() -> str:
 
 def enable(exe_cmd: str | None = None, key_path: str = RUN_KEY) -> None:
     import winreg
+    from smartcal.config import no_system_writes
+    if no_system_writes():
+        return
     with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
         winreg.SetValueEx(key, VALUE_NAME, 0, winreg.REG_SZ, exe_cmd or default_command())
 
 
 def disable(key_path: str = RUN_KEY) -> None:
     import winreg
+    from smartcal.config import no_system_writes
+    if no_system_writes():
+        return
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
             winreg.DeleteValue(key, VALUE_NAME)

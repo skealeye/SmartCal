@@ -1,3 +1,4 @@
+from pathlib import Path
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -296,3 +297,12 @@ def test_invalid_color_falls_back():
     assert theme.stripe_color("#abc") == "#aabbcc"
     for bad in ("red", "#12345", "#gggggg", "#80ff0000", "url(x);}", "", None):
         assert theme.stripe_color(bad) == "#4285f4"
+
+
+def test_window_geometry_stored_in_data_dir_ini(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setenv("SMARTCAL_DATA_DIR", str(tmp_path / "data"))
+    cache = Cache(tmp_path / "c.db")
+    w = CalendarWindow(cache, Settings(tmp_path / "s.json"))
+    qtbot.addWidget(w)
+    assert Path(w._qs.fileName()) == tmp_path / "data" / "window.ini"
+    assert w._qs.format() == QSettings.Format.IniFormat

@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (QButtonGroup, QDialog, QFrame, QGraphicsOpacityEffe
                              QStackedWidget, QVBoxLayout, QWidget)
 
 from .. import agenda
+from ..config import data_dir
 from . import layout, theme
 
 HOUR_H = 48
@@ -407,7 +408,8 @@ class CalendarWindow(QMainWindow):
         super().__init__(parent)
         self.cache, self.settings = cache, settings
         self.now = lambda: datetime.now().astimezone()
-        self._qs = qsettings or QSettings("SmartCal", "SmartCal")
+        self._qs = qsettings or QSettings(
+            str(data_dir() / "window.ini"), QSettings.Format.IniFormat)
         self.view = "week"
         self.anchor: date = agenda._local_date(self.now())
         self.details: EventDetails | None = None

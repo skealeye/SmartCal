@@ -61,3 +61,15 @@ def test_frozen_default_command_is_quoted_exe(monkeypatch):
     monkeypatch.setattr(autostart.sys, "frozen", True, raising=False)
     monkeypatch.setattr(autostart.sys, "executable", r"C:\Apps\SmartCal\SmartCal.exe")
     assert autostart.default_command() == r'"C:\Apps\SmartCal\SmartCal.exe"'
+
+
+def test_enable_disable_noop_when_no_system_writes(monkeypatch):
+    import winreg
+    from unittest import mock
+    monkeypatch.setenv("SMARTCAL_NO_SYSTEM_WRITES", "1")
+    with mock.patch.object(winreg, "CreateKeyEx") as create, \
+            mock.patch.object(winreg, "OpenKey") as open_key:
+        autostart.enable()
+        autostart.disable()
+    create.assert_not_called()
+    open_key.assert_not_called()

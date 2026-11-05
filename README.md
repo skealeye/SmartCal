@@ -49,18 +49,20 @@ python run.py
 
 ```
 pip install -r requirements-dev.txt
-powershell -File scriptsuild.ps1          # builds dist\SmartCal\SmartCal.exe
+powershell -File scripts\build.ps1          # builds dist\SmartCal\SmartCal.exe
 powershell -File scripts\install-local.ps1  # copies it to %LOCALAPPDATA%\Programs\SmartCal + Start Menu shortcut
 ```
 
 On first run SmartCal registers itself to start at login (turn this off in Settings). The packaged exe is registered by its own path.
+
+To update an installed copy, quit SmartCal first (tray icon > Quit) and run the install script again; to clear old files from earlier versions, delete `%LOCALAPPDATA%\Programs\SmartCal` first.
 
 Autostart from source runs `pythonw.exe run.py`. If the repo is on the Z: network share, that can run before the share is mounted at login and silently fail. For autostart, use the packaged build copied to a local folder (the install script does this).
 
 ## What the assistant does
 
 - Asks before deleting or changing meetings that have attendees, and asks one confirmation at a time.
-- Every change can be reversed with **Undo**.
+- Every change can be reversed with **Undo** (the last 20 changes are kept).
 - Never emails attendees.
 - Handles reminders ("remind me to call Sam in 20 minutes") and adds a Maps link when you ask for directions.
 

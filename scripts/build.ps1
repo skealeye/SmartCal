@@ -8,7 +8,6 @@ python -m PyInstaller --noconfirm --clean --windowed --name SmartCal `
     --specpath build `
     --collect-data googleapiclient `
     --collect-data httplib2 `
-    --collect-submodules winotify `
     --hidden-import winotify `
     run.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed ($LASTEXITCODE)" }
