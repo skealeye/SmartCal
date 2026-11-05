@@ -14,6 +14,8 @@ from PyQt6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout, 
                              QPushButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout,
                              QWidget)
 
+from .. import agenda
+
 log = logging.getLogger(__name__)
 
 
@@ -79,6 +81,7 @@ class SettingsDialog(QDialog):
         inner = QWidget()
         inner_layout = QVBoxLayout(inner)
         by_account = self.cache.calendars_by_account()
+        owners = agenda.calendar_owners(self.cache)
         if not by_account:
             inner_layout.addWidget(QLabel("No calendars yet. Add an account and sync."))
         for account, calendars in by_account.items():
@@ -87,6 +90,14 @@ class SettingsDialog(QDialog):
             head.setStyleSheet("font-weight:bold;margin-top:8px;")
             inner_layout.addWidget(head)
             for cal in calendars:
+                owner = owners.get(cal.id, account)
+                if owner != account:
+                    # Shared calendar: one calendar, set up under the account that owns it.
+                    same = QLabel(f"{cal.name} (same calendar as in {owner})")
+                    same.setTextFormat(Qt.TextFormat.PlainText)
+                    same.setEnabled(False)
+                    inner_layout.addWidget(same)
+                    continue
                 row = QHBoxLayout()
                 show = QCheckBox(cal.name.replace("&", "&&"))
                 show.setToolTip("Show this calendar")

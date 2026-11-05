@@ -26,7 +26,7 @@ class Event:
     description: str = ""
     meeting_url: str | None = None
     recurring_id: str | None = None
-    # Fields below come from Google at fetch time; only `busy` is cached.
+    # Fields below come from Google at fetch time; only `busy` and `declined` are cached.
     updated: str | None = None  # Google updated timestamp
     status: str = "confirmed"  # Google status; "cancelled" = deleted
     recurrence: list[str] | None = None  # RRULE lines; set only on a series master
@@ -35,6 +35,7 @@ class Event:
     organizer_self: bool | None = None
     raw_title: str | None = None  # Google summary as stored ("" if absent); None = not from Google
     busy: bool = True  # False when Google transparency is "transparent" (shown as Free)
+    declined: bool = False  # the owner's own attendee entry says "declined"
 
 
 @dataclass

@@ -151,7 +151,9 @@ class GoogleClient:
             organizer_self=(bool(raw["organizer"].get("self"))
                             if isinstance(raw.get("organizer"), dict) else None),
             raw_title=raw.get("summary") or "",
-            busy=raw.get("transparency") != "transparent")
+            busy=raw.get("transparency") != "transparent",
+            declined=any(a.get("self") and a.get("responseStatus") == "declined"
+                         for a in raw.get("attendees", []) if isinstance(a, dict)))
 
     @_locked
     def list_events(self, start: datetime, end: datetime) -> list[Event]:

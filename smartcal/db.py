@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS events (
     meeting_url TEXT,
     recurring_id TEXT,
     busy INTEGER NOT NULL DEFAULT 1,
+    declined INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (account, calendar_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_events_start ON events (start_ts);
@@ -50,8 +51,9 @@ CREATE TABLE IF NOT EXISTS calendars (
 
 _INSERT = """
 INSERT OR REPLACE INTO events (account, calendar_id, id, calendar_name, color, title,
-    start, end, start_ts, end_ts, all_day, location, description, meeting_url, recurring_id, busy)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    start, end, start_ts, end_ts, all_day, location, description, meeting_url, recurring_id, busy,
+    declined)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 """
 
 
@@ -64,7 +66,7 @@ def _row(account: str, e: Event) -> tuple:
     return (account, e.calendar_id, e.id, e.calendar_name, e.color, e.title,
             s.isoformat(), en.isoformat(), s.timestamp(), en.timestamp(),
             int(e.all_day), e.location or "", e.description or "",
-            e.meeting_url, e.recurring_id, int(e.busy))
+            e.meeting_url, e.recurring_id, int(e.busy), int(e.declined))
 
 
 class Cache:
@@ -76,11 +78,17 @@ class Cache:
             cols = {r["name"] for r in con.execute("PRAGMA table_info(events)")}
             if "busy" not in cols:  # database created before v0.1.18
                 self._add_busy_column(con)
+            if "declined" not in cols:  # database created before v0.2.5
+                self._add_column(con, "declined INTEGER NOT NULL DEFAULT 0")
 
     @staticmethod
     def _add_busy_column(con) -> None:
+        Cache._add_column(con, "busy INTEGER NOT NULL DEFAULT 1")
+
+    @staticmethod
+    def _add_column(con, ddl: str) -> None:
         try:
-            con.execute("ALTER TABLE events ADD COLUMN busy INTEGER NOT NULL DEFAULT 1")
+            con.execute(f"ALTER TABLE events ADD COLUMN {ddl}")
         except sqlite3.OperationalError as exc:
             # Another process migrated between our check and the ALTER: that is fine.
             if "duplicate column name" not in str(exc).lower():
@@ -174,4 +182,5 @@ class Cache:
             all_day=bool(r["all_day"]), location=r["location"],
             description=r["description"], meeting_url=r["meeting_url"],
             recurring_id=r["recurring_id"], busy=bool(r["busy"]),
+            declined=bool(r["declined"]),
         )

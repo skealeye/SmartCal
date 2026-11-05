@@ -20,14 +20,14 @@ SYNC_FUTURE_DAYS = 60
 
 def synced_days(now: datetime) -> tuple[date, date]:
     """First and last local day (both inclusive) that the cache holds."""
-    today = agenda._local_date(now)
+    today = agenda.local_date(now)
     return today - timedelta(days=SYNC_PAST_DAYS), today + timedelta(days=SYNC_FUTURE_DAYS)
 
 
 def sync_window(now: datetime) -> tuple[datetime, datetime]:
     """[start, end) of the synced range: local midnights, DST-safe."""
     first, last = synced_days(now)
-    return agenda._midnight(first, now), agenda._midnight(last + timedelta(days=1), now)
+    return agenda.midnight(first, now), agenda.midnight(last + timedelta(days=1), now)
 
 
 def _classify(exc: BaseException) -> str:

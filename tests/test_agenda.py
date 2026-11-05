@@ -114,7 +114,7 @@ def test_events_display_in_local_time_across_dst(tmp_path):
 
 def test_dst_day_boundaries_with_fixed_offset_now(tmp_path, monkeypatch):
     # Production passes datetime.now().astimezone(): a fixed-offset tzinfo.
-    monkeypatch.setattr(agenda, "_local_zone", lambda: NY)
+    monkeypatch.setattr(agenda, "local_zone", lambda: NY)
     edt, est = timezone(timedelta(hours=-4)), timezone(timedelta(hours=-5))
     # Fall back (25-hour day), now is EST late in the day.
     cache, st = make(tmp_path, [
@@ -136,9 +136,9 @@ def test_dst_day_boundaries_with_fixed_offset_now(tmp_path, monkeypatch):
 
 
 def test_local_zone_none_path_resolves_boundaries_per_date(tmp_path, monkeypatch):
-    monkeypatch.setattr(agenda, "_local_zone", lambda: None)
+    monkeypatch.setattr(agenda, "local_zone", lambda: None)
     now = datetime(2026, 7, 15, 12, 0).astimezone()  # mid-summer, far from any DST change
-    start, end = agenda._midnight(now.date(), now), agenda._midnight(now.date() + timedelta(days=1), now)
+    start, end = agenda.midnight(now.date(), now), agenda.midnight(now.date() + timedelta(days=1), now)
     assert end - start == timedelta(hours=24)
     inside = datetime(2026, 7, 15, 10, 0).astimezone()
     after = datetime(2026, 7, 16, 10, 0).astimezone()

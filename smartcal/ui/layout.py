@@ -43,11 +43,11 @@ def shift_month(d: date, delta: int) -> date:
 
 
 def day_bounds(d: date, ref: datetime) -> tuple[datetime, datetime]:
-    return agenda._midnight(d, ref), agenda._midnight(d + timedelta(days=1), ref)
+    return agenda.midnight(d, ref), agenda.midnight(d + timedelta(days=1), ref)
 
 
 def to_local(dt: datetime, ref: datetime) -> datetime:
-    zone = agenda._zone(ref)
+    zone = agenda.zone(ref)
     return dt.astimezone(zone) if zone else dt.astimezone()
 
 

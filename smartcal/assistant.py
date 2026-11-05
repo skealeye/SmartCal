@@ -323,7 +323,7 @@ def _ctx(text, limit: int) -> str:
 def _when(dt: datetime, now: datetime, all_day: bool = False) -> str:
     """Raises OverflowError/ValueError/OSError for unrepresentable times; `_dt` calls it
     while validating, so a Done line can never fail after a write."""
-    zone = agenda._zone(now)
+    zone = agenda.zone(now)
     local = dt.astimezone(zone) if zone else dt.astimezone()
     day = f"{local:%a %b} {local.day}"
     if all_day:
@@ -628,15 +628,19 @@ class Assistant:
     def _active(self) -> dict[str, list]:
         """Account -> its shown calendars; an account is active if it has any."""
         out = {}
+        owners = agenda.calendar_owners(self.cache)
         for account, cals in self.cache.calendars_by_account().items():
-            shown = [c for c in cals if not self.settings.is_hidden(c.id, c.primary)]
+            # A calendar shared into several accounts is listed once, under its owner.
+            shown = [c for c in cals if owners.get(c.id, account) == account
+                     and not self.settings.is_hidden(c.id, c.primary)]
             if shown:
                 out[account] = shown
         return out
 
     def _visible(self, events):
-        primary = agenda._primary_ids(self.cache)
-        return [e for e in events if not agenda._is_hidden(e, self.settings, primary)]
+        """Shown events, declined meetings included (marked) so the model can mention
+        them; free-slot search excludes them separately (Actions.free_slots)."""
+        return agenda.visible_events(self.cache, self.settings, events, include_declined=True)
 
     def calendar_block(self, now: datetime) -> str:
         lines = ["Accounts and calendars:"]
@@ -644,8 +648,8 @@ class Assistant:
             names = ", ".join(f"{_ctx(c.name, 80)} (id {_ctx(c.id, 200)}"
                               f"{', primary' if c.primary else ''})" for c in cals)
             lines.append(f"- {_ctx(account, 200)}: {names}")
-        day = agenda._local_date(now)
-        lo, hi = agenda._midnight(day, now), agenda._midnight(day + timedelta(days=8), now)
+        day = agenda.local_date(now)
+        lo, hi = agenda.midnight(day, now), agenda.midnight(day + timedelta(days=8), now)
         events = self._visible(self.cache.events_between(lo, hi))
         lines.append("Events, today and the next 7 days:")
         for e in events[:MAX_CONTEXT_EVENTS]:
@@ -654,14 +658,15 @@ class Assistant:
                     f" to {(e.end - timedelta(days=1)):%Y-%m-%d}"
                     if (e.end - e.start) > timedelta(days=1) else "")
             else:
-                zone = agenda._zone(now)
+                zone = agenda.zone(now)
                 s = e.start.astimezone(zone) if zone else e.start.astimezone()
                 en = e.end.astimezone(zone) if zone else e.end.astimezone()
                 when = f"{s.isoformat(timespec='minutes')} to {en.isoformat(timespec='minutes')}"
             loc = f" | location: {_ctx(e.location, CONTEXT_LOCATION)}" if e.location else ""
+            declined = " | declined by the owner" if e.declined else ""
             lines.append(f"- id={_ctx(e.id, 200)} | account={_ctx(e.account, 200)} | "
                          f"calendar={_ctx(e.calendar_name, 80)} (id {_ctx(e.calendar_id, 200)})"
-                         f" | {when} | title: {_ctx(e.title, CONTEXT_TITLE)}{loc}")
+                         f" | {when} | title: {_ctx(e.title, CONTEXT_TITLE)}{loc}{declined}")
         if not events:
             lines.append("(none)")
         elif len(events) > MAX_CONTEXT_EVENTS:
@@ -669,7 +674,7 @@ class Assistant:
         return "\n".join(lines)
 
     def system_prompt(self, now: datetime) -> str:
-        zone = agenda._zone(now)
+        zone = agenda.zone(now)
         local = now.astimezone(zone) if zone else now.astimezone()
         zone_name = getattr(zone, "key", None) or local.tzname() or "local"
         offset = local.strftime("%z")
@@ -737,9 +742,9 @@ class Assistant:
             raise _ToolError(f"{name} must be an ISO-8601 date-time") from None
         try:   # every path, date-only included, goes through the bounds check
             if day is not None:
-                dt = agenda._midnight(day, now)
+                dt = agenda.midnight(day, now)
             elif dt.tzinfo is None:
-                zone = agenda._zone(now)
+                zone = agenda.zone(now)
                 dt = dt.replace(tzinfo=zone) if zone else dt.astimezone()
             ok = now - EARLIEST <= dt <= now + LATEST
             _when(dt, now)   # must be displayable before anything is written
@@ -760,7 +765,7 @@ class Assistant:
         account = _text(args, "account") or None
         calendar_id = _text(args, "calendar_id") or None
         if account is None or calendar_id is None:
-            account, calendar_id = self.actions._locate(event_id, account, calendar_id)
+            account, calendar_id = self.actions.locate(event_id, account, calendar_id)
         if not self._shown(account, calendar_id):
             raise EventNotFoundError(event_id)
         return event_id, account, calendar_id
@@ -784,7 +789,8 @@ class Assistant:
         out = [{"id": e.id, "title": _line(e.title, CONTEXT_TITLE),
                 "start": e.start.isoformat(), "end": e.end.isoformat(), "all_day": e.all_day,
                 "account": e.account, "calendar": _line(e.calendar_name, 80),
-                "calendar_id": e.calendar_id, "location": _line(e.location, CONTEXT_LOCATION)}
+                "calendar_id": e.calendar_id, "location": _line(e.location, CONTEXT_LOCATION),
+                "declined": e.declined}
                for e in events[:MAX_CONTEXT_EVENTS]]
         return {"events": out, "more": max(0, len(events) - MAX_CONTEXT_EVENTS)}
 
@@ -836,10 +842,10 @@ class Assistant:
         all_day = _bool(args, "all_day")
         start, end = self._dt(args, "start", now), self._dt(args, "end", now)
         if all_day:   # all-day events are whole local days; end is exclusive
-            first, after = agenda._local_date(start), agenda._local_date(end)
+            first, after = agenda.local_date(start), agenda.local_date(end)
             if after <= first:
                 after = first + timedelta(days=1)
-            start, end = agenda._midnight(first, now), agenda._midnight(after, now)
+            start, end = agenda.midnight(first, now), agenda.midnight(after, now)
         self._require_synced(now, start, end)
         location = _text(args, "location")
         place = _text(args, "place")

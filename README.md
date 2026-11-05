@@ -82,7 +82,6 @@ Open from the tray icon menu: accounts (add/remove), reminder lead time, start w
 - Approvals in chat understand English only.
 - Google Calendar only.
 - The week and month windows are read-only.
-- Declined events still count as busy in free-time search.
 
 ## Spike script
 

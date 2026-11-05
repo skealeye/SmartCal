@@ -8,6 +8,7 @@ import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from . import agenda
 from .config import data_dir
 
 log = logging.getLogger(__name__)
@@ -68,12 +69,11 @@ class Notifier:
         if now.tzinfo is None:
             now = now.astimezone()
         changed = self._prune(now)
-        primary = {c.id for c in self.cache.calendars() if c.primary}
         horizon = now + timedelta(minutes=MAX_LEAD_MINUTES + 1)
-        for ev in self.cache.events_between(now, horizon):
+        # Deduped (a shared calendar toasts once), hidden calendars and declined dropped.
+        for ev in agenda.visible_events(self.cache, self.settings,
+                                        self.cache.events_between(now, horizon)):
             if ev.all_day:
-                continue
-            if self.settings.is_hidden(ev.calendar_id, ev.calendar_id in primary):
                 continue
             if self.settings.is_muted(ev.calendar_id):
                 continue

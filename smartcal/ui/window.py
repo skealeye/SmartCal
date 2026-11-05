@@ -20,6 +20,7 @@ GUTTER_W = 52
 VIEWS = ("day", "week", "month")
 DEFAULT_SCROLL_HOUR = 7
 
+DECLINED_OPACITY = 0.45
 GRID = "#2e3033"
 TODAY_BG = "#262d3a"
 NOW_LINE = "#ea4335"
@@ -61,7 +62,20 @@ class EventChip(QLabel):
                            f"padding:1px 4px;font-size:11px;")
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip(plain_tip(event.title))
+        self.declined = bool(getattr(event, "declined", False))
+        self.setToolTip(plain_tip(event.title + (" (declined)" if self.declined else "")))
+        if self.declined:   # dimmed and struck through
+            font = self.font()
+            font.setStrikeOut(True)
+            self.setFont(font)
+            self.set_opacity(DECLINED_OPACITY)
+
+    def set_opacity(self, value: float) -> None:
+        if self.declined:
+            value = min(value, DECLINED_OPACITY)
+        effect = QGraphicsOpacityEffect(self)
+        effect.setOpacity(value)
+        self.setGraphicsEffect(effect)
 
     def mousePressEvent(self, e):
         e.accept()
@@ -183,7 +197,7 @@ class TimeView(QWidget):
     def set_data(self, dates: list[date], by_day: dict[date, list], ref: datetime,
                  reset_scroll: bool) -> None:
         prev = self._scroll.verticalScrollBar().value()
-        today = agenda._local_date(ref)
+        today = agenda.local_date(ref)
         self._dates = dates
         self.columns, self.headers, self.allday_chips = [], [], []
 
@@ -293,9 +307,7 @@ class DayCell(QFrame):
             text = ev.title if ev.all_day else f"{layout.short_time(layout.to_local(ev.start, ref))} {ev.title}"
             chip = EventChip(ev, text)
             if self.dimmed:
-                effect = QGraphicsOpacityEffect(chip)
-                effect.setOpacity(0.5)
-                chip.setGraphicsEffect(effect)
+                chip.set_opacity(0.5 if not chip.declined else 0.3)
             chip.clicked.connect(on_click)
             self._lay.addWidget(chip)
             self.chips.append(chip)
@@ -329,7 +341,7 @@ class MonthView(QWidget):
     def set_data(self, dates: list[date], month: int, by_day: dict[date, list], ref: datetime):
         _clear(self._grid)
         self.cells = {}
-        today = agenda._local_date(ref)
+        today = agenda.local_date(ref)
         for c in range(7):
             lab = QLabel(dates[c].strftime("%a"))
             lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -372,6 +384,10 @@ class EventDetails(QDialog):
         self.calendar_label.setTextFormat(Qt.TextFormat.RichText)
         for w in (self.title_label, self.time_label, self.calendar_label):
             lay.addWidget(w)
+        if getattr(event, "declined", False):
+            declined = QLabel("You declined this meeting.")
+            declined.setStyleSheet(f"color:{theme.MUTED};")
+            lay.addWidget(declined)
         self.location_label = None
         if event.location:
             self.location_label = QLabel(event.location)
@@ -412,7 +428,7 @@ class CalendarWindow(QMainWindow):
         self._qs = qsettings or QSettings(
             str(data_dir() / "window.ini"), QSettings.Format.IniFormat)
         self.view = "week"
-        self.anchor: date = agenda._local_date(self.now())
+        self.anchor: date = agenda.local_date(self.now())
         self.details: EventDetails | None = None
         self.setWindowTitle("SmartCal")
         self.resize(1000, 700)
@@ -521,7 +537,7 @@ class CalendarWindow(QMainWindow):
         self.refresh(reset_scroll=True)
 
     def go_today(self) -> None:
-        self.go_to(agenda._local_date(self.now()))
+        self.go_to(agenda.local_date(self.now()))
 
     def step(self, direction: int) -> None:
         if self.view == "month":
@@ -544,10 +560,11 @@ class CalendarWindow(QMainWindow):
 
     def _load(self, dates: list[date], ref: datetime) -> list:
         first, last = layout.day_bounds(dates[0], ref)[0], layout.day_bounds(dates[-1], ref)[1]
-        primary = agenda._primary_ids(self.cache)
-        return [e for e in self.cache.events_between(first - timedelta(days=1),
-                                                     last + timedelta(days=1))
-                if not agenda._is_hidden(e, self.settings, primary)]
+        # Declined meetings stay on the grid, drawn dimmed and struck through.
+        return agenda.visible_events(
+            self.cache, self.settings,
+            self.cache.events_between(first - timedelta(days=1), last + timedelta(days=1)),
+            include_declined=True)
 
     def refresh(self, reset_scroll: bool = False) -> None:
         """Re-read and rebuild. While hidden, just remember to do it on show."""

@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .models import Event
 
 
-def _local_zone() -> tzinfo | None:
+def local_zone() -> tzinfo | None:
     """The system zone as a ZoneInfo when it can be determined (TZ env var),
     else None. None means: resolve each boundary with naive.astimezone(), which
     uses the OS rules for that specific date and so stays DST-correct."""
@@ -22,39 +22,96 @@ def _local_zone() -> tzinfo | None:
     return None
 
 
-def _zone(now: datetime) -> tzinfo | None:
-    return now.tzinfo if isinstance(now.tzinfo, ZoneInfo) else _local_zone()
+def zone(now: datetime) -> tzinfo | None:
+    return now.tzinfo if isinstance(now.tzinfo, ZoneInfo) else local_zone()
 
 
-def _midnight(d: date, now: datetime) -> datetime:
+def midnight(d: date, now: datetime) -> datetime:
     """Local midnight of `d`, resolved per boundary so 23/25-hour days work."""
     naive = datetime.combine(d, time())
-    zone = _zone(now)
-    return naive.replace(tzinfo=zone) if zone else naive.astimezone()
+    z = zone(now)
+    return naive.replace(tzinfo=z) if z else naive.astimezone()
 
 
-def _local_date(now: datetime) -> date:
-    zone = _zone(now)
-    return now.astimezone(zone).date() if zone else now.astimezone().date()
+def local_date(now: datetime) -> date:
+    z = zone(now)
+    return now.astimezone(z).date() if z else now.astimezone().date()
 
 
-def _primary_ids(cache) -> set[str]:
-    return {c.id for c in cache.calendars() if c.primary}
+def clock_text(dt: datetime) -> str:
+    """'9:05 AM': the 12-hour clock used everywhere in the UI and in toasts."""
+    return f"{dt.hour % 12 or 12}:{dt.minute:02d} {'AM' if dt.hour < 12 else 'PM'}"
 
 
-def _is_hidden(ev: Event, settings, primary_ids: set[str]) -> bool:
-    return settings.is_hidden(ev.calendar_id, ev.calendar_id in primary_ids)
+# -- which events are shown -----------------------------------------------------
+def primary_ids(cache) -> set[tuple[str, str]]:
+    """(account, calendar id) of each account's primary calendar."""
+    return {(account, c.id) for account, cals in cache.calendars_by_account().items()
+            for c in cals if c.primary}
+
+
+def calendar_owners(cache) -> dict[str, str]:
+    """Calendar id -> the account whose copy is used when several accounts have it.
+
+    A calendar shared into a second account (e.g. the personal calendar subscribed
+    in the work account) is one calendar: the account that owns it (its primary
+    calendar, or the calendar id is the account's email) wins, else the first
+    account alphabetically."""
+    seen: dict[str, list[tuple[str, bool]]] = {}
+    for account, cals in cache.calendars_by_account().items():
+        for c in cals:
+            seen.setdefault(c.id, []).append((account, c.primary))
+    return {cid: min(copies, key=lambda p: (
+                not (p[1] or p[0].casefold() == cid.casefold()), p[0]))[0]
+            for cid, copies in seen.items()}
+
+
+def is_hidden(ev: Event, settings, primary: set[tuple[str, str]],
+              owners: dict[str, str] | None = None) -> bool:
+    """Hidden in Settings (keyed by calendar id). The default (primary calendars
+    show) is taken from the owning account's copy of the calendar."""
+    account = (owners or {}).get(ev.calendar_id, ev.account)
+    return settings.is_hidden(ev.calendar_id, (account, ev.calendar_id) in primary)
+
+
+def dedupe(events: list[Event], owners: dict[str, str]) -> list[Event]:
+    """One copy per (calendar id, event id): the owning account's copy, else the
+    first account alphabetically. Order of first appearance is kept."""
+    best: dict[tuple[str, str], Event] = {}
+
+    def rank(e: Event):
+        return (e.account != owners.get(e.calendar_id, e.account), e.account)
+
+    for e in events:
+        key = (e.calendar_id, e.id)
+        cur = best.get(key)
+        if cur is None or rank(e) < rank(cur):
+            best[key] = e
+    keep = {id(e) for e in best.values()}
+    return [e for e in events if id(e) in keep]
+
+
+def visible_events(cache, settings, events: list[Event],
+                   include_declined: bool = False) -> list[Event]:
+    """The events the owner sees: shared calendars deduped, hidden calendars
+    dropped (settings=None: no hiding), declined meetings dropped unless asked for."""
+    owners = calendar_owners(cache)
+    out = dedupe(events, owners)
+    if not include_declined:
+        out = [e for e in out if not e.declined]
+    if settings is not None:
+        primary = primary_ids(cache)
+        out = [e for e in out if not is_hidden(e, settings, primary, owners)]
+    return out
 
 
 def today(cache, settings, now: datetime) -> list[Event]:
     """Events on the local calendar day of `now`: all-day first, then by start."""
-    day = _local_date(now)
-    day_start, day_end = _midnight(day, now), _midnight(day + timedelta(days=1), now)
-    primary = _primary_ids(cache)
+    day = local_date(now)
+    day_start, day_end = midnight(day, now), midnight(day + timedelta(days=1), now)
     out = []
-    for ev in cache.events_between(day_start - timedelta(days=1), day_end + timedelta(days=1)):
-        if _is_hidden(ev, settings, primary):
-            continue
+    for ev in visible_events(cache, settings, cache.events_between(
+            day_start - timedelta(days=1), day_end + timedelta(days=1))):
         if ev.all_day:
             # Stored as local midnights; end is exclusive.
             if not (ev.start.date() <= day < ev.end.date()):
@@ -68,10 +125,9 @@ def today(cache, settings, now: datetime) -> list[Event]:
 
 def next_event(cache, settings, now: datetime) -> Event | None:
     """First timed, visible event that has not ended yet (in progress counts)."""
-    primary = _primary_ids(cache)
     best = None
-    for ev in cache.events_between(now, now + timedelta(days=14)):
-        if ev.all_day or ev.end <= now or _is_hidden(ev, settings, primary):
+    for ev in visible_events(cache, settings, cache.events_between(now, now + timedelta(days=14))):
+        if ev.all_day or ev.end <= now:
             continue
         if best is None or ev.start < best.start:
             best = ev

@@ -102,10 +102,10 @@ def test_sync_window_is_last_week_to_two_months_ahead(cache, tmp_path):
 
     assert worker(cache, Recording(), tmp_path).sync_account("a") == "ok"
     now = datetime.now().astimezone()
-    today = agenda._local_date(now)
+    today = agenda.local_date(now)
     assert sync.SYNC_PAST_DAYS == 7 and sync.SYNC_FUTURE_DAYS == 60
-    assert seen == [(agenda._midnight(today - timedelta(days=7), now),
-                     agenda._midnight(today + timedelta(days=61), now))]
+    assert seen == [(agenda.midnight(today - timedelta(days=7), now),
+                     agenda.midnight(today + timedelta(days=61), now))]
     assert sync.synced_days(now) == (today - timedelta(days=7), today + timedelta(days=60))
     assert sync.sync_window(now) == seen[0]
 

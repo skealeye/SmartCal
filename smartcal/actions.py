@@ -79,12 +79,15 @@ class Actions:
         return self._clients(account)
 
     # -- lookup ------------------------------------------------------------
-    def _locate(self, event_id: str, account, calendar_id) -> tuple[str, str]:
+    def locate(self, event_id: str, account=None, calendar_id=None) -> tuple[str, str]:
+        """(account, calendar id) of a cached event. A calendar shared between two
+        accounts counts once (its owning account's copy, see agenda.dedupe)."""
         if account is not None and calendar_id is not None:
             return account, calendar_id
         found = [e for e in self.cache.events_by_id(event_id)
                  if (account is None or e.account == account)
                  and (calendar_id is None or e.calendar_id == calendar_id)]
+        found = agenda.dedupe(found, agenda.calendar_owners(self.cache))
         if not found:
             raise EventNotFoundError(event_id)
         if len({(e.account, e.calendar_id) for e in found}) > 1:
@@ -94,7 +97,7 @@ class Actions:
     def _begin(self, event_id: str, account, calendar_id, allow_series: bool,
                allow_attendees: bool):
         """Locate the event and fetch its CURRENT Google state; refuse when unsafe."""
-        account, calendar_id = self._locate(event_id, account, calendar_id)
+        account, calendar_id = self.locate(event_id, account, calendar_id)
         client = self.client(account)
         try:
             before = client.get_event(event_id, calendar_id=calendar_id)
@@ -226,10 +229,8 @@ class Actions:
 
     # -- reads -------------------------------------------------------------
     def _visible(self, events: list[Event]) -> list[Event]:
-        if self.settings is None:
-            return events
-        primary = agenda._primary_ids(self.cache)
-        return [e for e in events if not agenda._is_hidden(e, self.settings, primary)]
+        """Deduped, not declined, and (with settings) not in a hidden calendar."""
+        return agenda.visible_events(self.cache, self.settings, events)
 
     def find(self, query: str, day: date | None = None) -> list[Event]:
         """Case-insensitive substring over title/location/calendar name."""
@@ -238,7 +239,7 @@ class Actions:
         if day is None:
             lo, hi = datetime(1970, 1, 1, tzinfo=timezone.utc), datetime(2100, 1, 1, tzinfo=timezone.utc)
         else:
-            lo, hi = agenda._midnight(day, now), agenda._midnight(day + timedelta(days=1), now)
+            lo, hi = agenda.midnight(day, now), agenda.midnight(day + timedelta(days=1), now)
         out = []
         for e in self._visible(self.cache.events_between(lo, hi)):
             if day is not None and e.all_day and not (e.start.date() <= day < e.end.date()):
@@ -253,9 +254,8 @@ class Actions:
                    now: datetime | None = None) -> list[tuple[datetime, datetime]]:
         """Gaps >= duration within local working hours on `day`, across every visible
         calendar of every account. Busy = timed events (partial overlap counts);
-        all-day events, zero-length events and events Google shows as Free
-        (transparent) are ignored. The model has no declined-status field, so
-        declined events cannot be told apart and count as busy. `now` only supplies
+        all-day events, zero-length events, events Google shows as Free
+        (transparent) and meetings the owner declined are ignored. `now` only supplies
         the time zone (default: the system zone, resolved per boundary for DST)."""
         h0, h1 = working_hours
         if not (0 <= h0 < h1 <= 24) or duration <= timedelta(0):
@@ -264,10 +264,10 @@ class Actions:
 
         def at(hour: int) -> datetime:
             d = day + timedelta(days=1) if hour == 24 else day
-            return agenda._midnight(d, now) if hour in (0, 24) else _at(d, hour, now)
+            return agenda.midnight(d, now) if hour in (0, 24) else _at(d, hour, now)
 
         w0, w1 = at(h0), at(h1)
-        if day == agenda._local_date(now):
+        if day == agenda.local_date(now):
             w0 = max(w0, now)   # never offer time that has already passed
         if w0 >= w1:
             return []
@@ -291,5 +291,5 @@ class Actions:
 
 def _at(d: date, hour: int, now: datetime) -> datetime:
     naive = datetime.combine(d, time(hour))
-    zone = agenda._zone(now)
+    zone = agenda.zone(now)
     return naive.replace(tzinfo=zone) if zone else naive.astimezone()
