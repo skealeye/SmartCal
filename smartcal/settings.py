@@ -5,6 +5,8 @@ import json
 import logging
 import math
 import os
+import re
+from datetime import date
 from pathlib import Path
 
 from .config import data_dir
@@ -23,6 +25,42 @@ def clamp_lead(value, default: int = DEFAULT_LEAD_MINUTES) -> int:
 
 log = logging.getLogger(__name__)
 
+MAX_MEETING_ENTRIES = 500      # cap for hidden meetings and for meeting colors
+MAX_MEETING_TITLE = 100
+_COLOR = re.compile(r"#[0-9a-fA-F]{6}")
+HIDE_SCOPES = ("event", "series")
+
+
+def occurrence_key(event) -> str:
+    """Settings key for one meeting (one occurrence of a series)."""
+    return f"e:{event.calendar_id}:{event.id}"
+
+
+def series_key(event) -> str | None:
+    """Settings key for a whole recurring series; None for a one-off meeting."""
+    rid = getattr(event, "recurring_id", None)
+    return f"s:{event.calendar_id}:{rid}" if rid else None
+
+
+def color_key(event) -> str:
+    """Colors follow the series, so every occurrence of a recurring meeting matches."""
+    return series_key(event) or occurrence_key(event)
+
+
+def _valid_key(k) -> bool:
+    return isinstance(k, str) and k.startswith(("e:", "s:")) and len(k) <= 2000
+
+
+def _title(value) -> str:
+    return (value if isinstance(value, str) else "")[:MAX_MEETING_TITLE]
+
+
+def _capped(d: dict) -> dict:
+    """Keep the newest MAX_MEETING_ENTRIES entries (dicts keep insertion order)."""
+    if len(d) <= MAX_MEETING_ENTRIES:
+        return d
+    return dict(list(d.items())[-MAX_MEETING_ENTRIES:])
+
 
 class Settings:
     def __init__(self, path: str | Path | None = None):
@@ -35,6 +73,10 @@ class Settings:
         self.autostart: bool = True
         self.first_run_done: bool = False
         self.claude_model: str = DEFAULT_CLAUDE_MODEL
+        # SmartCal-local only (never sent to Google). Keys: occurrence_key / series_key.
+        self.hidden_events: dict[str, dict] = {}
+        self.event_colors: dict[str, str] = {}
+        self.event_color_titles: dict[str, str] = {}   # for the Settings > Meetings list
         self.load_failed = False  # file exists but is unreadable/corrupt
         self.load()
 
@@ -63,6 +105,40 @@ class Settings:
         model = data.get("claude_model")
         if isinstance(model, str) and model.strip():
             self.claude_model = model.strip()
+        self.hidden_events = self._load_hidden(data.get("hidden_events"))
+        self.event_colors = self._load_colors(data.get("event_colors"))
+        titles = data.get("event_color_titles")
+        self.event_color_titles = ({k: _title(v) for k, v in titles.items()
+                                    if k in self.event_colors and isinstance(v, str)}
+                                   if isinstance(titles, dict) else {})
+
+    @staticmethod
+    def _load_hidden(value) -> dict[str, dict]:
+        if not isinstance(value, dict):
+            return {}
+        out = {}
+        for k, v in value.items():
+            if not _valid_key(k) or not isinstance(v, dict):
+                continue
+            scope, when, title = v.get("scope"), v.get("when"), v.get("title", "")
+            if scope not in HIDE_SCOPES or not isinstance(title, str) \
+                    or not isinstance(when, str):
+                continue
+            if (scope == "series") != k.startswith("s:"):
+                continue
+            try:
+                date.fromisoformat(when)
+            except ValueError:
+                continue
+            out[k] = {"title": _title(title), "scope": scope, "when": when}
+        return _capped(out)
+
+    @staticmethod
+    def _load_colors(value) -> dict[str, str]:
+        if not isinstance(value, dict):
+            return {}
+        return _capped({k: v.lower() for k, v in value.items()
+                        if _valid_key(k) and isinstance(v, str) and _COLOR.fullmatch(v)})
 
     def _mark_corrupt(self) -> None:
         """Unreadable settings must never look like a first run (which enables autostart)."""
@@ -86,7 +162,11 @@ class Settings:
                 "muted": sorted(self.muted),
                 "autostart": self.autostart,
                 "first_run_done": self.first_run_done,
-                "claude_model": self.claude_model}
+                "claude_model": self.claude_model,
+                "hidden_events": self.hidden_events,
+                "event_colors": self.event_colors,
+                "event_color_titles": {k: v for k, v in self.event_color_titles.items()
+                                       if k in self.event_colors}}
         tmp = self.path.with_name(self.path.name + ".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         os.replace(tmp, self.path)
@@ -137,3 +217,62 @@ class Settings:
     def set_claude_model(self, model: str) -> None:
         self.claude_model = model.strip() or DEFAULT_CLAUDE_MODEL
         self.save()
+
+    # -- hidden meetings (local to SmartCal) ---------------------------------
+    def hide_event(self, event, scope: str = "event") -> str:
+        """Hide one occurrence ("event") or a whole recurring series ("series") in
+        SmartCal's agenda, windows and toasts. Returns the key used."""
+        if scope not in HIDE_SCOPES:
+            raise ValueError(f"unknown scope {scope!r}")
+        key = series_key(event) if scope == "series" else occurrence_key(event)
+        if key is None:
+            raise ValueError("not a recurring meeting")
+        try:
+            start = event.start if event.all_day else event.start.astimezone()
+            when = start.date().isoformat()
+        except (AttributeError, ValueError):
+            when = date.today().isoformat()
+        self.hidden_events.pop(key, None)       # re-hiding moves it to the newest end
+        self.hidden_events[key] = {"title": _title(getattr(event, "title", "")),
+                                   "scope": scope, "when": when}
+        self.hidden_events = _capped(self.hidden_events)
+        self.save()
+        return key
+
+    def unhide(self, key: str) -> None:
+        if self.hidden_events.pop(key, None) is not None:
+            self.save()
+
+    def is_event_hidden(self, event) -> bool:
+        if not self.hidden_events:
+            return False
+        if occurrence_key(event) in self.hidden_events:
+            return True
+        skey = series_key(event)
+        return skey is not None and skey in self.hidden_events
+
+    # -- meeting colors (local to SmartCal) -----------------------------------
+    def set_event_color(self, event, color: str) -> str:
+        """Color a meeting; a recurring meeting's color applies to its whole series."""
+        if not isinstance(color, str) or not _COLOR.fullmatch(color):
+            raise ValueError(f"not a #rrggbb color: {color!r}")
+        key = color_key(event)
+        self.event_colors.pop(key, None)
+        self.event_colors[key] = color.lower()
+        self.event_color_titles[key] = _title(getattr(event, "title", ""))
+        self.event_colors = _capped(self.event_colors)
+        self.event_color_titles = {k: v for k, v in self.event_color_titles.items()
+                                   if k in self.event_colors}
+        self.save()
+        return key
+
+    def clear_event_color(self, event) -> None:
+        self.clear_color_key(color_key(event))
+
+    def clear_color_key(self, key: str) -> None:
+        self.event_color_titles.pop(key, None)
+        if self.event_colors.pop(key, None) is not None:
+            self.save()
+
+    def event_color(self, event) -> str | None:
+        return self.event_colors.get(color_key(event)) if self.event_colors else None

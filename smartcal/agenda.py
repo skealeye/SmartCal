@@ -92,9 +92,14 @@ def dedupe(events: list[Event], owners: dict[str, str]) -> list[Event]:
 
 
 def visible_events(cache, settings, events: list[Event],
-                   include_declined: bool = False) -> list[Event]:
+                   include_declined: bool = False,
+                   hide_user_hidden: bool = False) -> list[Event]:
     """The events the owner sees: shared calendars deduped, hidden calendars
-    dropped (settings=None: no hiding), declined meetings dropped unless asked for."""
+    dropped (settings=None: no hiding), declined meetings dropped unless asked for.
+
+    hide_user_hidden=True also drops meetings hidden in SmartCal (Hide this meeting /
+    Hide all in this series). Only the agenda, windows and toasts pass it: a hidden
+    meeting is still a real commitment, so the assistant, find and free time see it."""
     owners = calendar_owners(cache)
     out = dedupe(events, owners)
     if not include_declined:
@@ -102,6 +107,9 @@ def visible_events(cache, settings, events: list[Event],
     if settings is not None:
         primary = primary_ids(cache)
         out = [e for e in out if not is_hidden(e, settings, primary, owners)]
+        hidden = getattr(settings, "is_event_hidden", None)
+        if hide_user_hidden and hidden is not None:
+            out = [e for e in out if not hidden(e)]
     return out
 
 
@@ -111,7 +119,8 @@ def today(cache, settings, now: datetime) -> list[Event]:
     day_start, day_end = midnight(day, now), midnight(day + timedelta(days=1), now)
     out = []
     for ev in visible_events(cache, settings, cache.events_between(
-            day_start - timedelta(days=1), day_end + timedelta(days=1))):
+            day_start - timedelta(days=1), day_end + timedelta(days=1)),
+            hide_user_hidden=True):
         if ev.all_day:
             # Stored as local midnights; end is exclusive.
             if not (ev.start.date() <= day < ev.end.date()):
@@ -126,7 +135,8 @@ def today(cache, settings, now: datetime) -> list[Event]:
 def next_event(cache, settings, now: datetime) -> Event | None:
     """First timed, visible event that has not ended yet (in progress counts)."""
     best = None
-    for ev in visible_events(cache, settings, cache.events_between(now, now + timedelta(days=14))):
+    for ev in visible_events(cache, settings, cache.events_between(now, now + timedelta(days=14)),
+                             hide_user_hidden=True):
         if ev.all_day or ev.end <= now:
             continue
         if best is None or ev.start < best.start:

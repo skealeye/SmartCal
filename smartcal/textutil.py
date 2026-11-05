@@ -133,6 +133,48 @@ def safe_http_url(url) -> str | None:
     return url
 
 
+# A URL candidate stops at whitespace and at characters that could close an HTML
+# attribute or tag; the linkified HTML is built from escaped text either way.
+_URL_CANDIDATE = re.compile(r"\bhttps?://[^\s<>\"'`]+", re.IGNORECASE)
+_TRAILING_PUNCT = ".,;:!?"
+
+
+def _trim_url(url: str) -> str:
+    """Drop trailing sentence punctuation and unbalanced closing brackets."""
+    while url:
+        last = url[-1]
+        if last in _TRAILING_PUNCT:
+            url = url[:-1]
+        elif last == ")" and url.count(")") > url.count("("):
+            url = url[:-1]
+        elif last == "]" and url.count("]") > url.count("["):
+            url = url[:-1]
+        else:
+            break
+    return url
+
+
+def linkify_to_html(plain: str) -> str:
+    """HTML for already-plain text: everything escaped, http(s) URLs wrapped in <a>.
+
+    Only URLs that pass `safe_http_url` become links; anything else stays escaped text.
+    Line breaks are kept with white-space:pre-wrap. Never passes markup through."""
+    plain = plain or ""
+    out: list[str] = []
+    pos = 0
+    for m in _URL_CANDIDATE.finditer(plain):
+        url = _trim_url(m.group())
+        if not url or safe_http_url(url) is None or urlsplit(url).hostname is None:
+            continue
+        start, end = m.start(), m.start() + len(url)
+        out.append(html.escape(plain[pos:start], quote=True))
+        esc = html.escape(url, quote=True)
+        out.append(f'<a href="{esc}">{esc}</a>')
+        pos = end
+    out.append(html.escape(plain[pos:], quote=True))
+    return '<div style="white-space:pre-wrap;">' + "".join(out) + "</div>"
+
+
 def meeting_label(url: str | None) -> str:
     """Button label for a meeting link, decided by the parsed hostname only."""
     if safe_http_url(url) is None:

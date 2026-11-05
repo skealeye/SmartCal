@@ -70,9 +70,11 @@ class Notifier:
             now = now.astimezone()
         changed = self._prune(now)
         horizon = now + timedelta(minutes=MAX_LEAD_MINUTES + 1)
-        # Deduped (a shared calendar toasts once), hidden calendars and declined dropped.
+        # Deduped (a shared calendar toasts once); hidden calendars, declined meetings
+        # and meetings hidden in SmartCal dropped.
         for ev in agenda.visible_events(self.cache, self.settings,
-                                        self.cache.events_between(now, horizon)):
+                                        self.cache.events_between(now, horizon),
+                                        hide_user_hidden=True):
             if ev.all_day:
                 continue
             if self.settings.is_muted(ev.calendar_id):
