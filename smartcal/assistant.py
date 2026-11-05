@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import threading
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -160,7 +161,9 @@ TOOLS = [
 ]
 
 _UPDATE_FIELDS = ("title", "start", "end", "location", "description")
-_INVISIBLE = re.compile("[​-‏‪-‮⁠-⁩﻿]")
+_INVISIBLE = re.compile("[­͏؜ᅟᅠ឴឵᠋-᠏"
+                        "​-‏‪-‮⁠-⁯ㅤ︀-️﻿"
+                        "ﾠ]")
 _CONTROL_KEEP_NL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _CONTROL_ALL = re.compile("[\x00-\x1f\x7f-\x9f  ]")
 
@@ -179,37 +182,85 @@ class AssistantResult:
 
 
 BUSY_TEXT = "Still working on your last message."
-MAX_PENDING = 5
+MAX_PENDING = 1      # one approval per action: a "yes" can never approve a bundle
+ONE_AT_A_TIME = ("one confirmation at a time — finish the pending one first: ask the user "
+                 "about it with ask_user, then handle the next action in a later turn")
 PENDING_PREFIX = "Waiting for your OK to: "
 PENDING_HEADER = "--- SmartCal ---"
+PENDING_TITLE = 60
 NOT_APPROVED_NOTE = ("SmartCal note: the user's reply was not a clear yes, so the action(s) that "
                      "were waiting for confirmation were NOT approved and have been cancelled. "
                      "Do not retry them unless the user asks again.")
 _AFFIRMATIVE = ("yes", "y", "yep", "yeah", "yup", "ok", "okay", "sure", "go ahead", "do it",
                 "confirm", "confirmed", "please do", "yes please", "sounds good", "correct",
                 "approved", "absolutely", "of course")
-_NEGATIVE = {"no", "nope", "nah", "not", "don't", "dont", "never", "cancel", "stop", "wait",
-             "hold", "instead", "but", "except", "unless", "only"}
-_FAKE_PENDING = re.compile(r"^[\W_]*waiting for your ok", re.IGNORECASE)
+LEADING_WORDS_MAX = 6
+# Messages longer than LEADING_WORDS_MAX words approve only when they are one of these.
+_AFFIRMATIVE_LONG = {"yes please go ahead and delete it", "yes please go ahead and do it",
+                     "yes please go ahead and move it", "yes that is fine go ahead and do it",
+                     "ok please go ahead and delete it", "ok please go ahead and do it"}
+_NEGATIVE = {"no", "nope", "nah", "not", "never", "cancel", "stop", "wait", "hold", "instead",
+             "but", "except", "unless", "only", "actually", "leave", "keep", "skip", "forget",
+             "nvm", "nevermind", "scratch", "abort", "later", "undo", "ignore", "first", "last",
+             "second", "other", "rather", "just", "dont", "cant", "wont", "didnt", "isnt",
+             "doesnt", "wouldnt", "shouldnt", "couldnt", "arent", "wasnt", "werent", "mind"}
+_NEG_CONTRACTION = {"don", "can", "won", "didn", "isn", "doesn", "wouldn", "shouldn", "couldn",
+                    "aren", "wasn", "weren", "haven", "hasn", "hadn", "mustn", "needn", "ain"}
+_APOSTROPHES = str.maketrans({c: "'" for c in "’‘ʼ´`′"})
+
+
+def _non_ascii_letter(text: str) -> bool:
+    return any(ch.isalpha() and not ch.isascii() for ch in text)
 
 
 def is_affirmative(text: str) -> bool:
     """True only for an unambiguous English yes ("yes", "ok, do it", "yes delete it").
 
-    The message must start with an allowlisted affirmative and contain no negative or
-    hesitation word and no question mark. Anything else is NOT approval."""
-    t = str(text or "").strip().lower().replace("’", "'")
-    t = re.sub(r"[.!\s]+$", "", t)
-    if not t or "?" in t:
+    NFKC-normalized; any non-ASCII letter (lookalikes), a question mark or any negative or
+    hesitation word vetoes. Up to 6 words: must start with an allowlisted affirmative;
+    longer: must be one of a few exact phrases. Anything else is NOT approval."""
+    t = unicodedata.normalize("NFKC", str(text or ""))
+    t = _INVISIBLE.sub("", t).lower().translate(_APOSTROPHES).strip()
+    if not t or "?" in t or _non_ascii_letter(t):
         return False
-    words = re.findall(r"[a-z']+", t)
-    if not words or any(w in _NEGATIVE or w.endswith("n't") for w in words):
+    words = re.findall(r"[a-z]+", t)          # every non-letter splits: don't -> don, t
+    if not words:
         return False
-    for phrase in _AFFIRMATIVE:
-        p = phrase.split()
-        if words[:len(p)] == p:
-            return True
-    return False
+    for i, w in enumerate(words):
+        if w in _NEGATIVE or re.fullmatch(r"n+o+|na+h+|no+pe+", w):
+            return False
+        if w in _NEG_CONTRACTION and i + 1 < len(words) and words[i + 1] == "t":
+            return False
+    if len(words) > LEADING_WORDS_MAX:
+        return " ".join(words) in _AFFIRMATIVE_LONG
+    return any(words[:len(p)] == p for p in (phrase.split() for phrase in _AFFIRMATIVE))
+
+
+def _lookalike(phrase: str) -> str:
+    """Regex for `phrase` where any letter may also be a non-ASCII letter (homoglyphs)."""
+    parts = []
+    for ch in phrase:
+        parts.append(r"\s*" if ch == " " else f"(?:{re.escape(ch)}|[^\\x00-\\x7f])")
+    return "".join(parts)
+
+
+_FAKE_LINE = re.compile(_lookalike("waiting for your ok") + "|" + re.escape(PENDING_HEADER)
+                        + "|-{2,}\\s*" + _lookalike("smartcal"), re.IGNORECASE)
+
+
+def _forged(line: str) -> bool:
+    """A model-written line that imitates SmartCal's pending block."""
+    n = _INVISIBLE.sub("", unicodedata.normalize("NFKC", line)).lower()
+    return bool(_FAKE_LINE.search(n))
+
+
+def _pending_title(title: str) -> str:
+    """Untrusted title for a pending line: one plain line, no quotes, no fake phrases."""
+    t = clean_output(title).translate(str.maketrans({c: " " for c in "“”\"'\n"}))
+    t = unicodedata.normalize("NFKC", t)
+    t = _FAKE_LINE.sub(" ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return (t if len(t) <= PENDING_TITLE else t[:PENDING_TITLE - 1].rstrip() + "…") or "(no title)"
 
 
 class _ToolError(Exception):
@@ -221,6 +272,7 @@ def clean_output(text: str, limit: int = MAX_OUTPUT) -> str:
     """Plain text for the chat: no control or bidi/invisible format characters."""
     t = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
     t = _INVISIBLE.sub("", _CONTROL_KEEP_NL.sub("", t)).replace("\t", " ")
+    t = "\n".join(ln.rstrip() for ln in t.split("\n"))   # whitespace-only lines become empty
     t = re.sub(r"\n{3,}", "\n\n", t).strip()
     return t[:limit]
 
@@ -271,9 +323,7 @@ def _read_env_file(path: Path) -> dict[str, str]:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        key = key.strip()
-        if key.startswith("export "):
-            key = key[len("export "):].strip()
+        key = re.sub(r"^export\s+", "", key.strip()).strip()
         value = value.strip()
         if value[:1] in ("\"", "'"):
             end = value.find(value[0], 1)
@@ -385,8 +435,7 @@ class ConfirmationGate:
             self._descriptions.pop(key, None)
             return True
         if self._requested.get(key) != self.turn and len(self.pending()) >= MAX_PENDING:
-            raise _ToolError("too many pending confirmations: ask the user about the ones "
-                             "already waiting first")
+            raise _ToolError(ONE_AT_A_TIME)
         self._requested[key] = self.turn
         self._descriptions[key] = description
         return False
@@ -458,7 +507,7 @@ class Assistant:
 
     def _reply(self, user_text: str) -> AssistantResult:
         text = clean_output(user_text, MAX_USER_TEXT)
-        dropped = self.gate.new_turn(text)   # anything but a clear yes cancels pending OKs
+        dropped = self.gate.new_turn(user_text)   # judged on the FULL text, not the truncated   # anything but a clear yes cancels pending OKs
         if not text:
             return AssistantResult("Type a message first.", False)
         saved = copy.deepcopy(self.history)
@@ -514,7 +563,7 @@ class Assistant:
         self._trim()
         pending = [_line(p, 300) for p in pending or []]
         body = "\n".join(ln for ln in clean_output(text).split("\n")
-                         if not _FAKE_PENDING.match(ln))
+                         if not _forged(ln))
         body = clean_output(body) or ("Done." if not pending else "")
         if pending:   # appended after cleaning/truncation, so it cannot be cut off
             body = (body + "\n\n" if body else "") + PENDING_HEADER + "\n" + "\n".join(pending)
@@ -632,13 +681,14 @@ class Assistant:
         if not s:
             return None
         try:
-            if len(s) == 10:
-                return agenda._midnight(date.fromisoformat(s), now)
-            dt = datetime.fromisoformat(s)
+            day = date.fromisoformat(s) if len(s) == 10 else None
+            dt = None if day else datetime.fromisoformat(s)
         except ValueError:
             raise _ToolError(f"{name} must be an ISO-8601 date-time") from None
-        try:
-            if dt.tzinfo is None:
+        try:   # every path, date-only included, goes through the bounds check
+            if day is not None:
+                dt = agenda._midnight(day, now)
+            elif dt.tzinfo is None:
                 zone = agenda._zone(now)
                 dt = dt.replace(tzinfo=zone) if zone else dt.astimezone()
             ok = now - EARLIEST <= dt <= now + LATEST
@@ -830,7 +880,9 @@ class Assistant:
 
     def _title(self, event_id, account, calendar_id) -> str:
         cached = self._cached(event_id, account, calendar_id)
-        return f'"{_line(cached.title, 100)}"' if cached else f"event {_line(event_id, 60)}"
+        if cached:
+            return f"the event titled \u201c{_pending_title(cached.title)}\u201d"
+        return f"the event with id {_pending_title(event_id)}"
 
     def _add_reminder(self, args, turn, now):
         text = _text(args, "text", required=True)
