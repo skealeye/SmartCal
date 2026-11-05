@@ -6,6 +6,8 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QApplication
 
 from smartcal import __version__, autostart
+from smartcal.actions import Actions
+from smartcal.assistant import Assistant, make_client
 from smartcal.config import data_dir
 from smartcal.db import Cache
 from smartcal.google_auth import list_accounts, remove_account
@@ -15,6 +17,7 @@ from smartcal.logsetup import guarded, install_excepthooks, setup_logging
 from smartcal.notifier import Notifier
 from smartcal.reminders import ReminderFirer, Reminders
 from smartcal.settings import Settings
+from smartcal.undo import UndoStore
 from smartcal.toast import ToastSender, register_app_id
 from smartcal.ui.popup import AgendaPopup
 from smartcal.ui.settings_dialog import SettingsDialog
@@ -106,6 +109,23 @@ def main() -> int:
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()
+
+    assistant_ref: list[Assistant] = []
+
+    def assistant_factory() -> Assistant:
+        # Built once on the first chat message; the same UndoStore/Actions serve every message.
+        if not assistant_ref:
+            actions = Actions(client_for, cache, UndoStore(data_dir() / "undo.json"), settings)
+            assistant_ref.append(Assistant(make_client(), actions, app.reminders, settings, cache))
+        return assistant_ref[0]
+
+    @guarded
+    def on_chat_changed() -> None:
+        refresh_views()
+        worker.sync_now()
+
+    popup.attach_chat(assistant_factory)
+    popup.chat_changed.connect(on_chat_changed)
 
     tray = TrayController(popup, worker, cache, settings, on_accounts_changed=drop_clients,
                           on_open_settings=open_settings, reminders=reminders)

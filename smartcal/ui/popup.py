@@ -7,8 +7,8 @@ from datetime import datetime
 
 from PyQt6.QtCore import QEvent, QPoint, QRect, Qt, pyqtSignal
 from PyQt6.QtGui import QCursor
-from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout,
-                             QWidget)
+from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea,
+                             QVBoxLayout, QWidget)
 
 from .. import __version__, agenda
 from . import theme
@@ -29,6 +29,7 @@ class AgendaPopup(QWidget):
     """Frameless tool window. Hides when it loses activation (WindowDeactivate)."""
 
     view_requested = pyqtSignal(str)
+    chat_changed = pyqtSignal()   # the chat changed calendars (write or undo)
 
     def __init__(self, cache, settings, parent=None):
         super().__init__(parent)
@@ -44,6 +45,9 @@ class AgendaPopup(QWidget):
         self._rows: list[RowInfo] = []
         self._next_line = ""
         self._no_accounts = False
+        self._chat = None
+        self._chat_factory = None
+        self._ask = None
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
                             | Qt.WindowType.WindowStaysOnTopHint)
         self.setFixedWidth(WIDTH)
@@ -91,6 +95,43 @@ class AgendaPopup(QWidget):
         self._footer.linkActivated.connect(self.request_view)
         for w in (self._header, self._status, self._next, self._scroll, self._empty, self._footer):
             outer.addWidget(w)
+        self._outer = outer
+
+    # -- chat (built lazily on first expand) --------------------------------
+    def attach_chat(self, assistant_factory) -> None:
+        """Show the collapsed "Ask Claude…" row; the chat is built on first expand."""
+        self._chat_factory = assistant_factory
+        if self._ask is None:
+            self._ask = QPushButton("Ask Claude…")
+            self._ask.setObjectName("ask")
+            self._ask.setFlat(True)
+            self._ask.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._ask.setStyleSheet(f"text-align:left;color:{theme.LINK};padding:2px 0;")
+            self._ask.clicked.connect(lambda _c=False: self.toggle_chat())
+            self._outer.insertWidget(self._outer.indexOf(self._footer), self._ask)
+
+    def chat(self):
+        return self._chat
+
+    def chat_expanded(self) -> bool:
+        return self._chat is not None and not self._chat.isHidden()
+
+    def toggle_chat(self) -> None:
+        if self._chat_factory is None:
+            return
+        if self._chat is None:
+            from .chat import ChatWidget
+            self._chat = ChatWidget(self._chat_factory)
+            self._chat.changed.connect(self.chat_changed)
+            self._outer.insertWidget(self._outer.indexOf(self._footer), self._chat)
+            expand = True
+        else:
+            expand = self._chat.isHidden()
+        self._chat.setVisible(expand)
+        self._ask.setText("Hide chat" if expand else "Ask Claude…")
+        self._resize()
+        if expand:
+            self._chat.focus_input()
 
     # -- signals / state ------------------------------------------------
     def request_view(self, name: str) -> None:
