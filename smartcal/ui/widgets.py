@@ -62,7 +62,7 @@ class HoverButton(QPushButton):
         motion.stop(self._anim)
         self._anim = motion.tween(self, QColor(self._bg), QColor(color),
                                   motion.micro_duration(motion.FAST), self._set_bg,
-                                  kind="enter")
+                                  kind=motion.FADE)
 
     def enterEvent(self, e):
         self._hovered = True

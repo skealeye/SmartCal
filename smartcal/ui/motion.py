@@ -18,6 +18,10 @@ SPI_GETCLIENTAREAANIMATION = 0x1042
 
 POPUP_MS = 160              # the popup sliding in from the tray side while fading in
 POPUP_SLIDE_PX = 24
+# v0.8.4: the popup's opening animation starts once its first frame is painted (the
+# very first open after start paints slowly: started before, the slide was over before
+# anything was on screen). If no paint is seen within this time, it starts anyway.
+SHOW_START_FALLBACK_MS = 150
 FLYOUT_OPEN_MS = 180        # the details panel sliding out from behind the popup
 FLYOUT_CLOSE_MS = 140       # ...and back
 
@@ -126,9 +130,9 @@ def slide_in_offset(edge: str, px: int = POPUP_SLIDE_PX) -> QPoint:
 
 
 # -- micro-interactions (v0.8.0) ---------------------------------------------------------
-# One set of durations and curves for every small animation: entering (OutCubic),
-# leaving (InCubic), resizing (InOutCubic). They follow animations_enabled() exactly like
-# the popup/panel slides; SMARTCAL_ANIMATIONS=basic keeps only those two slides.
+# One set of durations and curves for every small animation (see curve()). They follow
+# animations_enabled() exactly like the popup/panel slides; SMARTCAL_ANIMATIONS=basic
+# keeps only those two slides.
 ENV_LEVEL = "SMARTCAL_ANIMATIONS"
 FAST = 120                  # hover, press, notice fade
 NORMAL = 180                # resizes, row collapse, chat expand
@@ -148,12 +152,67 @@ def micro_duration(ms: int) -> int:
     return ms if micro_enabled() else 0
 
 
-def curve(kind: str):
-    """"enter" (OutCubic), "leave" (InCubic) or "resize" (InOutCubic)."""
-    from PyQt6.QtCore import QEasingCurve
-    t = {"enter": QEasingCurve.Type.OutCubic, "leave": QEasingCurve.Type.InCubic}.get(
-        kind, QEasingCurve.Type.InOutCubic)
-    return QEasingCurve(t)
+# v0.8.4: every motion eases out with a little weight: it passes its end by a few
+# percent and settles back (OutBack, this amplitude: about 2.3% of the distance at 0.8).
+# Opacity and color fades never overshoot (plain ease-out).
+OVERSHOOT = 0.8
+# The details panel's slide is bounded on both sides (past its dock it would open a gap
+# beside the popup; past "tucked" it would poke out behind the popup's far edge), so it
+# uses a weighted ease-out that settles into place without passing it: cubic Bezier
+# (0.2, 1) (0.3, 1), whose values never leave 0..1.
+GLIDE_BEZIER = ((0.2, 1.0), (0.3, 1.0))
+
+SETTLE = "settle"           # positions and sizes: OutBack(OVERSHOOT)
+GLIDE = "glide"             # bounded positions (the panel slide): no overshoot
+FADE = "fade"               # opacity and colors: OutCubic, never past the end
+LINEAR = "linear"           # raw progress (callers apply curves themselves, see ease())
+
+
+def curve(kind: str = FADE):
+    """The easing curve for `kind`: SETTLE, GLIDE, LINEAR, or anything else (FADE)."""
+    from PyQt6.QtCore import QEasingCurve, QPointF
+    if kind == SETTLE:
+        c = QEasingCurve(QEasingCurve.Type.OutBack)
+        c.setOvershoot(OVERSHOOT)
+        return c
+    if kind == GLIDE:
+        c = QEasingCurve(QEasingCurve.Type.BezierSpline)
+        (x1, y1), (x2, y2) = GLIDE_BEZIER
+        c.addCubicBezierSegment(QPointF(x1, y1), QPointF(x2, y2), QPointF(1.0, 1.0))
+        return c
+    if kind == LINEAR:
+        return QEasingCurve(QEasingCurve.Type.Linear)
+    return QEasingCurve(QEasingCurve.Type.OutCubic)
+
+
+_CURVES: dict = {}
+
+
+def ease(kind: str, progress: float) -> float:
+    """curve(kind) at `progress` (0..1, clamped). Exactly 0.0 at 0 and 1.0 at 1, so an
+    animation driven by it always lands on its end value."""
+    p = min(1.0, max(0.0, float(progress)))
+    if p >= 1.0:
+        return 1.0
+    if p <= 0.0:
+        return 0.0
+    c = _CURVES.get(kind)
+    if c is None:
+        c = _CURVES[kind] = curve(kind)
+    return float(c.valueForProgress(p))
+
+
+def clamp(value, lo, hi):
+    """`value` kept inside [lo, hi] (either order)."""
+    if lo > hi:
+        lo, hi = hi, lo
+    return max(lo, min(hi, value))
+
+
+def clamp_between(pos: QPoint, a: QPoint, b: QPoint) -> QPoint:
+    """`pos` kept inside the box spanned by `a` and `b`: a motion from a to b that
+    overshoots never goes past either end."""
+    return QPoint(clamp(pos.x(), a.x(), b.x()), clamp(pos.y(), a.y(), b.y()))
 
 
 def alive(anim) -> bool:
@@ -177,7 +236,7 @@ def stop(anim) -> None:
         pass
 
 
-def tween(parent, start, end, ms: int, on_value, on_done=None, kind: str = "resize"):
+def tween(parent, start, end, ms: int, on_value, on_done=None, kind: str = FADE):
     """Animate from `start` to `end` over `ms`, calling on_value(v) per frame and
     on_done() at the end. `ms` 0: on_value(end) and on_done() at once, returns None.
     The animation belongs to `parent` (deleted with it) and is deleted when it stops."""

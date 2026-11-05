@@ -13,7 +13,7 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QApplication, QLabel, QPushButton, QWidget
 
 from smartcal.ui import motion, placement, theme
-from smartcal.ui.flyout import HEADER_TEXT, DetailsFlyout
+from smartcal.ui.flyout import HEADER_TEXT, NOTHING_SHOWN, DetailsFlyout
 from smartcal.ui.popup import WIDTH, AgendaPopup
 from test_meeting_actions_ui import (DESC, NOW, click, details, ev, rows, settle_qt, store,
                                      wait_active)
@@ -158,7 +158,7 @@ def test_flyout_slides_out_from_popup_edge(qtbot, tmp_path, animated):
     assert fly.isVisible() and fly.sliding() and p.flyout_open()
     assert fly.pos() == tucked                          # start: right behind the popup
     assert fly._anim.duration() == motion.FLYOUT_OPEN_MS
-    assert fly._anim.easingCurve().type().name == "OutCubic"
+    assert fly._anim.easingCurve() == motion.curve(motion.GLIDE)   # v0.8.4: never past
     assert fly.mask().boundingRect().width() <= 1       # nothing shows over the popup yet
     qtbot.waitUntil(lambda: end.x() < fly.x() < tucked.x())
     mid = fly.pos()                                      # mid: out on the left side only
@@ -182,7 +182,7 @@ def test_flyout_slides_back_then_hides(qtbot, tmp_path, animated):
     assert not p.flyout_open() and not row.is_selected() and p.selected_row() is None
     assert fly.isVisible() and fly.closing() and fly.sliding()
     assert fly._anim.duration() == motion.FLYOUT_CLOSE_MS
-    assert fly._anim.easingCurve().type().name == "InCubic"
+    assert fly._anim.easingCurve() == motion.curve(motion.GLIDE)
     qtbot.waitUntil(lambda: not fly.isVisible())
     assert seen and seen[-1] == QPoint(p.x(), p.y())     # all the way behind the popup
     xs = [q.x() for q in seen]
@@ -359,7 +359,8 @@ def test_popup_slides_in_from_tray_side_for_each_taskbar_edge(qtbot, tmp_path, a
                 and (moved.x() == 0) == (offset.x() == 0)), (tray, moved, offset)
         assert p.windowOpacity() < 0.05
         assert p._show_slide.duration() == motion.POPUP_MS
-        assert p._show_slide.easingCurve().type().name == "OutCubic"
+        assert p._show_slide.easingCurve() == motion.curve(motion.SETTLE)   # v0.8.4
+        assert p._show_fade.easingCurve().type().name == "OutCubic"
         qtbot.waitUntil(lambda: not p.showing_animated())
         assert p.pos() == docked.topLeft() and p.windowOpacity() == 1.0
         assert area.contains(p.geometry())
@@ -648,9 +649,12 @@ def test_fully_tucked_panel_shows_zero_pixels(qtbot, tmp_path, animated):
     click(qtbot, rows(p)[0])
     fly = p.flyout()
     assert fly.pos() == QPoint(p.x(), p.y()) and fly.sliding()
-    assert fly.windowOpacity() == 0.0                        # fully behind: transparent
+    # v0.8.4: fully behind, a mask outside the window shows 0 px; the window stays
+    # opaque (never a layered window turning opaque on screen: a white frame).
+    assert fly.mask() == NOTHING_SHOWN and not fly.mask().intersects(fly.rect())
+    assert fly.windowOpacity() == 1.0
     qtbot.waitUntil(lambda: fly.x() < p.x() - 10)
-    assert fly.windowOpacity() == 1.0                        # out: opaque again
+    assert fly.windowOpacity() == 1.0 and fly.mask().intersects(fly.rect())
     qtbot.waitUntil(lambda: not fly.sliding())
     click(qtbot, rows(p)[0])
     qtbot.waitUntil(lambda: not fly.isVisible())

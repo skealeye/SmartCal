@@ -297,7 +297,7 @@ def test_chat_reversal_continues_from_current_height_and_opacity(qtbot, tmp_path
     p.toggle_chat()                               # collapsing...
     anim = p.height_animation()
     anim.pause()
-    anim.setCurrentTime(anim.duration() // 2)
+    anim.setCurrentTime(anim.duration() // 6)        # (the settle curve is fast early)
     mid_h, mid_op = chat.height(), chat.graphicsEffect().opacity()
     assert 1 < mid_h < full and 0 < mid_op < 1
     p.toggle_chat()                               # ...and open again, from there

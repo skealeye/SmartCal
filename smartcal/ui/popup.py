@@ -11,16 +11,16 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 
-from PyQt6.QtCore import (QAbstractAnimation, QEasingCurve, QEvent, QParallelAnimationGroup,
+from PyQt6.QtCore import (QAbstractAnimation, QEvent, QParallelAnimationGroup,
                           QPoint, QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer,
-                          QUrl, pyqtSignal)
+                          QUrl, pyqtProperty, pyqtSignal)
 from PyQt6.QtGui import QColor, QCursor, QDesktopServices, QGuiApplication, QPainter, QPen
 from PyQt6.QtWidgets import (QApplication, QFrame, QGraphicsOpacityEffect, QHBoxLayout,
                              QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
 from .. import __version__, agenda
 from ..textutil import meeting_label, plain_line, safe_http_url
-from . import meeting_menus, motion, placement, theme
+from . import meeting_menus, motion, nativebg, placement, theme
 from .widgets import HoverButton
 
 log = logging.getLogger(__name__)
@@ -95,12 +95,21 @@ class AgendaPopup(QWidget):
         self.reclaim_check.timeout.connect(self._settle_after_close)
         # Opening: slide in from the tray side while fading in (only on show; hiding is
         # immediate). Purely visual: geometry decisions use docked_geometry().
+        # v0.8.4: the slide settles (a slight overshoot, clamped to the work area, see
+        # _set_show_pos); the fade eases out plainly (never past 1.0). It starts once
+        # the first frame is painted (_show_pending; see show_near_tray).
         self._show_anim = QParallelAnimationGroup(self)
-        self._show_slide = QPropertyAnimation(self, b"pos")
+        self._show_slide = QPropertyAnimation(self, b"show_pos")
+        self._show_slide.setEasingCurve(motion.curve(motion.SETTLE))
         self._show_fade = QPropertyAnimation(self, b"windowOpacity")
+        self._show_fade.setEasingCurve(motion.curve(motion.FADE))
         for a in (self._show_slide, self._show_fade):
-            a.setEasingCurve(QEasingCurve(QEasingCurve.Type.OutCubic))
             self._show_anim.addAnimation(a)
+        self._show_pending = False
+        self.show_start_fallback = QTimer(self)
+        self.show_start_fallback.setSingleShot(True)
+        self.show_start_fallback.setInterval(motion.SHOW_START_FALLBACK_MS)
+        self.show_start_fallback.timeout.connect(self._start_show_animation)
         self.last_hidden_at = -1e9
         self.last_hidden_cursor = QPoint()
         self._anchored = False
@@ -539,7 +548,7 @@ class AgendaPopup(QWidget):
     def _start_tween(self, kind: str, h0: int, h1: int, l0: int, l1: int, fits: bool,
                      frame=None, finish=None, w=None) -> None:
         """Tween the window from h0 to h1 and the list from l0 to l1 (both linear in
-        the eased progress, so they always add up), calling frame(e) for the widget
+        the eased progress, so they always add up), calling frame(e, f) for the widget
         being revealed or the rows collapsing. Only geometry changes per frame: the
         final layout was measured before. `finish` runs once, at the end or when the
         tween is interrupted (it snaps its widgets to their final state)."""
@@ -550,18 +559,28 @@ class AgendaPopup(QWidget):
         self._tween = {"kind": kind, "h0": h0, "h1": h1, "l0": l0, "l1": l1,
                        "frame": frame, "finish": finish, "w": w, "anim": None}
         tw = self._tween
-        tw["anim"] = motion.tween(self, 0.0, 1.0, ms, lambda e, t=tw: self._tween_frame(t, e),
-                                  lambda t=tw: self._tween_done(t),
-                                  kind="leave" if kind == "collapse" else "resize")
+        # Linear progress: each frame applies the settle curve to the geometry and the
+        # plain ease-out to the opacity (an overshoot never takes opacity past 0..1).
+        tw["anim"] = motion.tween(self, 0.0, 1.0, ms, lambda t, x=tw: self._tween_frame(x, t),
+                                  lambda x=tw: self._tween_done(x), kind=motion.LINEAR)
 
-    def _tween_frame(self, tw, e) -> None:
+    def _tween_frame(self, tw, t) -> None:
         if self._tween is not tw:
             return
-        e = float(e)
+        e = motion.ease(motion.SETTLE, t)
+        f = motion.ease(motion.FADE, t)
+        h0, h1 = tw["h0"], tw["h1"]
+        h = round(h0 + (h1 - h0) * e)
+        # The overshoot never takes the window past the screen's room (its tray-side
+        # edge stays put, the far edge must stay on screen) nor below 1 px.
+        room = max(h0, h1, min(MAX_HEIGHT, self._area().height() - 24))
+        h = int(motion.clamp(h, 1, room))
+        if h1 != h0:
+            e = (h - h0) / (h1 - h0)        # the list follows the clamped height exactly
         if tw["frame"] is not None:
-            tw["frame"](e)
+            tw["frame"](e, f)
         self._scroll.setFixedHeight(max(0, round(tw["l0"] + (tw["l1"] - tw["l0"]) * e)))
-        self._set_height(round(tw["h0"] + (tw["h1"] - tw["h0"]) * e))
+        self._set_height(h)
 
     def _tween_done(self, tw) -> None:
         if self._tween is not tw:
@@ -638,10 +657,10 @@ class AgendaPopup(QWidget):
         self.layout().activate()
         target_op = 1.0 if show else 0.0
 
-        def frame(e, w=w, fx=fx) -> None:
+        def frame(e, f, w=w, fx=fx) -> None:
             try:
                 w.setMaximumHeight(max(1, round(cur_h + (natural - cur_h) * e)))
-                fx.setOpacity(cur_op + (target_op - cur_op) * e)
+                fx.setOpacity(motion.clamp(cur_op + (target_op - cur_op) * f, 0.0, 1.0))
             except RuntimeError:
                 pass
 
@@ -712,11 +731,11 @@ class AgendaPopup(QWidget):
             fxs.append((r, fx, h))
         self.layout().activate()
 
-        def frame(e) -> None:
+        def frame(e, f) -> None:
             for r, fx, h in fxs:
                 try:
-                    r.setMaximumHeight(max(1, round(h * (1.0 - e))))
-                    fx.setOpacity(max(0.0, 1.0 - e))
+                    r.setMaximumHeight(max(1, min(h, round(h * (1.0 - e)))))
+                    fx.setOpacity(motion.clamp(1.0 - f, 0.0, 1.0))
                 except RuntimeError:
                     pass
 
@@ -750,7 +769,7 @@ class AgendaPopup(QWidget):
                 except RuntimeError:
                     pass
             self._fade_anims.append(motion.tween(r, 0.0, 1.0, ms, step, done,
-                                                 kind="enter"))
+                                                 kind=motion.FADE))
 
     def fading_in(self) -> bool:
         return any(motion.alive(a) for a in self._fade_anims)
@@ -1165,18 +1184,37 @@ class AgendaPopup(QWidget):
         return QRect(self.pos(), self.size())
 
     def showing_animated(self) -> bool:
-        return self._show_anim.state() == QAbstractAnimation.State.Running
+        """The opening animation is running, or set up and waiting for the first
+        painted frame (the slide owns the position either way)."""
+        return self._show_pending or self._show_anim.state() == QAbstractAnimation.State.Running
+
+    def _get_show_pos(self) -> QPoint:
+        return self.pos()
+
+    def _set_show_pos(self, pos: QPoint) -> None:
+        # The settle overshoot never takes the popup past the work area (over the
+        # taskbar or onto another screen); the last frame is exactly the docked spot.
+        if self._anchored:
+            pos = motion.clamp_to_area(pos, self.size(), self._area())
+        self.move(pos)
+
+    show_pos = pyqtProperty(QPoint, fget=_get_show_pos, fset=_set_show_pos)
 
     def show_near_tray(self, tray_geometry) -> None:
         self._tray_geom = QRect(tray_geometry)
         self._anchored = True
         was_visible = self.isVisible()
+        # Styled before measuring: the very first open measures (and places) exactly
+        # like every later one.
+        self.ensurePolished()
         self._resize(animate=False)  # right screen; places only when visible
         self._place()
         ms = 0 if was_visible else motion.duration(motion.POPUP_MS)
         if ms:
             # Slides in from the tray side (away from the taskbar) while fading in. The
-            # first paint is not delayed: the animation runs after the show.
+            # first paint is not delayed; the animation starts once that frame is
+            # painted (v0.8.4: the very first open paints slowly, and an animation
+            # started before it was already over when the popup first appeared).
             docked = self.pos()
             area = self._area()
             edge = motion.tray_edge(self._tray_geom, area)
@@ -1190,18 +1228,39 @@ class AgendaPopup(QWidget):
             self._show_fade.setDuration(ms)
             self._show_fade.setStartValue(0.0)
             self._show_fade.setEndValue(1.0)
+            self._show_pending = True
         self.show()
         self.raise_()
         self.activateWindow()
         if ms and self.isVisible():     # it may have hidden again during show/activate
-            self._show_anim.start()
+            if self._show_pending:
+                self.show_start_fallback.start()    # (no paint seen: start anyway)
         elif ms:
             self._stop_show_animation()
+
+    def _first_frame_painted(self) -> None:
+        """A paint of the shown popup while the opening waits: start it right after
+        this frame is on screen (the next event-loop pass, once the paint is flushed)."""
+        if self._show_pending:
+            QTimer.singleShot(0, self._start_show_animation)
+
+    def _start_show_animation(self) -> None:
+        if not self._show_pending:
+            return
+        self._show_pending = False
+        self.show_start_fallback.stop()
+        if not self.isVisible():
+            self._stop_show_animation()
+            return
+        self._show_slide.setStartValue(self.pos())   # where the first frame showed it
+        self._show_anim.start()
 
     def _stop_show_animation(self) -> None:
         """Hidden (or shown again) mid-animation: no animation left running, fully
         opaque, and docked if still shown."""
         if self.showing_animated():
+            self._show_pending = False
+            self.show_start_fallback.stop()
             self._show_anim.stop()
             if self.isVisible():
                 self.move(self._show_slide.endValue())
@@ -1213,7 +1272,13 @@ class AgendaPopup(QWidget):
             self._group_deactivated(self)
         elif e.type() == QEvent.Type.WindowActivate:
             self.note_foreground()
+        elif e.type() == QEvent.Type.Paint and self._show_pending:
+            self._first_frame_painted()
         return super().event(e)
+
+    def nativeEvent(self, event_type, message):
+        handled = nativebg.handle_erase(event_type, message, theme.BG)
+        return handled if handled is not None else super().nativeEvent(event_type, message)
 
     def note_foreground(self) -> None:
         """A group window was activated (or a watchdog tick): remember if the OS really
@@ -1516,7 +1581,7 @@ class AgendaRow(QFrame):
             self._set_bg(target)
             return
         self._bg_anim = motion.tween(self, QColor(self._bg), target, ms, self._set_bg,
-                                     kind="enter")
+                                     kind=motion.FADE)
 
     def _set_bg(self, color) -> None:
         self._bg = QColor(color)

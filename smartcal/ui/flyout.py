@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 import os
 
-from PyQt6.QtCore import (QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRect, QSize, Qt,
+from PyQt6.QtCore import (QEvent, QPoint, QPropertyAnimation, QRect, QSize, Qt,
                           QTimer, pyqtProperty)
 from PyQt6.QtGui import QColor, QPalette, QRegion
 from PyQt6.QtWidgets import (QApplication, QBoxLayout, QFrame, QLabel, QPushButton,
@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (QApplication, QBoxLayout, QFrame, QLabel, QPushButt
                              QWidget)
 
 from ..textutil import calendar_label, html_to_text, meeting_label, safe_http_url
-from . import layout, motion, theme
+from . import layout, motion, nativebg, theme
 from .widgets import HoverButton
 from .linktext import LinkText, plain_tip
 from .popup import WIDTH   # one source of truth: the panel is as wide as the popup
@@ -94,8 +94,22 @@ def _set_opacity_fx(fx, value) -> None:
 
 
 def _area(region: QRegion | None, full: QRect) -> int:
+    if region is not None and _shows_nothing(region):
+        return 0
     r = region.boundingRect() if region is not None else full
-    return 0 if region is not None and region.isEmpty() else r.width() * r.height()
+    return r.width() * r.height()
+
+
+# v0.8.4: the window mask of a panel fully behind the popup. An empty QRegion would mean
+# "no mask" (all of it shows), so this is one pixel just outside the window: nothing of
+# the window lies inside it, so 0 px show. The window stays fully opaque all along (until
+# v0.8.3 the panel went transparent here instead, and turning opaque again as it came
+# out made Windows drop and repaint the layered window: a white frame).
+NOTHING_SHOWN = QRegion(-1, -1, 1, 1)
+
+
+def _shows_nothing(region: QRegion) -> bool:
+    return region.isEmpty() or region == NOTHING_SHOWN
 
 
 
@@ -343,7 +357,7 @@ class DetailsFlyout(QWidget):
     def _apply_size(self, size: QSize, animate: bool = True) -> QSize | None:
         """The size the panel takes now (returned; None: unchanged, or its own height
         tween owns the height). A height change of the open, visible panel tweens
-        (InOutCubic, motion.NORMAL) with the micro-animations on; else it is returned
+        (motion.SETTLE, motion.NORMAL) with the micro-animations on; else it is returned
         for place() to apply together with the position, in one geometry change."""
         target_h = size.height()
         width = size.width()
@@ -363,7 +377,8 @@ class DetailsFlyout(QWidget):
             # The content fits at the end: no scrollbar flashing in between.
             self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._height_anim = motion.tween(self, self.height(), target_h, ms,
-                                         self._resize_height, self._height_anim_done)
+                                         self._resize_height, self._height_anim_done,
+                                         kind=motion.SETTLE)
         return None
 
     def _set_geometry(self, rect: QRect) -> None:
@@ -409,6 +424,10 @@ class DetailsFlyout(QWidget):
         return motion.alive(self._height_anim)
 
     def _resize_height(self, h: int) -> None:
+        # The settle overshoot never makes it taller than the popup (it would poke out
+        # below it); the last frame is exactly the target.
+        cap = max(self._height_target or 1, self._popup.height())
+        h = int(motion.clamp(int(h), 1, cap))
         if self.height() != h:
             self.setFixedSize(self.width(), h)
             self._update_mask()
@@ -443,10 +462,10 @@ class DetailsFlyout(QWidget):
         ms = motion.micro_duration(motion.CROSSFADE_MS)
         self._ghost_anim = motion.tween(self, 1.0, 0.0, ms,
                                         lambda v, fx=out_fx: _set_opacity_fx(fx, v),
-                                        kind="leave")
+                                        kind=motion.FADE)
         self._fade_in_anim = motion.tween(self, 0.0, 1.0, ms,
                                           lambda v, fx=in_fx: _set_opacity_fx(fx, v),
-                                          self._end_crossfade, kind="enter")
+                                          self._end_crossfade, kind=motion.FADE)
 
     def crossfading(self) -> bool:
         return self._ghost is not None
@@ -560,11 +579,14 @@ class DetailsFlyout(QWidget):
         self._closing = False
         if self.isHidden():
             self._stop_animations()
+            self._prepare_first_frame()
             if self._mode == "fade":
                 self.move(self._docked)
                 self._set_opacity(0.0 if ms > 0 else 1.0)
             else:
-                # Instant (animations off): straight to the dock, never masked.
+                # Instant (animations off): straight to the dock, never masked. Opaque
+                # all along: never a layered window that turns opaque on screen.
+                self._set_opacity(1.0)
                 self.move(self._tucked if ms > 0 else self._docked)
                 self._apply_mask(self._visible_region(self.pos()))   # before it shows
             self.show()                 # WA_ShowWithoutActivating: the popup keeps focus
@@ -588,6 +610,19 @@ class DetailsFlyout(QWidget):
         self._clear_mask()              # the popup
         self._set_opacity(1.0)
 
+    def _prepare_first_frame(self) -> None:
+        """Before showing: styled and laid out, so its first paint has everything ready;
+        the mask and position are set before show() too, so Qt applies them when it
+        creates the native window, before Windows first shows it (v0.8.4)."""
+        self.ensurePolished()
+        lay = self.layout()
+        if lay is not None:
+            lay.activate()
+
+    def nativeEvent(self, event_type, message):
+        handled = nativebg.handle_erase(event_type, message, theme.BG)
+        return handled if handled is not None else super().nativeEvent(event_type, message)
+
     def _stop_animations(self) -> None:
         self._anim.stop()
         self._fade.stop()
@@ -597,8 +632,10 @@ class DetailsFlyout(QWidget):
         share of the way left to go (a turnaround midway takes part of it). False:
         nothing to animate."""
         self._stop_animations()
-        curve = QEasingCurve(QEasingCurve.Type.OutCubic if opening
-                             else QEasingCurve.Type.InCubic)
+        # v0.8.4: the slide eases out with weight both ways and never passes its end
+        # (GLIDE; overshooting would open a gap or poke out behind the popup); the
+        # fade-only fallback's opacity eases out plainly (FADE).
+        curve = motion.curve(motion.FADE if self._mode == "fade" else motion.GLIDE)
         if self._mode == "fade":
             start, end = self.windowOpacity(), (1.0 if opening else 0.0)
             ms = int(round(ms * min(1.0, abs(end - start))))
@@ -648,7 +685,9 @@ class DetailsFlyout(QWidget):
         return self.pos()
 
     def _set_slide_pos(self, pos: QPoint) -> None:
-        self._move_to(pos)
+        # Never past the dock nor past "tucked", whatever the curve (no gap beside the
+        # popup, nothing poking out behind its far edge).
+        self._move_to(motion.clamp_between(pos, self._docked, self._tucked))
 
     slide_pos = pyqtProperty(QPoint, fget=_get_slide_pos, fset=_set_slide_pos)
 
@@ -700,23 +739,15 @@ class DetailsFlyout(QWidget):
         if region is None:
             self._clear_mask()
             return
-        if region.isEmpty():
-            # Fully behind the popup. An empty mask would mean "no mask", so keep one
-            # pixel and make the window fully transparent: 0 px show.
-            self.setMask(QRegion(0, 0, 1, 1))
-            self._set_opacity(0.0)
-        else:
-            self.setMask(region)
-            if self._mode == "slide":
-                self._set_opacity(1.0)
+        # Fully behind the popup: a mask outside the window (0 px show). The window
+        # opacity is never touched here: it stays 1.0 (see NOTHING_SHOWN).
+        self.setMask(NOTHING_SHOWN if region.isEmpty() else region)
         self._masked = True
 
     def _clear_mask(self) -> None:
         if self._masked:
             self.clearMask()
             self._masked = False
-            if self._mode == "slide":
-                self._set_opacity(1.0)
 
     # -- events: the popup decides ---------------------------------------------
     def setVisible(self, visible: bool) -> None:
