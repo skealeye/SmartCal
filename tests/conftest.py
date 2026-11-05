@@ -6,5 +6,9 @@ import os
 if os.environ.get("SMARTCAL_TESTS_REAL_DISPLAY") != "1":
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
+# Animations off by default (the popup and details panel appear and dock instantly);
+# the animation tests turn them on through smartcal.ui.motion.animations_enabled.
+os.environ["SMARTCAL_NO_ANIMATIONS"] = "1"
+
 # The dev machine also has PySide6; make pytest-qt use PyQt6 (pytest.ini: qt_api = pyqt6).
 os.environ.setdefault("QT_API", "pyqt6")

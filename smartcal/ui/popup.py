@@ -11,14 +11,16 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 
-from PyQt6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import (QAbstractAnimation, QEasingCurve, QEvent, QParallelAnimationGroup,
+                          QPoint, QPropertyAnimation, QRect, QSize, Qt, QTimer, QUrl,
+                          pyqtSignal)
 from PyQt6.QtGui import QCursor, QDesktopServices, QGuiApplication
 from PyQt6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QPushButton,
                              QScrollArea, QVBoxLayout, QWidget)
 
 from .. import __version__, agenda
 from ..textutil import meeting_label, safe_http_url
-from . import meeting_menus, placement, theme
+from . import meeting_menus, motion, placement, theme
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +88,14 @@ class AgendaPopup(QWidget):
         self.reclaim_check.setSingleShot(True)
         self.reclaim_check.setInterval(RECLAIM_CHECK_MS)
         self.reclaim_check.timeout.connect(self._settle_after_close)
+        # Opening: slide in from the tray side while fading in (only on show; hiding is
+        # immediate). Purely visual: geometry decisions use docked_geometry().
+        self._show_anim = QParallelAnimationGroup(self)
+        self._show_slide = QPropertyAnimation(self, b"pos")
+        self._show_fade = QPropertyAnimation(self, b"windowOpacity")
+        for a in (self._show_slide, self._show_fade):
+            a.setEasingCurve(QEasingCurve(QEasingCurve.Type.OutCubic))
+            self._show_anim.addAnimation(a)
         self.last_hidden_at = -1e9
         self.last_hidden_cursor = QPoint()
         self._anchored = False
@@ -365,6 +375,12 @@ class AgendaPopup(QWidget):
         return self._flyout
 
     def flyout_open(self) -> bool:
+        """The details are open (shown and not sliding back: a panel sliding back is
+        already closed, though still on screen and still part of the group)."""
+        return self._flyout_shown() and not self._flyout.closing()
+
+    def _flyout_shown(self) -> bool:
+        """The panel is on screen (open, or sliding back)."""
         return self._flyout is not None and not self._flyout.isHidden()
 
     def selected_row(self) -> "AgendaRow | None":
@@ -391,20 +407,27 @@ class AgendaPopup(QWidget):
         self._scroll.ensureWidgetVisible(row, 0, 0)
         fly = self._ensure_flyout()
         fly.set_event(row.event)        # one instance; the content swaps in place
+        opening = not self.flyout_open()    # hidden, or sliding back (turns around)
         self._place_flyout(force=True)
-        if fly.isHidden():
-            fly.show()                  # WA_ShowWithoutActivating: the popup keeps focus
+        if opening:
+            # WA_ShowWithoutActivating: the popup keeps focus. Over the popup (narrow
+            # screen) there is nothing to slide out from behind: it appears at once.
+            fly.slide_open(0 if self.flyout_side == "over"
+                           else motion.duration(motion.FLYOUT_OPEN_MS))
             self._place_flyout(force=True)
         fly.raise_()
         if keyboard:
             fly.activateWindow()
             fly.focus_first()
 
-    def close_flyout(self, restore_focus: bool = True) -> None:
+    def close_flyout(self, restore_focus: bool = True, animate: bool = True) -> None:
         """Close the details and clear the selection. If the flyout had focus, the popup
         takes it back right after (so activation never stays with some other app's
-        window), and the formerly selected row gets keyboard focus. Hidden first: the
-        flyout's own deactivation then no longer counts for the group."""
+        window), and the formerly selected row gets keyboard focus.
+        The panel slides back behind the popup and hides when that finishes (at once
+        when animations are off, the popup is hidden, or `animate` is False). Hidden at
+        once: the flyout's own deactivation then no longer counts for the group; sliding
+        back: the reclaim grace starts first, so its deactivation is not a focus loss."""
         row = self.selected_row()
         self._selected_key = None
         for r in self.row_widgets():
@@ -413,9 +436,17 @@ class AgendaPopup(QWidget):
         fly = self._flyout
         if fly is None or fly.isHidden():
             return
+        ms = motion.duration(motion.FLYOUT_CLOSE_MS) \
+            if animate and self.isVisible() and self.flyout_side != "over" else 0
+        if fly.closing():
+            if not ms:
+                fly.hide_now()          # already sliding back: the popup went away
+            return
         active = self.active_window()
         reclaim = active is fly or (restore_focus and active is not self)
-        fly.hide()
+        if ms and reclaim and self.isVisible():
+            self.reclaim_check.start()
+        fly.slide_close(ms)             # ms 0: hidden now
         if reclaim and self.isVisible():
             self.raise_()
             self.activateWindow()
@@ -425,6 +456,14 @@ class AgendaPopup(QWidget):
         if restore_focus and self.isVisible():
             (row or self).setFocus()
 
+    def _flyout_slid_back(self, was_active: bool) -> None:
+        """The panel finished sliding back and hid. If it had focus then (clicked into
+        while sliding back), the popup takes focus back, as close_flyout does."""
+        if was_active and self.isVisible() and not self.reclaim_check.isActive():
+            self.raise_()
+            self.activateWindow()
+            self.reclaim_check.start()
+
     def _ensure_flyout(self):
         if self._flyout is None:
             from .flyout import DetailsFlyout
@@ -432,40 +471,50 @@ class AgendaPopup(QWidget):
         return self._flyout
 
     def _place_flyout(self, force: bool = False) -> None:
-        """Left of the popup, top aligned with the selected row, inside the work area of
-        the popup's screen (right of it, or over it, when the left has no room)."""
+        """The popup's size, top aligned with it: left of the popup inside the work area
+        of its screen (right of it, or over it, when the left has no room). Uses the
+        popup's docked geometry, never a position mid-animation. While sliding, only the
+        slide's end moves (the slide owns the panel's position)."""
         fly = self._flyout
         if fly is None or (fly.isHidden() and not force):
+            return
+        anchor = self.docked_geometry()
+        area = self._area()
+        size = QSize(WIDTH, anchor.height())
+        pos, side = placement.beside(size, anchor, anchor.top(), area)
+        if fly.closing():
+            if side != "over":          # sliding back: follow the popup
+                fly.place(size, pos, QPoint(anchor.left(), pos.y()), anchor)
             return
         row = self.selected_row()
         if row is None:
             return
-        area = self._area()
-        fly.fit_to(area)
-        self._rows_box.activate()
-        top = row.mapToGlobal(QPoint(0, 0)).y()
-        anchor = QRect(self.pos(), self.size())
-        pos, self.flyout_side = placement.beside(fly.size(), anchor, top, area)
-        if self.flyout_side == "over":
-            pos = self._overlay_clear_of(row, fly, pos, area)
-        if fly.pos() != pos:
-            fly.move(pos)
+        self.flyout_side = side
+        if side == "over":
+            pos, size = self._overlay_clear_of(row, size, pos, area, anchor)
+            fly.place(size, pos, pos, None)
+            return
+        # Tucked: exactly behind the popup, which it slides out from and back behind.
+        fly.place(size, pos, QPoint(anchor.left(), pos.y()), anchor)
 
-    def _overlay_clear_of(self, row, fly, pos: QPoint, area: QRect) -> QPoint:
+    def _overlay_clear_of(self, row, size: QSize, pos: QPoint, area: QRect,
+                          anchor: QRect) -> tuple[QPoint, QSize]:
         """Over the popup (narrow screens): below the selected row, or above it, so the
         row stays clickable to close the details; shrunk to the larger space if needed."""
         m, gap = placement.MARGIN, placement.GAP
-        rtop = row.mapToGlobal(QPoint(0, 0)).y()
+        self._rows_box.activate()
+        # The row where it is once the popup is docked (not mid-animation).
+        rtop = row.mapToGlobal(QPoint(0, 0)).y() + anchor.top() - self.y()
         rbottom = rtop + row.height() - 1
         below = area.bottom() + 1 - m - (rbottom + 1 + gap)
         above = rtop - gap - (area.top() + m)
-        h = fly.height()
+        h = size.height()
         if h > below and h > above:
-            fly.fit_to(area, max(below, above))
-            h = fly.height()
+            h = max(80, max(below, above))
+        size = QSize(size.width(), h)
         if h <= below:
-            return QPoint(pos.x(), rbottom + 1 + gap)
-        return QPoint(pos.x(), max(area.top() + m, rtop - gap - h))
+            return QPoint(pos.x(), rbottom + 1 + gap), size
+        return QPoint(pos.x(), max(area.top() + m, rtop - gap - h)), size
 
     def _list_scrolled(self, _value: int) -> None:
         """The details follow their row; a row scrolled out of view closes them."""
@@ -589,16 +638,57 @@ class AgendaPopup(QWidget):
         return placement.compute_position(QSize(self.width(), self.height()), tray, area)
 
     def _place(self) -> None:
-        self.move(self.compute_position(self._tray_geom, self._area()))
+        pos = self.compute_position(self._tray_geom, self._area())
+        if self.showing_animated():
+            self._show_slide.setEndValue(pos)   # the slide owns the position: retarget
+            return
+        self.move(pos)
+
+    def docked_geometry(self) -> QRect:
+        """Where the popup is once it has settled (compute_position next to the tray),
+        whatever its opening animation shows right now. The flyout docks to this."""
+        if self._anchored:
+            return QRect(self.compute_position(self._tray_geom, self._area()), self.size())
+        return QRect(self.pos(), self.size())
+
+    def showing_animated(self) -> bool:
+        return self._show_anim.state() == QAbstractAnimation.State.Running
 
     def show_near_tray(self, tray_geometry) -> None:
         self._tray_geom = QRect(tray_geometry)
         self._anchored = True
+        was_visible = self.isVisible()
         self._resize()  # sizes against the right screen; places only when visible
         self._place()
+        ms = 0 if was_visible else motion.duration(motion.POPUP_MS)
+        if ms:
+            # Slides in from the tray side (away from the taskbar) while fading in. The
+            # first paint is not delayed: the animation runs after the show.
+            docked = self.pos()
+            edge = motion.tray_edge(self._tray_geom, self._area())
+            self.move(docked + motion.slide_in_offset(edge))
+            self.setWindowOpacity(0.0)
+            self._show_slide.setDuration(ms)
+            self._show_slide.setStartValue(self.pos())
+            self._show_slide.setEndValue(docked)
+            self._show_fade.setDuration(ms)
+            self._show_fade.setStartValue(0.0)
+            self._show_fade.setEndValue(1.0)
         self.show()
         self.raise_()
         self.activateWindow()
+        if ms:
+            self._show_anim.start()
+
+    def _stop_show_animation(self) -> None:
+        """Hidden (or shown again) mid-animation: no animation left running, fully
+        opaque, and docked if still shown."""
+        if self.showing_animated():
+            self._show_anim.stop()
+            if self.isVisible():
+                self.move(self._show_slide.endValue())
+        if self.windowOpacity() != 1.0:
+            self.setWindowOpacity(1.0)
 
     def event(self, e):
         if e.type() == QEvent.Type.WindowDeactivate and self.isVisible():
@@ -633,7 +723,7 @@ class AgendaPopup(QWidget):
             self._reactivate_after(modal)   # e.g. the "Undo anyway" confirm box
         elif menu is not None and not self._is_group_window(menu):
             self._reactivate_after(menu)    # the Hide…/Color… menu
-        elif self.flyout_open() and (active is None or active is source):
+        elif self._flyout_shown() and (active is None or active is source):
             # Not conclusive: "no active window" (Windows may report that for a moment
             # while activation moves between the popup and the flyout), or the window
             # that just lost activation still reported as active (the deactivation
@@ -645,7 +735,7 @@ class AgendaPopup(QWidget):
             self.hide()
 
     def _is_group_window(self, w) -> bool:
-        return w is self or (w is not None and w is self._flyout and self.flyout_open())
+        return w is self or (w is not None and w is self._flyout and self._flyout_shown())
 
     def _owns(self, w) -> bool:
         """True if `w` (a popup menu) was opened from the popup, the flyout or their
@@ -740,7 +830,7 @@ class AgendaPopup(QWidget):
         if not fg:
             return None                 # in the middle of a switch: no opinion
         group = [self]
-        if self._flyout is not None and self.flyout_open():
+        if self._flyout_shown():
             group.append(self._flyout)
         if meeting_menus.is_open(self._menu):
             group.append(self._menu)
@@ -753,9 +843,11 @@ class AgendaPopup(QWidget):
         self._seen_foreground = False
         self.watchdog.stop()
         self.reclaim_check.stop()
+        self._stop_show_animation()
         self.last_hidden_at = self.clock()
         self.last_hidden_cursor = self.cursor_pos()
-        self.close_flyout(restore_focus=False)   # never outlives the popup
+        # Never outlives the popup: hidden at once, even mid-slide.
+        self.close_flyout(restore_focus=False, animate=False)
         self._notice.hide()
         super().hideEvent(e)
 

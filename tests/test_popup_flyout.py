@@ -9,6 +9,7 @@ from smartcal.ui import meeting_menus, placement, theme
 from smartcal.ui.flyout import WIDTH as FLY_WIDTH
 from smartcal.ui.flyout import DetailsFlyout
 from smartcal.ui.popup import BG_SELECTED, AgendaPopup
+from smartcal.ui.popup import WIDTH as POPUP_WIDTH
 from smartcal.ui.tray import TrayController
 from test_meeting_actions_ui import (DESC, NOW, SERIES, _menu_action, click, details,  # noqa: F401
                                      ev, open_details, opened, rows, settle_qt, store, titles,
@@ -50,7 +51,7 @@ def flushed():
 
 
 # -- placement ------------------------------------------------------------------------
-def test_click_row_opens_flyout_left_of_popup_aligned_with_row(qtbot, tmp_path):
+def test_click_row_opens_flyout_left_of_popup_same_size_top_aligned(qtbot, tmp_path):
     p = popup_on(qtbot, tmp_path, [ev("1", "A", 10), ev("2", "B", 11)])
     b = rows(p)[1]
     click(qtbot, b)
@@ -63,8 +64,9 @@ def test_click_row_opens_flyout_left_of_popup_aligned_with_row(qtbot, tmp_path):
     assert p.flyout_side == "left"
     assert g.right() + 1 + placement.GAP == pg.left()        # 6 px gap, no overlap
     assert not g.intersects(pg)
-    assert g.top() == row_top(b) and pg.top() < g.top() < pg.bottom()
-    assert g.width() == FLY_WIDTH
+    # v0.6.0: the popup's size, top aligned with it (no longer aligned with the row).
+    assert g.top() == pg.top() and g.size() == pg.size()
+    assert g.width() == FLY_WIDTH == POPUP_WIDTH
     assert AREA.contains(g)
 
 
@@ -100,11 +102,12 @@ def test_flyout_clamped_inside_work_area(qtbot, tmp_path):
                            -placement.MARGIN)
     assert inner.contains(g), (g, inner)
     assert g.height() <= small.height() - 2 * placement.MARGIN
-    assert g.top() < row_top(last)                     # pushed up to stay on screen
+    assert g.top() == p.geometry().top() and g.height() == p.height()
     # The popup moving (e.g. it grows) moves the flyout with it.
     p.show_notice("A notice that makes the popup taller than before")
     assert inner.contains(fly.geometry())
     assert fly.geometry().right() + 1 + placement.GAP == p.geometry().left()
+    assert fly.geometry().top() == p.geometry().top() and fly.height() == p.height()
 
 
 # -- selection ------------------------------------------------------------------------
@@ -119,7 +122,8 @@ def test_second_click_same_row_closes_flyout(qtbot, tmp_path):
     assert p.isVisible()
     click(qtbot, a)                                   # opens again, same instance
     fly = p.flyout()
-    click(qtbot, fly.close_button)                    # the ✕ closes and clears it too
+    assert not hasattr(fly, "close_button")           # v0.6.0: no ✕; Esc closes it too
+    qtbot.keyClick(fly, Qt.Key.Key_Escape)
     assert not fly.isVisible() and not a.is_selected() and p.isVisible()
 
 
@@ -145,7 +149,7 @@ def test_clicking_other_row_swaps_content_single_flyout_instance(qtbot, tmp_path
     click(qtbot, b)
     assert p.flyout() is fly and fly.isVisible()
     assert details(p).findChild(QLabel, "title").text() == "Beta"
-    assert fly.geometry().top() == row_top(b)
+    assert fly.geometry().top() == p.geometry().top()
     assert [r.is_selected() for r in rows(p)] == [False, True]
     flushed()
     assert len(ours(p)) == tops
@@ -344,7 +348,7 @@ def test_esc_order_flyout_chat_popup(qtbot, tmp_path):
     fly = p.flyout()
     assert fly.isVisible() and p.chat_expanded()
     qtbot.waitUntil(fly.isActiveWindow)               # keyboard open: focus is in the flyout
-    qtbot.keyClick(fly.close_button, Qt.Key.Key_Escape)   # Esc inside the flyout
+    qtbot.keyClick(QApplication.focusWidget(), Qt.Key.Key_Escape)   # Esc inside the flyout
     assert not fly.isVisible() and p.chat_expanded() and p.isVisible()
     qtbot.waitUntil(lambda: QApplication.focusWidget() is a)   # back on the row
     qtbot.keyClick(a, Qt.Key.Key_Escape)
@@ -368,14 +372,15 @@ def test_keyboard_enter_opens_flyout_and_focuses_it(qtbot, tmp_path):
     assert p.flyout() is fly and b.is_selected()
 
 
-def test_tab_order_in_flyout(qtbot, tmp_path):
+def test_tab_order_in_flyout_without_close_button(qtbot, tmp_path):
     z = "https://zoom.us/j/1"
     p = popup_on(qtbot, tmp_path, [ev("1", "A", 10, meeting_url=z, description=DESC)])
     qtbot.keyClick(rows(p)[0], Qt.Key.Key_Return)
     fly = p.flyout()
     d = details(p)
     chain = [d.findChild(QPushButton, "bigjoin"), d.findChild(QPushButton, "hide"),
-             d.findChild(QPushButton, "color"), fly.close_button]
+             d.findChild(QPushButton, "color")]
+    assert fly.findChild(QPushButton, "close") is None and not hasattr(fly, "close_button")
     qtbot.waitUntil(lambda: QApplication.focusWidget() is chain[0])
     seen = []
     for _ in chain:
@@ -386,7 +391,7 @@ def test_tab_order_in_flyout(qtbot, tmp_path):
     for _ in chain:
         qtbot.keyClick(QApplication.focusWidget(), Qt.Key.Key_Backtab)
         back.append(QApplication.focusWidget())
-    assert back == [chain[3], chain[2], chain[1], chain[0]]
+    assert back == [chain[2], chain[1], chain[0]]
     assert d.findChild(QTextBrowser, "description").focusPolicy() == Qt.FocusPolicy.ClickFocus
 
 

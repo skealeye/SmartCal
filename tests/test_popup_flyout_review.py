@@ -114,7 +114,7 @@ def test_close_flyout_when_activation_refused_hides_popup(qtbot, tmp_path):
     fly = open_details(qtbot, p, rows(p)[0])
     p.activateWindow = lambda: None                   # Windows refuses (foreground lock)
     p.active_window = lambda: fly if fly.isVisible() else None
-    click(qtbot, fly.close_button)
+    click(qtbot, rows(p)[0])                          # v0.6.0: no ✕; the row again closes
     assert not fly.isVisible() and p.reclaim_check.isActive()
     qtbot.waitUntil(lambda: not p.isVisible())        # the reclaim check closes it
 
@@ -123,7 +123,7 @@ def test_close_flyout_keeps_popup_when_focus_comes_back(qtbot, tmp_path):
     p = popup_on(qtbot, tmp_path, [ev("1", "A", 10)])
     fly = open_details(qtbot, p, rows(p)[0])
     p.active_window = lambda: fly if fly.isVisible() else p
-    click(qtbot, fly.close_button)
+    click(qtbot, rows(p)[0])
     qtbot.waitUntil(lambda: not p.reclaim_check.isActive())
     settle_qt()
     assert p.isVisible() and not fly.isVisible()
@@ -200,7 +200,8 @@ def test_production_focus_ping_pong_never_hides(qtbot, tmp_path):
 
 
 # -- list scrolling and the narrow-screen overlay ---------------------------------------------
-def test_flyout_follows_list_scrolling_and_closes_when_row_scrolls_away(qtbot, tmp_path):
+def test_flyout_stays_docked_on_list_scrolling_and_closes_when_row_scrolls_away(qtbot,
+                                                                                 tmp_path):
     area = QRect(0, 0, 1000, 400)
     events = [ev(str(i), f"Event {i}", 8 + i // 3, (i % 3) * 20) for i in range(20)]
     p = popup_on(qtbot, tmp_path, events, tray=QRect(980, 0, 20, 20), area=area)
@@ -208,10 +209,10 @@ def test_flyout_follows_list_scrolling_and_closes_when_row_scrolls_away(qtbot, t
     assert bar.maximum() > 100
     fly = open_details(qtbot, p, rows(p)[1])
     y0 = fly.y()
-    assert y0 == row_top(rows(p)[1])
-    bar.setValue(10)                                  # row 1 still in view: follows it
-    assert fly.isVisible()
-    assert fly.y() == max(area.top() + 8, row_top(rows(p)[1])) < y0
+    assert y0 == p.y()                                # v0.6.0: top aligned with the popup
+    bar.setValue(10)                                  # row 1 still in view: stays open
+    assert fly.isVisible() and p.selected_row() is rows(p)[1]
+    assert fly.y() == y0 == p.y()                   # ...and docked (not row-aligned)
     bar.setValue(bar.maximum())                       # scrolled out of view: closes
     assert not fly.isVisible() and p.selected_row() is None and p.isVisible()
 
@@ -244,7 +245,7 @@ def test_watchdog_tick_during_reclaim_grace_does_not_close_popup(qtbot, tmp_path
     p = popup_on(qtbot, tmp_path, [ev("1", "A", 10)])
     fly = open_details(qtbot, p, rows(p)[0])
     grace_hooks(p, fly)
-    click(qtbot, fly.close_button)
+    click(qtbot, rows(p)[0])
     assert p.reclaim_check.isActive() and p.active_window() is None
     p._watchdog_tick()                                # inside the grace: no decision
     p._settle()                                       # nor a stray one-pass settle
@@ -273,7 +274,7 @@ def test_hide_from_flyout_keeps_popup_open_and_shows_notice(qtbot, tmp_path):
     assert [r.title for r in p.rows()] == ["B"]
 
 
-def test_esc_and_close_button_twenty_times_never_close_popup(qtbot, tmp_path):
+def test_esc_and_row_click_twenty_times_never_close_popup(qtbot, tmp_path):
     from PyQt6.QtCore import Qt
     p = popup_on(qtbot, tmp_path, [ev("1", "A", 10), ev("2", "B", 11)])
     fly = open_details(qtbot, p, rows(p)[0])
@@ -282,9 +283,9 @@ def test_esc_and_close_button_twenty_times_never_close_popup(qtbot, tmp_path):
         p.select_row(rows(p)[i % 2])                  # open (or swap) the details
         assert fly.isVisible()
         if i % 2:
-            qtbot.keyClick(fly.close_button, Qt.Key.Key_Escape)
+            qtbot.keyClick(fly, Qt.Key.Key_Escape)
         else:
-            click(qtbot, fly.close_button)
+            click(qtbot, rows(p)[i % 2])              # the selected meeting again
         assert not fly.isVisible()
         p._watchdog_tick()
         settle_qt()
