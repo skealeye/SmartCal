@@ -11,7 +11,8 @@ from smartcal.ui.flyout import DetailsFlyout
 from smartcal.ui.popup import BG_SELECTED, AgendaPopup
 from smartcal.ui.tray import TrayController
 from test_meeting_actions_ui import (DESC, NOW, SERIES, _menu_action, click, details,  # noqa: F401
-                                     ev, opened, rows, store, titles)   # opened: fixture
+                                     ev, open_details, opened, rows, settle_qt, store, titles,
+                                     wait_active)   # opened: fixture
 
 AREA = QRect(0, 0, 1000, 800)
 TOP_TRAY = QRect(980, 0, 20, 20)        # taskbar at the top: rows sit near the top
@@ -19,6 +20,7 @@ BOTTOM_RIGHT = QRect(980, 780, 20, 20)
 
 
 def popup_on(qtbot, tmp_path, events, tray=TOP_TRAY, area=AREA):
+    settle_qt()                       # nothing left over from the previous test
     cache, settings = store(tmp_path, events)
     p = AgendaPopup(cache, settings)
     p.now = lambda: NOW
@@ -27,6 +29,7 @@ def popup_on(qtbot, tmp_path, events, tray=TOP_TRAY, area=AREA):
     p.refresh()
     p.show_near_tray(tray)
     qtbot.waitExposed(p)
+    wait_active(qtbot, p)
     return p
 
 
@@ -207,8 +210,7 @@ def test_inline_expansion_removed_rows_keep_height(qtbot, tmp_path):
 # -- focus / lifetime (popup + flyout are one group) -------------------------------------
 def test_clicking_inside_flyout_does_not_hide_popup(qtbot, tmp_path):
     p = popup_on(qtbot, tmp_path, [ev("1", "A", 10, description=DESC)])
-    click(qtbot, rows(p)[0])
-    fly = p.flyout()
+    fly = open_details(qtbot, p, rows(p)[0])
     p.active_window = lambda: fly                     # the click activated the flyout
     QApplication.sendEvent(p, QEvent(QEvent.Type.WindowDeactivate))
     click(qtbot, details(p).findChild(QLabel, "title"))
@@ -223,9 +225,7 @@ def test_clicking_inside_flyout_does_not_hide_popup(qtbot, tmp_path):
 
 def test_group_hides_when_neither_window_active(qtbot, tmp_path):
     p = popup_on(qtbot, tmp_path, [ev("1", "A", 10)])
-    click(qtbot, rows(p)[0])
-    fly = p.flyout()
-    qtbot.wait(50)
+    fly = open_details(qtbot, p, rows(p)[0])
     # No active window at all (another app took focus): closes one pass later.
     p.active_window = lambda: None
     p.app_active = lambda: False
@@ -235,8 +235,7 @@ def test_group_hides_when_neither_window_active(qtbot, tmp_path):
     # Another window (not the group's) is active: closes at once.
     p.active_window = QApplication.activeWindow       # real again while reopening
     p.show_near_tray(TOP_TRAY)
-    click(qtbot, rows(p)[0])
-    qtbot.wait(50)                                    # real activation settles first
+    open_details(qtbot, p, rows(p)[0])                # real activation settles first
     other = QWidget()
     qtbot.addWidget(other)
     p.active_window = lambda: other
@@ -246,8 +245,7 @@ def test_group_hides_when_neither_window_active(qtbot, tmp_path):
     # A transient "no active window" while focus moves popup -> flyout: stays open.
     p.active_window = QApplication.activeWindow
     p.show_near_tray(TOP_TRAY)
-    click(qtbot, rows(p)[0])
-    qtbot.wait(50)
+    open_details(qtbot, p, rows(p)[0])
     p.active_window = lambda: None
     QApplication.sendEvent(p, QEvent(QEvent.Type.WindowDeactivate))
     p.active_window = lambda: fly
@@ -267,10 +265,8 @@ def test_flyout_hides_when_popup_hides(qtbot, tmp_path, opened):
     for close in (lambda: p.hide(), focus_lost, lambda: rows(p)[0].join_button.click()):
         p.active_window = QApplication.activeWindow
         p.show_near_tray(TOP_TRAY)
-        click(qtbot, rows(p)[1])
-        fly = p.flyout()
+        fly = open_details(qtbot, p, rows(p)[1])
         assert fly.isVisible()
-        qtbot.wait(20)
         close()
         qtbot.waitUntil(lambda: not p.isVisible())
         assert not fly.isVisible()
@@ -310,8 +306,7 @@ def test_hide_from_flyout_closes_it(qtbot, tmp_path):
 
 def test_color_menu_from_flyout_keeps_group_open_and_recolors_row_and_flyout(qtbot, tmp_path):
     p = popup_on(qtbot, tmp_path, SERIES)
-    click(qtbot, rows(p)[0])
-    fly = p.flyout()
+    fly = open_details(qtbot, p, rows(p)[0])
     color_btn = details(p).findChild(QPushButton, "color")
     assert color_btn.text() == "Color… (series)"
     click(qtbot, color_btn)
@@ -422,10 +417,11 @@ def test_tray_toggle_guard_with_flyout(qtbot, tmp_path):
     p.cursor_pos = lambda: QPoint(985, 785)           # the click is on the tray icon
     tray = TrayController(p, _Worker(), cache, settings)
     tray._tray_rect = lambda: tray_rect
+    settle_qt()
     tray.toggle_popup()
     qtbot.waitExposed(p)
-    click(qtbot, rows(p)[0])
-    fly = p.flyout()
+    wait_active(qtbot, p)
+    fly = open_details(qtbot, p, rows(p)[0])
     # The flyout has focus; clicking the tray icon deactivates it: the group hides...
     p.active_window = lambda: None
     p.app_active = lambda: False

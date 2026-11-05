@@ -533,9 +533,13 @@ class AgendaPopup(QWidget):
             self._reactivate_after(modal)   # e.g. the "Undo anyway" confirm box
         elif menu is not None and not self._is_group_window(menu):
             self._reactivate_after(menu)    # the Hide…/Color… menu
-        elif active is None and self.flyout_open():
-            # Windows may report "no active window" for a moment while activation moves
-            # between the popup and the flyout: decide one event-loop pass later.
+        elif self.flyout_open() and (active is None or active is source):
+            # Not conclusive: "no active window" (Windows may report that for a moment
+            # while activation moves between the popup and the flyout), or the window
+            # that just lost activation still reported as active (the deactivation
+            # overtook the activation change, e.g. a late focus change from a window
+            # being destroyed). Re-read the state one event-loop pass later (_settle):
+            # the group closes only if neither of its windows is active then.
             self._settle_after_close()
         else:
             self.hide()

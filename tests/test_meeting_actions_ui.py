@@ -38,7 +38,33 @@ def store(tmp_path, events):
     return cache, Settings(tmp_path / "s.json")
 
 
+def settle_qt():
+    """Deliver everything Qt still has queued: deferred deletes of earlier tests' windows
+    and pending activation changes. Tests that fake the focus state (active_window, ...)
+    must not have stale real WindowActivate/WindowDeactivate events arrive later and be
+    judged against the fake."""
+    for _ in range(3):
+        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+        QApplication.processEvents()
+
+
+def wait_active(qtbot, window):
+    """Wait until the platform has made `window` the active one, then drain the queue.
+    (Offscreen activates a window when it is shown; the flyout's show included.)"""
+    qtbot.waitUntil(lambda: QApplication.activeWindow() is window)
+    settle_qt()
+
+
+def open_details(qtbot, p, row):
+    """Select `row` with the mouse and let the real activation finish before a test
+    starts faking focus state."""
+    click(qtbot, row)
+    wait_active(qtbot, p.flyout())
+    return p.flyout()
+
+
 def make_popup(qtbot, tmp_path, events, show=True):
+    settle_qt()                       # nothing left over from the previous test
     cache, settings = store(tmp_path, events)
     p = AgendaPopup(cache, settings)
     p.now = lambda: NOW
@@ -47,6 +73,7 @@ def make_popup(qtbot, tmp_path, events, show=True):
     if show:
         p.show_near_tray(QRect(700, 570, 20, 20))
         qtbot.waitExposed(p)
+        wait_active(qtbot, p)
     return p
 
 
@@ -230,7 +257,7 @@ def test_opening_flyout_is_fast(qtbot, tmp_path):
 
 # -- menus keep the popup open ------------------------------------------------------
 def _open_color_menu(qtbot, p):
-    click(qtbot, rows(p)[0])
+    open_details(qtbot, p, rows(p)[0])
     click(qtbot, details(p).findChild(QPushButton, "color"))
     QApplication.processEvents()      # deliver what the platform queued for the open menu
     return p.menu()
@@ -253,8 +280,11 @@ def test_menu_does_not_hide_popup(qtbot, tmp_path):
     menu.hide()
     qtbot.waitUntil(lambda: activated == [1])
     assert p.isVisible()
+    p.active_window = lambda: None                    # now another app takes focus
+    p.app_active = lambda: False
     QApplication.sendEvent(p, QEvent(QEvent.Type.WindowDeactivate))
-    assert not p.isVisible()                          # no menu any more: normal hide
+    qtbot.waitUntil(lambda: not p.isVisible())        # no menu any more: normal hide
+    assert not p.flyout().isVisible()
 
 
 # -- hide ---------------------------------------------------------------------------
