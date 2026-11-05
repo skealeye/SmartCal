@@ -52,6 +52,17 @@ def wait_ms(qtbot, ms):
     qtbot.waitUntil(lambda: clock.elapsed() > ms, timeout=ms + 2000)
 
 
+def frames(anim, steps=6):
+    """Drive a running animation deterministically: pause it and step its clock (each
+    step emits valueChanged, i.e. one frame); returns after the last in-between step,
+    with the animation paused there. resume() it (or let it be stopped) afterwards."""
+    anim.pause()
+    total = anim.duration()
+    for i in range(1, steps):
+        anim.setCurrentTime(total * i // steps)
+        yield i
+
+
 def layout_height(p) -> int:
     lay = p.layout()
     lay.activate()
@@ -315,8 +326,9 @@ def test_popup_height_tweens_to_measured_final_geometry(qtbot, tmp_path, animate
     p.refresh()
     assert p.height_animating() and p.final_height() > h0
     final = p.final_height()
-    heights = []
-    qtbot.waitUntil(lambda: heights.append(p.height()) or not p.height_animating())
+    heights = [p.height() for _ in frames(p.height_animation())]
+    p.height_animation().resume()
+    qtbot.waitUntil(lambda: not p.height_animating())
     assert p.height() == final and p.geometry() == p.docked_geometry()
     assert p.geometry().bottom() == bottom                    # grows away from the tray
     assert any(h0 < h < final for h in heights)               # really in between
@@ -387,14 +399,17 @@ def test_hidden_row_collapses_then_list_rebuilds(qtbot, tmp_path, animated):
     right_click(gone)
     _menu_action(p, meeting_menus.HIDE_ONE).trigger()          # no confirmation
     assert p.collapsing() and len(rows(p)) == 6                # still there, shrinking
-    qtbot.waitUntil(lambda: gone.height() < gone_h)            # mid-collapse
-    assert gone.graphicsEffect() is not None and gone.graphicsEffect().opacity() < 1
+    anim = p.height_animation()
+    for _ in frames(anim, 3):                                  # mid-collapse (gone is
+        assert gone.height() < gone_h                          # alive until the end)
+        assert gone.graphicsEffect().opacity() < 1
     assert p.notice_text() == ""                               # the notice comes after
+    anim.resume()
     settled(qtbot, p)
     assert titles(p) == [e.title for i, e in enumerate(MANY) if i != 1]
     assert p.notice_text() == meeting_menus.HIDDEN_NOTICE
     assert p.geometry().bottom() == bottom and p.height() >= layout_height(p)
-    assert p.height() != h0 or True                           # (popup not at its cap here)
+    assert p.height() == layout_height(p) != h0                # one row less, a notice more
     # Undo: the restored row fades in (user action), the others do not.
     p.notice_undo_button().click()
     restored = next(r for r in rows(p) if r.event.id == MANY[1].id)
@@ -440,8 +455,9 @@ def test_chat_expand_and_collapse_animate_height(qtbot, tmp_path, animated):
     p.toggle_chat()
     chat = p.chat()
     assert p.chat_expanded() and p.revealing(chat)
-    heights = []
-    qtbot.waitUntil(lambda: heights.append(p.height()) or not p.revealing(chat))
+    heights = [p.height() for _ in frames(p.height_animation())]
+    p.height_animation().resume()
+    qtbot.waitUntil(lambda: not p.revealing(chat))
     assert chat.isVisible() and chat.graphicsEffect() is None
     assert any(h0 < h < p.height() for h in heights)             # grew step by step
     assert p.geometry().bottom() == bottom and p.height() >= layout_height(p)
@@ -463,11 +479,13 @@ def test_flyout_crossfades_and_tweens_height_on_swap(qtbot, tmp_path, animated):
     click(qtbot, rows(p)[-1])
     assert fly.crossfading() and fly.findChild(QLabel, "ghost") is not None
     assert fly.height_animating() and fly.target_height() == p.height()
-    heights = []
-    qtbot.waitUntil(lambda: heights.append(fly.height()) or not fly.height_animating())
+    heights = [fly.height() for _ in frames(fly._height_anim)]
+    fly._height_anim.resume()
+    qtbot.waitUntil(lambda: not fly.height_animating())
     qtbot.waitUntil(lambda: not fly.crossfading())
     assert fly.height() == p.height() and any(h_short < h < p.height() for h in heights)
-    assert fly.findChild(QLabel, "ghost") is None and fly.body().graphicsEffect() is None
+    assert not fly.crossfading() and fly.body().graphicsEffect() is None
+    assert not [g for g in fly.findChildren(QLabel, "ghost") if g.isVisible()]
     assert fly.y() == p.y()
     img = fly.grab().toImage()                   # painted edge to edge, no black
     black = QColor("#000000").rgb()

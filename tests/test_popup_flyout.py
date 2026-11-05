@@ -64,8 +64,10 @@ def test_click_row_opens_flyout_left_of_popup_same_size_top_aligned(qtbot, tmp_p
     assert p.flyout_side == "left"
     assert g.right() + 1 + placement.GAP == pg.left()        # 6 px gap, no overlap
     assert not g.intersects(pg)
-    # v0.6.0: the popup's size, top aligned with it (no longer aligned with the row).
-    assert g.top() == pg.top() and g.size() == pg.size()
+    # Top aligned with the popup (no longer with the row); v0.8.0: its width, and as
+    # tall as its content (at most the popup's height).
+    assert g.top() == pg.top() and g.width() == pg.width()
+    assert g.height() == min(pg.height(), fly.content_height())
     assert g.width() == FLY_WIDTH == POPUP_WIDTH
     assert AREA.contains(g)
 

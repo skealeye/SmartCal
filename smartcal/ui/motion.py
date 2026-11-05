@@ -111,12 +111,12 @@ def curve(kind: str):
 
 
 def alive(anim) -> bool:
-    """A QVariantAnimation that still exists and is running."""
+    """A QVariantAnimation that still exists and is running (or paused mid-way)."""
     if anim is None:
         return False
     try:
         from PyQt6.QtCore import QAbstractAnimation
-        return anim.state() == QAbstractAnimation.State.Running
+        return anim.state() != QAbstractAnimation.State.Stopped
     except RuntimeError:
         return False
 

@@ -39,7 +39,7 @@ DESCRIPTION_MIN_LINES = 3       # the description fills the rest of the panel; a
 HEADER_TEXT = "Meeting details"
 # Tab order inside the panel (whichever exist for the meeting).
 TAB_CHAIN = ("bigjoin",)
-MIN_HEIGHT = 120                # the panel is never shorter than this
+MIN_HEIGHT = 96                 # the panel is never shorter than this
 
 
 def _set_scroll(box, value: int) -> None:
@@ -198,7 +198,11 @@ class DetailsFlyout(QWidget):
         # fades out on top), with the micro-animations on.
         crossfade = (old is not None and self.isVisible() and not self.closing()
                      and motion.micro_enabled())
-        ghost = old.grab() if crossfade else None
+        # A swap during a swap: the previous fade ends first, so the snapshot is of
+        # the fully shown content, never a half-transparent frame.
+        self._end_crossfade()
+        ghost = self._grab(old) if crossfade else None
+        ghost_rect = QRect(old.pos(), old.size()) if crossfade else None
         if old is not None:
             box = old.findChild(QTextBrowser, "description")
             if same_meeting and box is not None:
@@ -213,7 +217,7 @@ class DetailsFlyout(QWidget):
         self._scroll.setWidget(self._build(ev))
         self._fix_tab_order()
         if ghost is not None:
-            self._crossfade(ghost)
+            self._crossfade(ghost, ghost_rect)
         if refocus:
             w = self.body().findChild(QWidget, refocus)
             (w or self.first_control()).setFocus()
@@ -295,8 +299,12 @@ class DetailsFlyout(QWidget):
             # Full width, never wider than the panel, whatever the label's font metrics.
             join.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
             lay.addWidget(join)
-        # v0.8.0: no Hide…/Color… here (right-click the meeting instead), and no stretch:
-        # the panel's height fits its content (see content_height).
+        # v0.8.0: no Hide…/Color… here (right-click the meeting instead). The panel's
+        # height fits its content (content_height); without notes, any spare height
+        # (the MIN_HEIGHT floor, a shrink in progress) stays below, never between the
+        # lines (a QLabel given extra height centers its text).
+        if not has_desc:
+            lay.addStretch(1)
         return box
 
     # -- fitted height ---------------------------------------------------------
@@ -305,7 +313,9 @@ class DetailsFlyout(QWidget):
         color bar and the body at its natural height (the description fully wrapped).
         The popup caps it at its own height (the description then scrolls). Measured
         once per content (the popup asks on every move/resize frame)."""
-        key = (self._shown_key, self.builds)
+        screen = self.screen()
+        key = (self._shown_key, self.builds, self.devicePixelRatioF(),
+               screen.name() if screen is not None else "")   # a new screen: re-measure
         if self._content_h is not None and self._content_h[0] == key:
             return self._content_h[1]
         h = self._measure_content_height()
@@ -339,16 +349,27 @@ class DetailsFlyout(QWidget):
         if self._height_target == target_h and (self.height() == target_h
                                                 or self.height_animating()):
             return
-        motion.stop(self._height_anim)
-        self._height_anim = None
+        self._stop_height_anim()
         self._height_target = target_h
         ms = motion.micro_duration(motion.NORMAL) \
             if animate and self.isVisible() and not self._closing else 0
         if not ms or self.height() == target_h:
             self._resize_height(target_h)
             return
+        if self.body() is not None and self.content_height() <= target_h:
+            # The content fits at the end: no scrollbar flashing in between.
+            self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._height_anim = motion.tween(self, self.height(), target_h, ms,
-                                         self._resize_height)
+                                         self._resize_height, self._height_anim_done)
+
+    def _height_anim_done(self) -> None:
+        self._height_anim = None
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+    def _stop_height_anim(self) -> None:
+        motion.stop(self._height_anim)
+        self._height_anim = None
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
     def target_height(self) -> int:
         return self._height_target if self._height_target is not None else self.height()
@@ -361,15 +382,22 @@ class DetailsFlyout(QWidget):
             self.setFixedSize(self.width(), h)
             self._update_mask()
 
-    def _crossfade(self, ghost) -> None:
-        """The old content (a snapshot) fades out over the new one, which fades in."""
+    def _grab(self, widget):
+        """The snapshot for a cross-fade (a seam for tests: e.g. a 1.5x pixmap)."""
+        return widget.grab()
+
+    def _crossfade(self, ghost, rect: QRect) -> None:
+        """The old content (a snapshot) fades out over the new one, which fades in. The
+        snapshot sits exactly where the old content was (`rect`, logical pixels; the
+        pixmap may be 1.25x/1.5x in device pixels), top-left aligned."""
         from PyQt6.QtWidgets import QGraphicsOpacityEffect
         self._end_crossfade()
         view = self._scroll.viewport()
         label = QLabel(view)
         label.setObjectName("ghost")
+        label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         label.setPixmap(ghost)
-        label.setGeometry(0, 0, ghost.width(), ghost.height())
+        label.setGeometry(rect)
         label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         out_fx = QGraphicsOpacityEffect(label)
         out_fx.setOpacity(1.0)
@@ -662,8 +690,7 @@ class DetailsFlyout(QWidget):
 
     def hideEvent(self, e):
         self._stop_animations()         # never keeps moving a hidden window
-        motion.stop(self._height_anim)  # ...nor resizing or fading one
-        self._height_anim = None
+        self._stop_height_anim()        # ...nor resizing or fading one
         if self._height_target is not None and self.height() != self._height_target:
             self.setFixedSize(self.width(), self._height_target)
         self._end_crossfade()

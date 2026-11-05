@@ -113,11 +113,8 @@ class AgendaPopup(QWidget):
         self._accounts: list[str] | None = None
         # v0.8.0 motion: the popup's height tween, widgets sliding open/closed (notice,
         # chat), rows collapsing after a hide, and rows fading in. All stopped on hide.
-        self._height_anim = None
-        self._tween_chrome: int | None = None
-        self._reveals: dict = {}            # widget -> its running reveal animation
-        self._collapse_anim = None
-        self._collapse_done = None
+        self._tween: dict | None = None     # the running height tween (see _start_tween)
+        self._geom_change = False           # inside our own one-call geometry change
         self._fade_anims: list = []
         self._chat_open = False
         self._chat = None
@@ -131,6 +128,9 @@ class AgendaPopup(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.setStyleSheet(theme.window_style("popup"))
         outer = QVBoxLayout(self)
+        # The window size is set by _resize/_set_height only (measured, then one
+        # geometry change); the layout never resizes the window by itself.
+        outer.setSizeConstraint(QVBoxLayout.SizeConstraint.SetNoConstraint)
         outer.setContentsMargins(10, 10, 10, 8)
         outer.setSpacing(6)
         self._header = QLabel()
@@ -327,7 +327,8 @@ class AgendaPopup(QWidget):
         return list(self._rows)
 
     def row_widgets(self) -> list[QWidget]:
-        return [self._rows_box.itemAt(i).widget() for i in range(self._rows_box.count())]
+        items = (self._rows_box.itemAt(i) for i in range(self._rows_box.count()))
+        return [it.widget() for it in items if it.widget() is not None]
 
     def header_text(self) -> str:
         return self._header.text()
@@ -371,6 +372,8 @@ class AgendaPopup(QWidget):
         self._next.setText(self._next_line)
         self._next.setVisible(bool(nxt))
 
+        hovered_key = next((_row_key(r.event) for r in self.row_widgets()
+                            if isinstance(r, AgendaRow) and r.is_hovered()), None)
         while self._rows_box.count():
             item = self._rows_box.takeAt(0)
             if item.widget():
@@ -382,16 +385,23 @@ class AgendaPopup(QWidget):
             is_next = nxt is not None and ev.id == nxt.id and ev.account == nxt.account
             time_text = "All day" if ev.all_day else f"{ev.start:%I:%M %p}".lstrip("0")
             self._rows.append(RowInfo(ev.title, is_next, time_text))
-            row = self._make_row(ev, time_text, is_next)
+            key = _row_key(ev)
+            # Built in their final look (selected, under the mouse): a refresh that
+            # changed nothing starts no fade at all.
+            row = self._make_row(ev, time_text, is_next,
+                                 selected=self._selected_key == key,
+                                 hovered=key == hovered_key)
             self._rows_box.addWidget(row)
             # Shown now, not on Qt's deferred show: a row added to a visible popup stays
             # hidden until the next event-loop pass, and a layout skips hidden widgets,
             # so _resize below would measure an empty list and size it to one row.
             row.show()
-            if self._selected_key is not None and _row_key(ev) == self._selected_key:
+            if self._selected_key is not None and key == self._selected_key:
                 selected = row
+        # Rows stay at the top; spare list height stays below them (never stretches
+        # rows while the list is taller than its rows, e.g. during a shrink).
+        self._rows_box.addStretch(1)
         if selected is not None:   # a refresh keeps the selected meeting's details open
-            selected.set_selected(True)
             if self.flyout_open():
                 # Rebuilt only if what it shows changed (the 30 s tick and syncs mostly
                 # change nothing: scroll position, selection and presses survive).
@@ -415,17 +425,14 @@ class AgendaPopup(QWidget):
         self._scroll.setVisible(bool(events))
         self._resize()
 
-    def _resize(self, animate: bool = True) -> None:
-        """Cap the list height (header/footer stay visible), then re-anchor if shown.
-        The final size is always measured first (rows already shown, see _refresh);
-        with `animate` and the micro-animations on, a shown popup then tweens from its
-        current height to that final height (the edge next to the tray stays put)."""
-        motion.stop(self._height_anim)
-        self._height_anim = None
-        self._tween_chrome = None
+    # -- measuring, and the popup's height tween ---------------------------------------
+    def _measure(self) -> tuple[int | None, int | None, int]:
+        """Measure the final layout once: (list height or None when the list is not
+        used, window height or None without height-for-width, list content height).
+        Leaves the list at its final fixed height; never touches the window geometry
+        (the popup's layout has no size constraint: the window size is ours to set)."""
         lay = self.layout()
-        old_h = self.height()
-        final_list = None
+        final_list, content_h = None, 0
         if not (self._scroll.isHidden() and not self._rows):
             max_total = min(MAX_HEIGHT, self._area().height() - 24)
             self._scroll.setFixedHeight(0)
@@ -443,110 +450,193 @@ class AgendaPopup(QWidget):
             final_list = max(40, min(content_h, max_total - chrome))
             self._scroll.setFixedHeight(final_list)
         lay.activate()
+        final_h = None
         if lay.hasHeightForWidth():
             # Not adjustSize(): it measures wrapped lines at the layout's preferred
             # width (wider than the popup's fixed WIDTH), so a wrapped "Next:" line or
             # notice got fewer lines than it needs and the popup came out too short.
             final_h = max(lay.totalHeightForWidth(WIDTH), lay.minimumSize().height())
-        else:
-            final_h = None
+        return final_list, final_h, content_h
+
+    def _can_tween(self) -> bool:
+        return (self.isVisible() and self._anchored and not self.showing_animated()
+                and motion.micro_enabled())
+
+    def _resize(self, animate: bool = True) -> None:
+        """Cap the list height (header/footer stay visible), then re-anchor if shown.
+        The final size is always measured first (rows already shown, see _refresh);
+        with `animate` and the micro-animations on, a shown popup whose list changed
+        height tweens there (the list absorbs the change; the edge next to the tray
+        stays put). An unchanged height never animates."""
+        self._stop_tween()
+        h0, l0 = self.height(), self._scroll.height()
+        list_before = not self._scroll.isHidden()
+        final_list, final_h, content_h = self._measure()
         self._final_height = final_h
-        ms = 0
-        if animate and final_list is not None and final_h is not None \
-                and final_h != old_h and self.isVisible() and self._anchored \
-                and not self.showing_animated():
-            ms = motion.micro_duration(motion.NORMAL)
-        if ms:
-            # The list absorbs the difference frame by frame: the window is resized by
-            # geometry only (no measuring per frame) and never shows a blank band.
-            self._tween_chrome = final_h - final_list
-            self._apply_height(old_h)
-            self._height_anim = motion.tween(self, old_h, final_h, ms, self._apply_height,
-                                             self._height_done)
+        if (animate and final_h is not None and final_list is not None and list_before
+                and final_h != h0 and h0 - l0 == final_h - final_list and self._can_tween()):
+            self._scroll.setFixedHeight(l0)
+            self._start_tween("list", h0, final_h, l0, final_list, content_h <= final_list)
             return
         if final_h is not None:
-            self.resize(WIDTH, final_h)
+            self._set_height(final_h)
         else:
             self.adjustSize()
-        if self.isVisible() and self._anchored:
-            self._place()
+            if self.isVisible() and self._anchored:
+                self._place()
+
+    def _set_height(self, h: int) -> None:
+        """The window at height `h`, docked (compute_position for that size): ONE
+        native geometry change (never a resize then a move, which made the tray-side
+        edge bounce); newly exposed pixels are painted in the same frame. The details
+        panel follows once."""
+        size = QSize(WIDTH, int(h))
+        if not (self.isVisible() and self._anchored):
+            self.resize(size)
+            return
+        pos = placement.compute_position(size, self._tray_geom, self._area())
+        if self.showing_animated():             # the slide owns the position
+            self.resize(size)
+            self._show_slide.setEndValue(pos)
+            self._place_flyout()
+            return
+        grow = size.height() > self.height()
+        if QRect(pos, size) != self.geometry():
+            self._geom_change = True
+            try:
+                self.setGeometry(QRect(pos, size))
+            finally:
+                self._geom_change = False
+            self._place_flyout()
+        if grow:
+            self.repaint()
 
     def final_height(self) -> int:
         """The height the popup has, or is tweening to."""
         return self._final_height if self._final_height is not None else self.height()
 
     def height_animating(self) -> bool:
-        return motion.alive(self._height_anim)
+        return self._tween is not None and motion.alive(self._tween["anim"])
 
-    def _apply_height(self, h) -> None:
-        h = int(h)
-        if self._tween_chrome is not None:
-            self._scroll.setFixedHeight(max(0, h - self._tween_chrome))
-            self.layout().activate()
-        self.resize(WIDTH, h)
-        if self.isVisible() and self._anchored:
-            self._place()
+    def height_animation(self):
+        """The running height tween (QVariantAnimation, progress 0..1) or None."""
+        return self._tween["anim"] if self._tween is not None else None
 
-    def _height_done(self) -> None:
-        self._height_anim = None
-        self._tween_chrome = None
-        self._resize(animate=False)     # lands exactly on the measured final size
+    def _start_tween(self, kind: str, h0: int, h1: int, l0: int, l1: int, fits: bool,
+                     frame=None, finish=None, w=None) -> None:
+        """Tween the window from h0 to h1 and the list from l0 to l1 (both linear in
+        the eased progress, so they always add up), calling frame(e) for the widget
+        being revealed or the rows collapsing. Only geometry changes per frame: the
+        final layout was measured before. `finish` runs once, at the end or when the
+        tween is interrupted (it snaps its widgets to their final state)."""
+        ms = motion.micro_duration(motion.NORMAL)
+        if fits:
+            # The final list shows every row: no scrollbar flashing in between.
+            self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._tween = {"kind": kind, "h0": h0, "h1": h1, "l0": l0, "l1": l1,
+                       "frame": frame, "finish": finish, "w": w, "anim": None}
+        tw = self._tween
+        tw["anim"] = motion.tween(self, 0.0, 1.0, ms, lambda e, t=tw: self._tween_frame(t, e),
+                                  lambda t=tw: self._tween_done(t),
+                                  kind="leave" if kind == "collapse" else "resize")
+
+    def _tween_frame(self, tw, e) -> None:
+        if self._tween is not tw:
+            return
+        e = float(e)
+        if tw["frame"] is not None:
+            tw["frame"](e)
+        self._scroll.setFixedHeight(max(0, round(tw["l0"] + (tw["l1"] - tw["l0"]) * e)))
+        self._set_height(round(tw["h0"] + (tw["h1"] - tw["h0"]) * e))
+
+    def _tween_done(self, tw) -> None:
+        if self._tween is not tw:
+            return
+        self._end_tween(tw)
+        self._resize(animate=False)     # lands exactly on the measured final layout
+
+    def _end_tween(self, tw) -> None:
+        self._tween = None
+        motion.stop(tw["anim"])
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        if tw["finish"] is not None:
+            tw["finish"]()
+
+    def _stop_tween(self) -> None:
+        """Interrupt the running tween (if any): its widgets snap to their final state."""
+        tw = self._tween
+        if tw is not None:
+            self._end_tween(tw)
 
     # -- widgets sliding open / closed, rows collapsing and fading in ----------------
     def _natural_height(self, w) -> int:
+        w.ensurePolished()
         inner = WIDTH - 20
         if w.hasHeightForWidth():
             return max(1, w.heightForWidth(inner))
         return max(1, w.sizeHint().height())
 
     def revealing(self, w=None) -> bool:
-        if w is None:
-            return any(motion.alive(a) for a in self._reveals.values())
-        return motion.alive(self._reveals.get(w))
+        tw = self._tween
+        if tw is None or tw["kind"] != "reveal" or not motion.alive(tw["anim"]):
+            return False
+        return w is None or tw["w"] is w
 
     def _reveal(self, w, show: bool, on_done=None) -> None:
-        """Show (or hide) `w` inside the popup: its height opens from 0 (or closes to 0)
-        while it fades, motion.NORMAL; the popup's height follows every frame. Without
-        the micro-animations (or with the popup hidden) it is shown/hidden at once."""
-        self._end_reveal(w)
-        ms = motion.micro_duration(motion.NORMAL) \
-            if self.isVisible() and self._anchored and not self.showing_animated() else 0
-        if not ms or (not show and w.isHidden()):
+        """Show (or hide) `w` inside the popup: its height opens from where it is to its
+        natural height (or closes to 0) while it fades, motion.NORMAL; the window's
+        height follows. Reversing mid-way continues from the current height and
+        opacity. Without the micro-animations (or with the popup hidden) at once."""
+        fx = w.graphicsEffect()
+        cur_op = fx.opacity() if isinstance(fx, QGraphicsOpacityEffect) else (
+            0.0 if w.isHidden() else 1.0)
+        cur_h = 0 if w.isHidden() else w.height()
+        self._stop_tween()                      # (snaps a running reveal: restored below)
+        if not self._can_tween() or (not show and w.isHidden() and cur_h == 0):
+            self._clear_reveal(w)
             w.setVisible(show)
             if on_done is not None:
                 on_done()
             self._resize()
             return
-        natural = self._natural_height(w) if show else max(1, w.height())
-        if show:
-            w.setMaximumHeight(0)
-            w.show()
+        h0, l0 = self.height(), self._scroll.height()
+        # The final layout, measured once.
+        self._clear_reveal(w)
+        w.setVisible(show)
+        natural = self._natural_height(w) if show else 0
+        l1, h1, content_h = self._measure()
+        self._final_height = h1
+        if l1 is None or h1 is None:
+            if on_done is not None:
+                on_done()
+            self._resize(animate=False)
+            return
+        # Back to where it is now.
+        self._scroll.setFixedHeight(l0)
+        w.show()
+        w.setMinimumHeight(1)                   # lets the layout give it less
+        w.setMaximumHeight(max(1, cur_h))
         fx = QGraphicsOpacityEffect(w)
-        fx.setOpacity(0.0 if show else 1.0)
+        fx.setOpacity(cur_op)
         w.setGraphicsEffect(fx)
-        w.setMinimumHeight(1)            # lets the layout give it less than its minimum
-        start, end = (0, natural) if show else (max(1, w.height()), 0)
+        self.layout().activate()
+        target_op = 1.0 if show else 0.0
 
-        def step(v, w=w, fx=fx, natural=natural) -> None:
-            v = int(v)
-            w.setMaximumHeight(max(1, v))
+        def frame(e, w=w, fx=fx) -> None:
             try:
-                fx.setOpacity(min(1.0, v / natural))
+                w.setMaximumHeight(max(1, round(cur_h + (natural - cur_h) * e)))
+                fx.setOpacity(cur_op + (target_op - cur_op) * e)
             except RuntimeError:
                 pass
-            self._resize(animate=False)
 
-        def done(w=w, show=show) -> None:
-            self._reveals.pop(w, None)
+        def finish(w=w) -> None:
             self._clear_reveal(w)
             if not show:
                 w.hide()
             if on_done is not None:
                 on_done()
-            self._resize(animate=False)
 
-        self._reveals[w] = motion.tween(self, start, end, ms, step, done,
-                                        kind="enter" if show else "leave")
+        self._start_tween("reveal", h0, h1, l0, l1, content_h <= l1, frame, finish, w)
 
     @staticmethod
     def _clear_reveal(w) -> None:
@@ -557,61 +647,63 @@ class AgendaPopup(QWidget):
         except RuntimeError:
             pass
 
-    def _end_reveal(self, w) -> None:
-        anim = self._reveals.pop(w, None)
-        if anim is not None:
-            motion.stop(anim)
-            self._clear_reveal(w)
-
     def _end_all_reveals(self) -> None:
         """Hidden: every widget jumps to its final state (shown or hidden)."""
-        for w in list(self._reveals):
-            self._end_reveal(w)
+        self._stop_tween()
         if self._chat is not None:
+            self._clear_reveal(self._chat)
             self._chat.setVisible(self._chat_open)
+        self._clear_reveal(self._notice_box)
         self._notice_box.setVisible(self._notice_shown)
         if not self._notice_shown:
             self._notice.setText("")
 
     def collapsing(self) -> bool:
-        return motion.alive(self._collapse_anim)
+        tw = self._tween
+        return tw is not None and tw["kind"] == "collapse" and motion.alive(tw["anim"])
 
     def _collapse_rows(self, rows, on_done) -> None:
         """Rows just hidden by the owner shrink to nothing while fading (motion.NORMAL),
-        then `on_done` rebuilds the list. At once without the micro-animations."""
-        self._finish_collapse()
-        ms = motion.micro_duration(motion.NORMAL) if rows and self.isVisible() else 0
-        if not ms:
+        the list and window shrinking with them; then `on_done` rebuilds the list. At
+        once without the micro-animations."""
+        self._stop_tween()
+        if not rows or not self._can_tween():
+            on_done()
+            return
+        h0, l0 = self.height(), self._scroll.height()
+        heights = [max(1, r.height()) for r in rows]
+        for r in rows:                          # measure the list without them, once
+            r.hide()
+        l1, h1, content_h = self._measure()
+        for r in rows:
+            r.show()
+        self._scroll.setFixedHeight(l0)
+        if l1 is None or h1 is None:
             on_done()
             return
         fxs = []
-        for r in rows:
+        for r, h in zip(rows, heights):
             fx = QGraphicsOpacityEffect(r)
             r.setGraphicsEffect(fx)
             r.setMinimumHeight(1)
-            fxs.append((r, fx, max(1, r.height())))
+            fxs.append((r, fx, h))
+        self.layout().activate()
 
-        def step(t) -> None:
+        def frame(e) -> None:
             for r, fx, h in fxs:
                 try:
-                    r.setMaximumHeight(max(1, round(h * (1.0 - t))))
-                    fx.setOpacity(max(0.0, 1.0 - t))
+                    r.setMaximumHeight(max(1, round(h * (1.0 - e))))
+                    fx.setOpacity(max(0.0, 1.0 - e))
                 except RuntimeError:
                     pass
-            self._resize(animate=False)
 
-        self._collapse_done = on_done
-        self._collapse_anim = motion.tween(self, 0.0, 1.0, ms, step,
-                                           self._finish_collapse, kind="leave")
+        self._start_tween("collapse", h0, h1, l0, l1, content_h <= l1, frame, on_done)
 
     def _finish_collapse(self) -> None:
         """End a running collapse (finished, or interrupted by a refresh or a hide) and
         run its follow-up once."""
-        motion.stop(self._collapse_anim)
-        self._collapse_anim = None
-        done, self._collapse_done = self._collapse_done, None
-        if done is not None:
-            done()
+        if self.collapsing():
+            self._stop_tween()
 
     def _fade_in(self, rows) -> None:
         self._fade_anims = [a for a in self._fade_anims if motion.alive(a)]
@@ -640,30 +732,42 @@ class AgendaPopup(QWidget):
     def fading_in(self) -> bool:
         return any(motion.alive(a) for a in self._fade_anims)
 
+    def row_fades_running(self) -> bool:
+        """Any row (hover/press/selection) or its Join button still fading."""
+        for r in self.row_widgets():
+            if isinstance(r, AgendaRow) and r.fading():
+                return True
+        return False
+
     def animations_running(self) -> bool:
         """Any of the popup's own animations (opening slide, height, reveal, collapse,
-        fade-in) still running."""
+        fade-in, row and button fades) still running."""
         return (self.showing_animated() or self.height_animating() or self.revealing()
-                or self.collapsing() or self.fading_in())
+                or self.collapsing() or self.fading_in() or self.row_fades_running())
 
     def tile_style(self) -> str:
         style = getattr(self.settings, "tile_style", "stripe")
         return style if style in theme.TILE_STYLES else "stripe"
 
-    def _make_row(self, ev, time_text: str, is_next: bool) -> "AgendaRow":
+    def _make_row(self, ev, time_text: str, is_next: bool, selected: bool = False,
+                  hovered: bool = False) -> "AgendaRow":
         row = AgendaRow(ev, time_text, is_next, theme.effective_color(ev, self.settings),
-                        style=self.tile_style())
+                        style=self.tile_style(), selected=selected, hovered=hovered)
         url = getattr(ev, "meeting_url", None)
         if safe_http_url(url) is not None:     # same check as the click handler
             if row.style == "fill":
                 # On any fill: the button in the text color, its label in the fill
-                # color (the same >= 4.5:1 pair as the row's text).
-                colors = (row.fg, theme.mix(row.fg, row.color, 0.2), row.color)
+                # color (the same >= 4.5:1 pair as the row's text); hover and press
+                # shade it only as far as that pair stays >= 4.5:1.
+                hover = theme.shade_keeping_contrast(row.fg, row.color, row.color)
+                pressed = theme.shade_keeping_contrast(row.fg, row.color, row.color,
+                                                       (0.25, 0.18, 0.1, 0.05))
+                colors = (row.fg, hover, row.color)
             else:
-                colors = (theme.LINK, "#a9c8ff", "#0b0d10")
-            join = HoverButton("Join", *colors,
-                               extra="font-size:11px;font-weight:bold;padding:2px 8px;"
-                                     "border-radius:3px;")
+                colors, pressed = (theme.LINK, "#a9c8ff", "#0b0d10"), None
+            join = HoverButton("Join", *colors, pressed=pressed, radius=3,
+                               extra="font-size:11px;font-weight:bold;padding:2px 8px;",
+                               parent=row)
             join.setObjectName("join")
             join.setToolTip(meeting_label(url))
             join.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -850,11 +954,13 @@ class AgendaPopup(QWidget):
 
     def moveEvent(self, e):
         super().moveEvent(e)
-        self._place_flyout()
+        if not self._geom_change:       # _set_height places the panel once itself
+            self._place_flyout()
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        self._place_flyout()
+        if not self._geom_change:
+            self._place_flyout()
 
     # -- the right-click menu ---------------------------------------------------
     def menu(self):
@@ -936,6 +1042,9 @@ class AgendaPopup(QWidget):
 
     def hide_meeting(self, ev, scope: str) -> None:
         """Hide at once (no confirmation); the notice offers Undo."""
+        # A hide still collapsing finishes first (its rows go, its notice shows), so
+        # this one is measured from the real list and collapses smoothly too.
+        self._finish_collapse()
         try:
             key = self.settings.hide_event(ev, scope)
         except OSError:                 # rolled back by Settings; say so, change nothing
@@ -991,9 +1100,13 @@ class AgendaPopup(QWidget):
             self.notice_timer.stop()
         if bool(text) != was_shown:
             self._reveal(self._notice_box, bool(text),
-                         on_done=None if text else (lambda: self._notice.setText("")))
+                         on_done=None if text else self._clear_notice_text)
         else:
             self._resize()
+
+    def _clear_notice_text(self) -> None:
+        if not self._notice_shown:      # (a new notice may have come in meanwhile)
+            self._notice.setText("")
 
     def notice_text(self) -> str:
         return self._notice.text() if self._notice_shown else ""
@@ -1232,10 +1345,7 @@ class AgendaPopup(QWidget):
         self.close_flyout(restore_focus=False, animate=False)
         # Every animation stops; everything jumps to its final state (no handler runs
         # after the hide, nothing keeps a timer going).
-        motion.stop(self._height_anim)
-        self._height_anim = None
-        self._tween_chrome = None
-        self._finish_collapse()
+        self._stop_tween()              # a collapse's follow-up (the hide) still runs
         for a in self._fade_anims:
             motion.stop(a)
         self._fade_anims = []
@@ -1280,7 +1390,7 @@ class AgendaRow(QFrame):
     menu_requested = pyqtSignal(object, QPoint)   # row, global position (right-click)
 
     def __init__(self, ev, time_text: str, is_next: bool, color: str, parent=None,
-                 style: str = "stripe"):
+                 style: str = "stripe", selected: bool = False, hovered: bool = False):
         super().__init__(parent)
         self.event = ev
         self.join_button: QPushButton | None = None
@@ -1288,7 +1398,9 @@ class AgendaRow(QFrame):
         self.color = color
         self.style = style if style in theme.TILE_STYLES else "stripe"
         self.fg = theme.text_on(color) if self.style == "fill" else theme.TEXT
-        self._selected = self._hovered = self._pressed = False
+        # Built in its final state: no fade when a refresh re-creates a selected row or
+        # the row under the mouse.
+        self._selected, self._hovered, self._pressed = bool(selected), bool(hovered), False
         self._bg_anim = None
         self.setObjectName("row")
         self._bg = QColor(self.target_background())
@@ -1299,17 +1411,19 @@ class AgendaRow(QFrame):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0 if self.style == "stripe" else 8, 0, 4, 0)
         lay.setSpacing(6)
-        stripe = QFrame()
+        # Every child is created with this row as its parent: a parentless widget that
+        # is shown would open as a window of its own (v0.8.0 had that with the stripe).
+        stripe = QFrame(self)
         stripe.setObjectName("stripe")
         stripe.setFixedWidth(4)
         stripe.setStyleSheet(f"background:{color};border-radius:2px;")
         lay.addWidget(stripe)
-        if self.style != "stripe":      # (never setVisible(True) on it here: it has no
-            stripe.hide()               # parent yet and would open as its own window)
+        if self.style != "stripe":
+            stripe.hide()
         self._body = QVBoxLayout()
         self._body.setContentsMargins(0, 0, 0, 0)
         self._body.setSpacing(0)
-        self.head = QWidget()
+        self.head = QWidget(self)
         self.head.setObjectName("rowhead")
         self.head_layout = QHBoxLayout(self.head)
         self.head_layout.setContentsMargins(0, 0, 0, 0)
@@ -1319,7 +1433,7 @@ class AgendaRow(QFrame):
         col.setSpacing(0)
         # Time and title only: the calendar (often just the owner's email) is in the
         # details panel when it says something; the stripe (or fill) shows the color.
-        top = QLabel(f"<b>{time_text}</b>  {_esc(ev.title)}")
+        top = QLabel(f"<b>{time_text}</b>  {_esc(ev.title)}", self.head)
         top.setObjectName("title")
         top.setTextFormat(Qt.TextFormat.RichText)
         top.setWordWrap(True)
@@ -1335,12 +1449,13 @@ class AgendaRow(QFrame):
         """The color the background is (or is fading) toward for the current state,
         as #rrggbb, or "transparent"."""
         if self.style == "fill":
-            base = self.color
+            # Hover/press shade AWAY from the text color: the text only gains contrast.
+            away = theme.ON_LIGHT if self.fg == theme.ON_DARK else theme.ON_DARK
             if self._pressed:
-                return theme.mix(base, self.fg, 0.22)
+                return theme.mix(self.color, away, 0.22)
             if self._hovered:
-                return theme.mix(base, self.fg, 0.10)
-            return QColor(base).name()
+                return theme.mix(self.color, away, 0.10)
+            return QColor(self.color).name()
         if self._selected:
             base = BG_SELECTED
         elif self.is_next:
@@ -1428,14 +1543,31 @@ class AgendaRow(QFrame):
     def is_selected(self) -> bool:
         return self._selected
 
+    def is_hovered(self) -> bool:
+        return self._hovered
+
+    def fading(self) -> bool:
+        """Its background (or its Join button's) is still fading."""
+        return motion.alive(self._bg_anim) or (
+            self.join_button is not None and self.join_button.fading())
+
+    def showEvent(self, e):
+        # Defensive: a row is only ever shown inside the popup's list.
+        if self.parentWidget() is None:
+            log.warning("agenda row shown without a parent; not opening it as a window")
+            self.hide()
+            return
+        super().showEvent(e)
+
     def set_selected(self, selected: bool) -> None:
         if selected != self._selected:
             self._selected = selected
             self._restyle()
 
     def enterEvent(self, e):
-        self._hovered = True
-        self._restyle()
+        if not self._hovered:           # (a row built "hovered" gets Qt's synthetic
+            self._hovered = True        # enter on appearing: nothing to fade)
+            self._restyle()
         super().enterEvent(e)
 
     def leaveEvent(self, e):

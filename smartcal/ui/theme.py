@@ -106,3 +106,15 @@ def mix(a: str, b: str, t: float) -> str:
     return QColor(round(qa.red() + (qb.red() - qa.red()) * t),
                   round(qa.green() + (qb.green() - qa.green()) * t),
                   round(qa.blue() + (qb.blue() - qa.blue()) * t)).name()
+
+
+def shade_keeping_contrast(base: str, toward: str, against: str,
+                           amounts=(0.15, 0.10, 0.05), min_ratio: float = 4.5) -> str:
+    """`base` blended toward `toward` by the largest of `amounts` that keeps it at
+    least `min_ratio` against `against` (a hover/press shade that stays legible);
+    `base` itself when none does."""
+    for t in amounts:
+        c = mix(base, toward, t)
+        if contrast_ratio(c, against) >= min_ratio:
+            return c
+    return QColor(base).name()

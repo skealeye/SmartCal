@@ -6,7 +6,7 @@ style); nothing is sent to Google."""
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
+from PyQt6.QtGui import QAction, QActionGroup, QColor, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import QMenu
 
 from . import theme
@@ -61,8 +61,11 @@ def context_menu(parent, event, current: str | None, on_hide, on_pick,
     if on_style is not None:
         styles = _menu(menu)
         styles.setTitle(STYLE_SUBMENU)
+        group = QActionGroup(styles)          # one of the two: radio marks
+        group.setExclusive(True)
         for key, name in STYLE_NAMES:
             act = QAction(name, styles)
+            group.addAction(act)
             act.setData(key)
             act.setCheckable(True)
             act.setChecked(key == (style or "stripe"))

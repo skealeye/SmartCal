@@ -212,8 +212,7 @@ class SettingsDialog(QDialog):
 
     def event(self, e):
         if e.type() == QEvent.Type.WindowActivate:
-            self.refresh_meetings()
-            self.sync_account_boxes()
+            self.sync_from_settings()
         return super().event(e)
 
     def _fill_meetings(self) -> None:
@@ -374,6 +373,18 @@ class SettingsDialog(QDialog):
             item.setSizeHint(row.sizeHint())
             self.account_list.setItemWidget(item, row)
             self.account_shown[account] = box
+
+    def sync_from_settings(self) -> None:
+        """Changes made elsewhere while the dialog is open (the tray's Accounts menu, a
+        right-click Hide/Color/Color style) show here, unless the owner already changed
+        that very control in the dialog."""
+        self.refresh_meetings()
+        self.sync_account_boxes()
+        style = getattr(self.settings, "tile_style", "stripe")
+        untouched = self.tile_style_box.currentData() == self._tile_style_orig
+        if untouched and style != self._tile_style_orig:
+            self._tile_style_orig = style
+            self.tile_style_box.setCurrentIndex(max(0, self.tile_style_box.findData(style)))
 
     def sync_account_boxes(self) -> None:
         """Boxes the owner did not touch follow changes made elsewhere (the tray)."""

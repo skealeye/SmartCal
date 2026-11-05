@@ -82,16 +82,23 @@ def main() -> int:
                                    on_fired=lambda: tray.refresh_reminders())
     dialog_ref: list[SettingsDialog] = []
 
+    def sync_settings_dialog() -> None:
+        """An open Settings dialog shows changes made elsewhere (e.g. Color style)."""
+        if dialog_ref and dialog_visible(dialog_ref[0]):
+            dialog_ref[0].sync_from_settings()
+
     @guarded
     def refresh_views() -> None:
         popup.refresh()
         window.refresh()
         tray.update_tooltip()
+        sync_settings_dialog()
 
     @guarded
     def refresh_others() -> None:
         notifier.mark_in_progress()   # e.g. Undo restored a meeting: no late toast
         window.refresh()
+        sync_settings_dialog()
         tray.update_tooltip()
 
     # Hiding or coloring a meeting (popup details or window details) updates every view.
@@ -156,8 +163,7 @@ def main() -> int:
         notifier.mark_in_progress()   # shown again: no late "Started" toast
         notifier.check()
         if dialog_ref and dialog_visible(dialog_ref[0]):
-            dialog_ref[0].refresh_meetings()
-            dialog_ref[0].sync_account_boxes()
+            dialog_ref[0].sync_from_settings()
 
     tray = TrayController(popup, worker, cache, settings, on_accounts_changed=drop_clients,
                           on_open_settings=open_settings, reminders=reminders,

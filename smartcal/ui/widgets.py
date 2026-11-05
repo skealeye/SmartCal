@@ -1,7 +1,8 @@
 """Small animated widgets shared by the popup and the details panel."""
 from __future__ import annotations
 
-from PyQt6.QtGui import QColor
+from PyQt6.QtCore import QRectF, Qt
+from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import QPushButton
 
 from . import motion, theme
@@ -9,19 +10,26 @@ from . import motion, theme
 
 class HoverButton(QPushButton):
     """A flat button whose background fades between `base` and `hover` (motion.FAST)
-    when the mouse enters or leaves, and darkens briefly while pressed. With
-    micro-animations off it switches at once. Colors can be changed later (restyle)."""
+    when the mouse enters or leaves, and shows `pressed` while held down. The
+    background is painted in paintEvent (the style sheet is set once: text color,
+    padding, focus border), so a fade frame is just a repaint. With micro-animations
+    off it switches at once. Colors can be changed later (restyle)."""
 
     def __init__(self, text: str, base: str, hover: str, fg: str, extra: str = "",
-                 focus: str = "", parent=None):
+                 focus: str = "", pressed: str | None = None, radius: int = 4,
+                 parent=None):
         super().__init__(text, parent)
-        self._extra, self._focus = extra, focus
+        self._radius = radius
         self._anim = None
         self._hovered = False
-        self.restyle(base, hover, fg)
+        self.setStyleSheet(f"QPushButton{{background:transparent;color:{fg};border:none;"
+                           f"{extra}}}"
+                           + (f"QPushButton:focus{{{focus}}}" if focus else ""))
+        self.restyle(base, hover, fg, pressed)
 
-    def restyle(self, base: str, hover: str, fg: str) -> None:
+    def restyle(self, base: str, hover: str, fg: str, pressed: str | None = None) -> None:
         self._base, self._hover, self._fg = base, hover, fg
+        self._pressed = pressed or theme.mix(base, "#000000", 0.18)
         motion.stop(self._anim)
         self._set_bg(self._hover if self._hovered else self._base)
 
@@ -29,15 +37,26 @@ class HoverButton(QPushButton):
         return self._bg
 
     def hover_target(self) -> str:
-        return self._hover
+        return QColor(self._hover).name()
+
+    def pressed_color(self) -> str:
+        return QColor(self._pressed).name()
+
+    def fading(self) -> bool:
+        return motion.alive(self._anim)
 
     def _set_bg(self, color) -> None:
         self._bg = QColor(color).name()
-        focus = f"QPushButton:focus{{{self._focus}}}" if self._focus else ""
-        pressed = theme.mix(self._bg, "#000000", 0.18)
-        self.setStyleSheet(f"QPushButton{{background:{self._bg};color:{self._fg};"
-                           f"border:none;{self._extra}}}"
-                           f"QPushButton:pressed{{background:{pressed};}}{focus}")
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(self._pressed if self.isDown() else self._bg))
+        p.drawRoundedRect(QRectF(self.rect()), self._radius, self._radius)
+        p.end()
+        super().paintEvent(e)           # text and focus border, from the style sheet
 
     def _fade_to(self, color: str) -> None:
         motion.stop(self._anim)
@@ -58,5 +77,5 @@ class HoverButton(QPushButton):
     def hideEvent(self, e):
         motion.stop(self._anim)
         self._hovered = False
-        self._set_bg(self._base)
+        self._bg = QColor(self._base).name()
         super().hideEvent(e)
