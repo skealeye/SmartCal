@@ -94,8 +94,10 @@ def assert_list_not_collapsed(p, h0, row_h, area=AREA):
 
 
 def hide_selected_via_flyout(qtbot, p, index):
+    """Select the row (details open), then hide it from its right-click menu (v0.8.0:
+    the details panel has no Hide… button any more)."""
     click(qtbot, rows(p)[index])
-    click(qtbot, details(p).findChild(QPushButton, "hide"))
+    right_click(rows(p)[index])
     menu_action(p.menu(), meeting_menus.HIDE_ONE).trigger()
 
 
@@ -134,7 +136,7 @@ def test_hide_with_details_open_on_another_row_does_not_collapse(qtbot, tmp_path
     hide_via_right_click(p, 1)
     assert p.notice_text() == meeting_menus.HIDDEN_NOTICE
     assert p.flyout_open() and p.selected_row().event.id == "5"   # still its details
-    assert p.flyout().size() == p.size()
+    assert p.flyout().width() == p.width() and p.flyout().height() <= p.height()
     assert_list_not_collapsed(p, h0, row_h)
 
 
@@ -434,7 +436,8 @@ def test_right_click_row_shows_hide_and_color_menu_no_confirmation(qtbot, tmp_pa
     menu = p.menu()
     assert menu is not None and menu.isVisible()
     texts = [a.text() for a in menu.actions()]
-    assert texts == [meeting_menus.HIDE_ONE, "", meeting_menus.COLOR_SUBMENU]
+    assert texts == [meeting_menus.HIDE_ONE, "", meeting_menus.COLOR_SUBMENU,
+                     meeting_menus.STYLE_SUBMENU]
     assert menu.actions()[1].isSeparator()
     sub = meeting_menus.submenu(menu, meeting_menus.COLOR_SUBMENU)
     assert [a.text() for a in sub.actions() if a.data()] == [n for n, _ in theme.PALETTE]
@@ -508,12 +511,14 @@ def test_right_click_in_window_view_has_same_menu(qtbot, tmp_path):
 
     right_click(chip("x"))
     assert [a.text() for a in w.menu().actions()] == [meeting_menus.HIDE_ONE, "",
-                                                      meeting_menus.COLOR_SUBMENU]
+                                                      meeting_menus.COLOR_SUBMENU,
+                                                      meeting_menus.STYLE_SUBMENU]
     assert w.details is None                           # right-click never opens details
     right_click(chip("s_1104"))
     assert [a.text() for a in w.menu().actions()] == [meeting_menus.HIDE_ONE,
                                                       meeting_menus.HIDE_SERIES, "",
-                                                      meeting_menus.COLOR_SUBMENU]
+                                                      meeting_menus.COLOR_SUBMENU,
+                                                      meeting_menus.STYLE_SUBMENU]
     sub = meeting_menus.submenu(w.menu(), meeting_menus.COLOR_SUBMENU)
     menu_action(sub, "Peacock").trigger()
     assert chip("s_1104").color == "#2aa3d8" and chip("s_1105").color == "#2aa3d8"

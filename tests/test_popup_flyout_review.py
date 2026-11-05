@@ -5,11 +5,11 @@ faked through the popup's injectable hooks, after real activation has settled.""
 from dataclasses import replace
 
 from PyQt6.QtCore import QEvent, QPoint, QRect
-from PyQt6.QtWidgets import QApplication, QLabel, QPushButton
+from PyQt6.QtWidgets import QApplication, QFrame, QLabel, QPushButton
 
 from smartcal.ui import meeting_menus
 from test_meeting_actions_ui import (DESC, _menu_action, click, details, ev,
-                                     open_details, rows, settle_qt)
+                                     open_details, row_menu, rows, settle_qt)
 from test_popup_flyout import TOP_TRAY, popup_on, row_top
 
 LONG = "\n".join(f"line {i} https://example.com/{i}" for i in range(80))
@@ -73,10 +73,10 @@ def test_color_pick_rebuilds_once(qtbot, tmp_path):
     p.meetings_changed.connect(p.refresh)             # even if a listener refreshes again
     fly = open_details(qtbot, p, rows(p)[0])
     builds = fly.builds
-    click(qtbot, details(p).findChild(QPushButton, "color"))
+    row_menu(p, rows(p)[0])       # v0.8.0: the right-click menu
     _menu_action(p, "Basil").trigger()
     assert fly.builds == builds + 1
-    assert "#3fa364" in details(p).findChild(QLabel, "calendar").text()
+    assert "#3fa364" in fly.findChild(QFrame, "colorbar").styleSheet()
 
 
 # -- failsafe ------------------------------------------------------------------------------
@@ -97,7 +97,7 @@ def test_watchdog_hides_group_when_app_inactive(qtbot, tmp_path):
 def test_watchdog_does_nothing_while_menu_open(qtbot, tmp_path):
     p = popup_on(qtbot, tmp_path, [ev("1", "A", 10)])
     fly = open_details(qtbot, p, rows(p)[0])
-    click(qtbot, details(p).findChild(QPushButton, "color"))
+    row_menu(p, rows(p)[0])       # v0.8.0: the right-click menu
     QApplication.processEvents()
     assert meeting_menus.is_open(p.menu())
     p.app_active = lambda: False                      # the menu holds focus on purpose
@@ -260,7 +260,7 @@ def test_hide_from_flyout_keeps_popup_open_and_shows_notice(qtbot, tmp_path):
     p = popup_on(qtbot, tmp_path, [ev("1", "A", 10), ev("2", "B", 11)])
     fly = open_details(qtbot, p, rows(p)[0])
     grace_hooks(p, fly)
-    click(qtbot, details(p).findChild(QPushButton, "hide"))
+    row_menu(p, rows(p)[0])       # v0.8.0: the right-click menu
     QApplication.processEvents()
     menu = p.menu()
     act = _menu_action(p, meeting_menus.HIDE_ONE)
@@ -339,7 +339,7 @@ def test_single_tick_foreground_elsewhere_does_not_hide(qtbot, tmp_path):
 def test_foreground_check_ignored_while_menu_open(qtbot, tmp_path):
     p = popup_on(qtbot, tmp_path, [ev("1", "A", 10)])
     fly = open_details(qtbot, p, rows(p)[0])
-    click(qtbot, details(p).findChild(QPushButton, "color"))
+    row_menu(p, rows(p)[0])       # v0.8.0: the right-click menu
     QApplication.processEvents()
     assert meeting_menus.is_open(p.menu())
     p.active_window = lambda: fly

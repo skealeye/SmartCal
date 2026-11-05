@@ -54,3 +54,55 @@ PALETTE = (
     ("Grape", "#b36ad6"),
     ("Graphite", "#9aa0a6"),
 )
+
+
+# -- tile style "fill": text on a colored tile ------------------------------------------
+TILE_STYLES = ("stripe", "fill")
+ON_DARK = "#000000"
+ON_LIGHT = "#ffffff"
+
+
+def _channel(c: float) -> float:
+    c /= 255.0
+    return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def luminance(color: str) -> float:
+    """WCAG relative luminance of a hex color."""
+    q = QColor(color)
+    return 0.2126 * _channel(q.red()) + 0.7152 * _channel(q.green()) \
+        + 0.0722 * _channel(q.blue())
+
+
+def contrast_ratio(a: str, b: str) -> float:
+    la, lb = sorted((luminance(a), luminance(b)), reverse=True)
+    return (la + 0.05) / (lb + 0.05)
+
+
+def text_on(fill: str) -> str:
+    """Black or white, whichever contrasts more with `fill` (always >= 4.5:1: the
+    lowest possible best-of-two is about 4.58:1)."""
+    return ON_DARK if contrast_ratio(fill, ON_DARK) >= contrast_ratio(fill, ON_LIGHT) \
+        else ON_LIGHT
+
+
+def muted_on(fill: str) -> str:
+    """Secondary text on `fill`: the text color, slightly toned toward the fill but
+    kept at >= 4.5:1."""
+    main = QColor(text_on(fill))
+    base = QColor(fill)
+    for t in (0.25, 0.15, 0.08, 0.0):
+        mixed = QColor(round(main.red() + (base.red() - main.red()) * t),
+                       round(main.green() + (base.green() - main.green()) * t),
+                       round(main.blue() + (base.blue() - main.blue()) * t)).name()
+        if contrast_ratio(mixed, fill) >= 4.5:
+            return mixed
+    return main.name()
+
+
+def mix(a: str, b: str, t: float) -> str:
+    """`a` blended toward `b` by t (0..1)."""
+    qa, qb = QColor(a), QColor(b)
+    return QColor(round(qa.red() + (qb.red() - qa.red()) * t),
+                  round(qa.green() + (qb.green() - qa.green()) * t),
+                  round(qa.blue() + (qb.blue() - qa.blue()) * t)).name()

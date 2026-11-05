@@ -12,8 +12,8 @@ from smartcal.ui.popup import BG_SELECTED, AgendaPopup
 from smartcal.ui.popup import WIDTH as POPUP_WIDTH
 from smartcal.ui.tray import TrayController
 from test_meeting_actions_ui import (DESC, NOW, SERIES, _menu_action, click, details,  # noqa: F401
-                                     ev, open_details, opened, rows, settle_qt, store, titles,
-                                     wait_active)   # opened: fixture
+                                     ev, open_details, opened, row_menu, rows, settle_qt,
+                                     store, titles, wait_active)   # opened: fixture
 
 AREA = QRect(0, 0, 1000, 800)
 TOP_TRAY = QRect(980, 0, 20, 20)        # taskbar at the top: rows sit near the top
@@ -116,7 +116,7 @@ def test_second_click_same_row_closes_flyout(qtbot, tmp_path):
     a = rows(p)[0]
     click(qtbot, a)
     assert p.flyout_open() and a.is_selected()
-    assert BG_SELECTED in a.styleSheet()
+    assert a.target_background() == BG_SELECTED     # v0.8.0: painted, may fade
     click(qtbot, a)
     assert not p.flyout_open() and not a.is_selected() and p.selected_row() is None
     assert p.isVisible()
@@ -130,12 +130,14 @@ def test_second_click_same_row_closes_flyout(qtbot, tmp_path):
 def test_selected_highlight_distinct_from_next_up(qtbot, tmp_path):
     p = popup_on(qtbot, tmp_path, [ev("1", "Soon", 9, 10), ev("2", "Later", 11)])
     soon, later = rows(p)
-    assert soon.is_next and theme.BG_NEXT in soon.styleSheet()
+    assert soon.is_next and soon.target_background() == theme.BG_NEXT
     click(qtbot, later)
-    assert BG_SELECTED in later.styleSheet() and BG_SELECTED != theme.BG_NEXT
-    assert theme.BG_NEXT in soon.styleSheet()           # next-up keeps its own look
+    assert later.target_background() == BG_SELECTED and BG_SELECTED != theme.BG_NEXT
+    assert later.background().name() == BG_SELECTED     # animations off: at once
+    assert soon.target_background() == theme.BG_NEXT   # next-up keeps its own look
     click(qtbot, soon)
-    assert BG_SELECTED in soon.styleSheet() and BG_SELECTED not in later.styleSheet()
+    assert soon.target_background() == BG_SELECTED
+    assert later.target_background() == "transparent"
 
 
 def test_clicking_other_row_swaps_content_single_flyout_instance(qtbot, tmp_path):
@@ -171,8 +173,9 @@ def test_flyout_content_matches_event(qtbot, tmp_path, opened):
     title = d.findChild(QLabel, "title")
     assert title.textFormat() == Qt.TextFormat.PlainText and title.text() == "Sync <b>&</b> co"
     assert d.findChild(QLabel, "when").text() == "Wed, Nov 4, 2026 · 10:00 AM – 10:30 AM"
-    cal = d.findChild(QLabel, "calendar")
-    assert "#b36ad6" in cal.text() and "Work &lt;cal&gt;" in cal.text()
+    cal = d.findChild(QLabel, "calendar")             # plain text now; the color is
+    assert cal.textFormat() == Qt.TextFormat.PlainText and cal.text() == "Work <cal>"
+    assert "#b36ad6" in fly.findChild(QFrame, "colorbar").styleSheet()   # the header bar
     loc = d.findChild(QLabel, "location")
     assert loc.textFormat() == Qt.TextFormat.PlainText and loc.text() == "Room <4>"
     box = d.findChild(QTextBrowser, "description")
@@ -181,7 +184,7 @@ def test_flyout_content_matches_event(qtbot, tmp_path, opened):
     big = d.findChild(QPushButton, "bigjoin")
     assert big.text() == "Join Zoom meeting"
     assert big.width() <= FLY_WIDTH
-    assert d.findChild(QPushButton, "color").text() == "Color…"
+    assert d.findChild(QPushButton, "color") is None   # v0.8.0: right-click only
     big.click()
     assert opened.urls == [z]
     assert not p.isVisible() and not fly.isVisible()
@@ -299,8 +302,8 @@ def test_hide_from_flyout_closes_it(qtbot, tmp_path):
     p.meetings_changed.connect(lambda: changed.append(1))
     click(qtbot, rows(p)[0])
     fly = p.flyout()
-    click(qtbot, details(p).findChild(QPushButton, "hide"))
-    assert [a.text() for a in p.menu().actions()] == [meeting_menus.HIDE_ONE,
+    menu = row_menu(p, rows(p)[0])                    # right-click the selected meeting
+    assert [a.text() for a in menu.actions()][:2] == [meeting_menus.HIDE_ONE,
                                                       meeting_menus.HIDE_SERIES]
     _menu_action(p, meeting_menus.HIDE_SERIES).trigger()
     assert not fly.isVisible() and p.selected_row() is None
@@ -308,12 +311,11 @@ def test_hide_from_flyout_closes_it(qtbot, tmp_path):
     assert p.notice_text() == meeting_menus.HIDDEN_NOTICE
 
 
-def test_color_menu_from_flyout_keeps_group_open_and_recolors_row_and_flyout(qtbot, tmp_path):
+def test_color_menu_with_flyout_open_keeps_group_open_and_recolors_row_and_flyout(
+        qtbot, tmp_path):
     p = popup_on(qtbot, tmp_path, SERIES)
     fly = open_details(qtbot, p, rows(p)[0])
-    color_btn = details(p).findChild(QPushButton, "color")
-    assert color_btn.text() == "Color… (series)"
-    click(qtbot, color_btn)
+    row_menu(p, rows(p)[0])
     QApplication.processEvents()
     menu = p.menu()
     assert menu is not None and meeting_menus.is_open(menu)
@@ -324,7 +326,7 @@ def test_color_menu_from_flyout_keeps_group_open_and_recolors_row_and_flyout(qtb
     _menu_action(p, "Basil").trigger()
     assert p.flyout() is fly and fly.isVisible() and rows(p)[0].is_selected()
     assert "#3fa364" in rows(p)[0].findChild(QFrame, "stripe").styleSheet()
-    assert "#3fa364" in details(p).findChild(QLabel, "calendar").text()
+    assert "#3fa364" in fly.findChild(QFrame, "colorbar").styleSheet()
     assert p.settings.event_color(SERIES[1]) == "#3fa364"
     gone = []
     menu.destroyed.connect(lambda *_: gone.append(1))
@@ -366,32 +368,25 @@ def test_keyboard_enter_opens_flyout_and_focuses_it(qtbot, tmp_path):
     assert fly.isVisible() and a.is_selected()
     big = details(p).findChild(QPushButton, "bigjoin")
     qtbot.waitUntil(lambda: QApplication.focusWidget() is big)
-    qtbot.keyClick(b, Qt.Key.Key_Space)               # no meeting link: Hide… first
-    qtbot.waitUntil(lambda: QApplication.focusWidget()
-                    is details(p).findChild(QPushButton, "hide"))
+    qtbot.keyClick(b, Qt.Key.Key_Space)               # no meeting link: the panel itself
+    qtbot.waitUntil(lambda: QApplication.focusWidget() is fly)
     assert p.flyout() is fly and b.is_selected()
 
 
 def test_tab_order_in_flyout_without_close_button(qtbot, tmp_path):
+    # v0.8.0: Join is the panel's only stop (no Hide…/Color…); Tab stays on it.
     z = "https://zoom.us/j/1"
     p = popup_on(qtbot, tmp_path, [ev("1", "A", 10, meeting_url=z, description=DESC)])
     qtbot.keyClick(rows(p)[0], Qt.Key.Key_Return)
     fly = p.flyout()
     d = details(p)
-    chain = [d.findChild(QPushButton, "bigjoin"), d.findChild(QPushButton, "hide"),
-             d.findChild(QPushButton, "color")]
+    big = d.findChild(QPushButton, "bigjoin")
+    assert fly.tab_chain() == [big]
     assert fly.findChild(QPushButton, "close") is None and not hasattr(fly, "close_button")
-    qtbot.waitUntil(lambda: QApplication.focusWidget() is chain[0])
-    seen = []
-    for _ in chain:
-        qtbot.keyClick(QApplication.focusWidget(), Qt.Key.Key_Tab)
-        seen.append(QApplication.focusWidget())
-    assert seen == chain[1:] + chain[:1]              # wraps; the description is skipped
-    back = []
-    for _ in chain:
-        qtbot.keyClick(QApplication.focusWidget(), Qt.Key.Key_Backtab)
-        back.append(QApplication.focusWidget())
-    assert back == [chain[2], chain[1], chain[0]]
+    qtbot.waitUntil(lambda: QApplication.focusWidget() is big)
+    for key in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+        qtbot.keyClick(QApplication.focusWidget(), key)
+        assert QApplication.focusWidget() is big       # the description is skipped
     assert d.findChild(QTextBrowser, "description").focusPolicy() == Qt.FocusPolicy.ClickFocus
 
 

@@ -77,3 +77,77 @@ def slide_in_offset(edge: str, px: int = POPUP_SLIDE_PX) -> QPoint:
     moves away from the taskbar (bottom taskbar: starts lower and slides up)."""
     return {"bottom": QPoint(0, px), "top": QPoint(0, -px),
             "left": QPoint(-px, 0), "right": QPoint(px, 0)}.get(edge, QPoint(0, px))
+
+
+# -- micro-interactions (v0.8.0) ---------------------------------------------------------
+# One set of durations and curves for every small animation: entering (OutCubic),
+# leaving (InCubic), resizing (InOutCubic). They follow animations_enabled() exactly like
+# the popup/panel slides; SMARTCAL_ANIMATIONS=basic keeps only those two slides.
+ENV_LEVEL = "SMARTCAL_ANIMATIONS"
+FAST = 120                  # hover, press, notice fade
+NORMAL = 180                # resizes, row collapse, chat expand
+SLOW = 240
+CROSSFADE_MS = 140          # the details panel swapping content
+
+
+def micro_enabled() -> bool:
+    """Hover fades, resizes, collapses, cross-fades... Off with animations off, or with
+    SMARTCAL_ANIMATIONS=basic (keeps just the popup slide-in and the panel slide)."""
+    if os.environ.get(ENV_LEVEL, "").strip().lower() == "basic":
+        return False
+    return animations_enabled()
+
+
+def micro_duration(ms: int) -> int:
+    return ms if micro_enabled() else 0
+
+
+def curve(kind: str):
+    """"enter" (OutCubic), "leave" (InCubic) or "resize" (InOutCubic)."""
+    from PyQt6.QtCore import QEasingCurve
+    t = {"enter": QEasingCurve.Type.OutCubic, "leave": QEasingCurve.Type.InCubic}.get(
+        kind, QEasingCurve.Type.InOutCubic)
+    return QEasingCurve(t)
+
+
+def alive(anim) -> bool:
+    """A QVariantAnimation that still exists and is running."""
+    if anim is None:
+        return False
+    try:
+        from PyQt6.QtCore import QAbstractAnimation
+        return anim.state() == QAbstractAnimation.State.Running
+    except RuntimeError:
+        return False
+
+
+def stop(anim) -> None:
+    """Stop an animation if it is still there (safe on a deleted one)."""
+    if anim is None:
+        return
+    try:
+        anim.stop()
+    except RuntimeError:
+        pass
+
+
+def tween(parent, start, end, ms: int, on_value, on_done=None, kind: str = "resize"):
+    """Animate from `start` to `end` over `ms`, calling on_value(v) per frame and
+    on_done() at the end. `ms` 0: on_value(end) and on_done() at once, returns None.
+    The animation belongs to `parent` (deleted with it) and is deleted when it stops."""
+    if ms <= 0:
+        on_value(end)
+        if on_done is not None:
+            on_done()
+        return None
+    from PyQt6.QtCore import QAbstractAnimation, QVariantAnimation
+    anim = QVariantAnimation(parent)
+    anim.setStartValue(start)
+    anim.setEndValue(end)
+    anim.setDuration(ms)
+    anim.setEasingCurve(curve(kind))
+    anim.valueChanged.connect(on_value)
+    if on_done is not None:
+        anim.finished.connect(on_done)
+    anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+    return anim

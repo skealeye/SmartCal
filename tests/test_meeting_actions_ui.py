@@ -100,7 +100,26 @@ def titles(p):
 
 
 def click(qtbot, widget):
+    assert widget is not None            # QTest would crash on None
     qtbot.mouseClick(widget, Qt.MouseButton.LeftButton)
+
+
+def right_click(widget, pos=None):
+    """A right-click as Windows delivers it: the context-menu event (the menu opens)."""
+    from PyQt6.QtCore import QPoint
+    from PyQt6.QtGui import QContextMenuEvent
+    assert widget is not None
+    pos = pos or QPoint(5, 5)
+    QApplication.sendEvent(widget, QContextMenuEvent(
+        QContextMenuEvent.Reason.Mouse, pos, widget.mapToGlobal(pos)))
+    QApplication.processEvents()
+
+
+def row_menu(p, row):
+    """Right-click `row` in popup `p`; returns the open menu (v0.8.0: Hide and Color live
+    only in this menu, no longer in the details panel)."""
+    right_click(row)
+    return p.menu()
 
 
 class Opened:
@@ -137,8 +156,9 @@ def test_popup_row_click_opens_and_closes_flyout(qtbot, tmp_path):
     assert d.findChild(QLabel, "when").text() == "Wed, Nov 4, 2026 · 10:00 AM – 10:30 AM"
     assert d.findChild(QLabel, "location").text() == "Room 4"
     assert "Primary" in d.findChild(QLabel, "calendar").text()
-    assert d.findChild(QPushButton, "hide").text() == "Hide…"
-    assert d.findChild(QPushButton, "color").text() == "Color…"
+    # v0.8.0: no Hide…/Color… in the details (right-click the meeting instead).
+    assert d.findChild(QPushButton, "hide") is None
+    assert d.findChild(QPushButton, "color") is None
     click(qtbot, row.findChild(QFrame, "stripe"))
     assert not row.is_selected() and p.selected_row() is None and not p.flyout_open()
     assert p.height() == h0
@@ -259,10 +279,11 @@ def test_opening_flyout_is_fast(qtbot, tmp_path):
 
 # -- menus keep the popup open ------------------------------------------------------
 def _open_color_menu(qtbot, p):
+    """With the details open, the meeting's right-click menu (Color ▸ inside)."""
     open_details(qtbot, p, rows(p)[0])
-    click(qtbot, details(p).findChild(QPushButton, "color"))
+    menu = row_menu(p, rows(p)[0])
     QApplication.processEvents()      # deliver what the platform queued for the open menu
-    return p.menu()
+    return menu
 
 
 def test_menu_does_not_hide_popup(qtbot, tmp_path):
@@ -304,8 +325,8 @@ def test_hide_this_occurrence_only_from_popup(qtbot, tmp_path):
     changed = []
     p.meetings_changed.connect(lambda: changed.append(1))
     click(qtbot, rows(p)[0])
-    click(qtbot, details(p).findChild(QPushButton, "hide"))
-    assert [a.text() for a in p.menu().actions()] == [meeting_menus.HIDE_ONE,
+    menu = row_menu(p, rows(p)[0])
+    assert [a.text() for a in menu.actions()][:2] == [meeting_menus.HIDE_ONE,
                                                       meeting_menus.HIDE_SERIES]
     _menu_action(p, meeting_menus.HIDE_ONE).trigger()
     assert titles(p) == ["Lunch"] and changed == [1]
@@ -316,7 +337,7 @@ def test_hide_this_occurrence_only_from_popup(qtbot, tmp_path):
     assert titles(p) == ["Standup"]
 
 
-def test_hide_series_from_window_details(qtbot, tmp_path):
+def test_hide_series_from_window_right_click_closes_its_details(qtbot, tmp_path):
     w = make_window(qtbot, tmp_path, SERIES)
     changed = []
     w.meetings_changed.connect(lambda: changed.append(1))
@@ -324,8 +345,9 @@ def test_hide_series_from_window_details(qtbot, tmp_path):
     assert len(chips) == 2
     qtbot.mouseClick(chips[0], Qt.MouseButton.LeftButton)
     d = w.details
-    d.hide_button.click()
-    _menu_action(d, meeting_menus.HIDE_SERIES).trigger()
+    assert not hasattr(d, "hide_button")               # v0.8.0: right-click only
+    right_click(chips[0])
+    _menu_action(w, meeting_menus.HIDE_SERIES).trigger()
     assert [c for col in w.time_view.columns for c in col.chips] == []
     assert not d.isVisible() and changed == [1]
     assert w.notice_text() == "Hidden. Restore from the tray icon."
@@ -334,8 +356,9 @@ def test_hide_series_from_window_details(qtbot, tmp_path):
 def test_one_off_meeting_has_no_series_option(qtbot, tmp_path):
     p = make_popup(qtbot, tmp_path, [ev("1", "A", 10)])
     click(qtbot, rows(p)[0])
-    click(qtbot, details(p).findChild(QPushButton, "hide"))
-    assert [a.text() for a in p.menu().actions()] == [meeting_menus.HIDE_ONE]
+    menu = row_menu(p, rows(p)[0])
+    assert meeting_menus.find_action(menu, meeting_menus.HIDE_SERIES) is None
+    assert [a.text() for a in menu.actions()][0] == meeting_menus.HIDE_ONE
 
 
 def test_hidden_meeting_not_in_popup_window_next_or_toasts(qtbot, tmp_path):
@@ -362,10 +385,8 @@ def test_hidden_meeting_not_in_popup_window_next_or_toasts(qtbot, tmp_path):
 def test_color_from_popup_applies_to_series_and_keeps_flyout_open(qtbot, tmp_path):
     p = make_popup(qtbot, tmp_path, SERIES)
     click(qtbot, rows(p)[0])
-    color_btn = details(p).findChild(QPushButton, "color")
-    assert color_btn.text() == "Color… (series)"
-    click(qtbot, color_btn)
-    menu = p.menu()
+    menu = meeting_menus.submenu(row_menu(p, rows(p)[0]), meeting_menus.COLOR_SUBMENU)
+    assert menu.actions()[0].text() == "Color for the whole series"
     names = [a.text() for a in menu.actions() if a.data()]
     assert names == [n for n, _ in theme.PALETTE]
     assert not _menu_action(p, meeting_menus.RESET_COLOR).isEnabled()
@@ -373,7 +394,7 @@ def test_color_from_popup_applies_to_series_and_keeps_flyout_open(qtbot, tmp_pat
     assert rows(p)[0].is_selected() and p.flyout_open()
     assert "#3fa364" in rows(p)[0].findChild(QFrame, "stripe").styleSheet()
     assert p.settings.event_color(SERIES[1]) == "#3fa364"
-    click(qtbot, details(p).findChild(QPushButton, "color"))
+    row_menu(p, rows(p)[0])
     assert _menu_action(p, "Basil").isChecked()
     _menu_action(p, meeting_menus.RESET_COLOR).trigger()
     assert "#4285f4" in rows(p)[0].findChild(QFrame, "stripe").styleSheet()
@@ -404,8 +425,8 @@ def test_effective_color_used_in_popup_and_window(qtbot, tmp_path):
     w.set_view("week")
     qtbot.mouseClick(chips_by_id(w)["1"], Qt.MouseButton.LeftButton)
     assert "#b36ad6" in w.details.calendar_label.text()
-    w.details.color_button.click()
-    _menu_action(w.details, "Peacock").trigger()      # window details: applies at once
+    right_click(chips_by_id(w)["1"])                   # the event's right-click menu:
+    _menu_action(w, "Peacock").trigger()               # the open details follow at once
     assert "#2aa3d8" in w.details.calendar_label.text()
     assert chips_by_id(w)["1"].color == "#2aa3d8"
 
@@ -421,7 +442,7 @@ def test_details_description_links_open_only_http(qtbot, tmp_path, opened):
     box = d.description_box
     assert isinstance(box, QTextBrowser) and box.isReadOnly()
     assert box.anchors() == ["https://docs.example.com/a?x=1&y=2"]
-    assert d.hide_button is None                     # no settings: read-only details
+    assert not hasattr(d, "hide_button")             # read-only details (v0.8.0)
     for bad in ("javascript:alert(1)", "file:///C:/Windows/notepad.exe", "ftp://x",
                 "https://user@evil.com/"):
         assert box.open_link(QUrl(bad)) is False

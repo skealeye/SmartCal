@@ -388,16 +388,13 @@ class MonthView(QWidget):
 
 
 class EventDetails(QDialog):
-    """Read-only details for one event."""
-
-    hide_requested = pyqtSignal(object, str)      # event, scope ("event" / "series")
-    color_requested = pyqtSignal(object, object)  # event, "#rrggbb" or None (reset)
+    """Read-only details for one event. (Hide and Color are on the event's right-click
+    menu in the window, not here.)"""
 
     def __init__(self, event, ref: datetime, parent=None, settings=None):
         super().__init__(parent)
         self.event = event
         self.settings = settings
-        self._menu = None
         self.setWindowTitle(event.title or "Event")
         self.setMinimumWidth(340)
         self.setStyleSheet(f"QDialog{{background:{theme.BG};}}"
@@ -452,19 +449,6 @@ class EventDetails(QDialog):
             self.description_box = LinkText(description)
             self.description_box.setMinimumHeight(90)
             lay.addWidget(self.description_box, 1)
-        self.hide_button = self.color_button = None
-        if settings is not None:
-            row = QHBoxLayout()
-            self.hide_button = QPushButton("Hide…")
-            self.hide_button.setToolTip("Hide in SmartCal only (Google is not changed)")
-            self.hide_button.clicked.connect(lambda _c=False: self.show_hide_menu())
-            self.color_button = QPushButton(meeting_menus.color_button_text(event))
-            self.color_button.setToolTip("Color in SmartCal only (Google is not changed)")
-            self.color_button.clicked.connect(lambda _c=False: self.show_color_menu())
-            row.addWidget(self.hide_button)
-            row.addWidget(self.color_button)
-            row.addStretch(1)
-            lay.addLayout(row)
 
     def update_color(self) -> None:
         name = calendar_label(self.event.calendar_name)
@@ -476,27 +460,6 @@ class EventDetails(QDialog):
         color = theme.effective_color(self.event, self.settings)
         self.calendar_label.setText(
             f'<span style="color:{color};">&#9632;</span> ' + _esc(name))
-
-    # -- Hide… / Color… -------------------------------------------------------
-    def menu(self):
-        return self._menu
-
-    def _popup_menu(self, menu, button) -> None:
-        meeting_menus.discard(self._menu)
-        self._menu = menu
-        meeting_menus.delete_when_closed(menu)
-        menu.popup(button.mapToGlobal(button.rect().bottomLeft()))
-
-    def show_hide_menu(self) -> None:
-        self._popup_menu(meeting_menus.hide_menu(
-            self, self.event, lambda scope: self.hide_requested.emit(self.event, scope)),
-            self.hide_button)
-
-    def show_color_menu(self) -> None:
-        current = self.settings.event_color(self.event) if self.settings is not None else None
-        self._popup_menu(meeting_menus.color_menu(
-            self, self.event, current, lambda c: self.color_requested.emit(self.event, c)),
-            self.color_button)
 
     @staticmethod
     def open_link(url: str) -> None:
@@ -725,8 +688,6 @@ class CalendarWindow(QMainWindow):
             self.details.close()
             self.details.deleteLater()
         self.details = EventDetails(event, self.now(), self, settings=self.settings)
-        self.details.hide_requested.connect(self.hide_meeting)
-        self.details.color_requested.connect(self.color_meeting)
         placement.center_over(self.details, self)   # opened from the window: over it
         self.details.show()
         self.details.raise_()
@@ -742,7 +703,8 @@ class CalendarWindow(QMainWindow):
         self._menu = meeting_menus.context_menu(
             self, event, self.settings.event_color(event),
             lambda scope, e=event: self.hide_meeting(e, scope),
-            lambda color, e=event: self.color_meeting(e, color))
+            lambda color, e=event: self.color_meeting(e, color),
+            getattr(self.settings, "tile_style", "stripe"), self.set_tile_style)
         meeting_menus.delete_when_closed(self._menu)
         self._menu.popup(global_pos)
 
@@ -763,6 +725,16 @@ class CalendarWindow(QMainWindow):
             self._close_details()       # its meeting is gone
         self.show_notice(meeting_menus.HIDDEN_NOTICE)
         self.refresh()
+        self.meetings_changed.emit()
+
+    def set_tile_style(self, style: str) -> None:
+        """Color style ▸ in the right-click menu: the popup's rows change (the window's
+        blocks are always filled); meetings_changed refreshes every view."""
+        try:
+            self.settings.set_tile_style(style)
+        except OSError:
+            self.show_notice(meeting_menus.SAVE_FAILED)
+            return
         self.meetings_changed.emit()
 
     def color_meeting(self, event, color) -> None:

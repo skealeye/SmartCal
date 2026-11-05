@@ -1,7 +1,8 @@
-"""The "Hide…" and "Color…" menus shared by the popup's details flyout and the details window.
+"""The right-click menu of a meeting, shared by the popup rows and the Day/Week/Month
+window: Hide, Hide series, Color ▸ and Color style ▸.
 
-Both only change SmartCal's own settings (hidden meetings, meeting colors); nothing is
-sent to Google."""
+All of it only changes SmartCal's own settings (hidden meetings, meeting colors, the tile
+style); nothing is sent to Google."""
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
@@ -14,16 +15,14 @@ HIDE_ONE = "Hide this meeting"
 HIDE_SERIES = "Hide all in this series"
 RESET_COLOR = "Reset to calendar color"
 COLOR_SUBMENU = "Color"
+STYLE_SUBMENU = "Color style"
+STYLE_NAMES = (("stripe", "Side stripe"), ("fill", "Whole tile"))
 HIDDEN_NOTICE = "Hidden. Restore from the tray icon."
 SAVE_FAILED = "Couldn't save — your settings file is not writable"
 
 
 def is_recurring(event) -> bool:
     return bool(getattr(event, "recurring_id", None))
-
-
-def color_button_text(event) -> str:
-    return "Color… (series)" if is_recurring(event) else "Color…"
 
 
 def swatch_icon(color: str, size: int = 14) -> QIcon:
@@ -47,22 +46,29 @@ def _menu(parent) -> QMenu:
     return menu
 
 
-def hide_menu(parent, event, on_hide) -> QMenu:
-    """on_hide(scope) with scope "event" or "series"."""
-    menu = _menu(parent)
-    _add_hide_actions(menu, event, on_hide)
-    return menu
-
-
-def context_menu(parent, event, current: str | None, on_hide, on_pick) -> QMenu:
-    """The right-click menu of a meeting (popup row, window chip): the Hide actions,
-    a separator, then "Color" ▸ (the Color… menu as a submenu). Hiding asks nothing."""
+def context_menu(parent, event, current: str | None, on_hide, on_pick,
+                 style: str | None = None, on_style=None) -> QMenu:
+    """The right-click menu of a meeting (popup row, window event): the Hide actions
+    (on_hide(scope), scope "event"/"series"; hiding asks nothing), a separator, "Color" ▸
+    (on_pick(hex), or on_pick(None) to reset) and, with on_style, "Color style" ▸ (Side
+    stripe / Whole tile; on_style(style), one click)."""
     menu = _menu(parent)
     _add_hide_actions(menu, event, on_hide)
     menu.addSeparator()
     sub = color_menu(menu, event, current, on_pick)
     sub.setTitle(COLOR_SUBMENU)
     menu.addMenu(sub)
+    if on_style is not None:
+        styles = _menu(menu)
+        styles.setTitle(STYLE_SUBMENU)
+        for key, name in STYLE_NAMES:
+            act = QAction(name, styles)
+            act.setData(key)
+            act.setCheckable(True)
+            act.setChecked(key == (style or "stripe"))
+            act.triggered.connect(lambda _c=False, k=key: on_style(k))
+            styles.addAction(act)
+        menu.addMenu(styles)
     return menu
 
 
@@ -131,4 +137,13 @@ def discard(menu) -> None:
 
 
 def find_action(menu: QMenu, text: str) -> QAction | None:
-    return next((a for a in menu.actions() if a.text() == text), None)
+    """The action labeled `text` in `menu` or (depth first) in its submenus."""
+    for a in menu.actions():
+        if a.text() == text and a.menu() is None:
+            return a
+    for a in menu.actions():
+        if a.menu() is not None:
+            found = find_action(a.menu(), text)
+            if found is not None:
+                return found
+    return None

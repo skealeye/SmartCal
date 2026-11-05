@@ -29,6 +29,7 @@ MAX_MEETING_ENTRIES = 500      # cap for hidden meetings and for meeting colors
 MAX_MEETING_TITLE = 100
 _COLOR = re.compile(r"#[0-9a-fA-F]{6}")
 HIDE_SCOPES = ("event", "series")
+TILE_STYLES = ("stripe", "fill")
 
 
 def occurrence_key(event) -> str:
@@ -94,6 +95,9 @@ class Settings:
         # Still synced, and still busy time for the assistant and free-slot search.
         self.hidden_accounts: set[str] = set()
         self.autostart: bool = True
+        # How a meeting's color shows in the popup list: "stripe" (a bar on the left) or
+        # "fill" (the whole row in that color).
+        self.tile_style: str = "stripe"
         self.first_run_done: bool = False
         self.claude_model: str = DEFAULT_CLAUDE_MODEL
         # SmartCal-local only (never sent to Google). Keys: occurrence_key / series_key.
@@ -123,6 +127,9 @@ class Settings:
                              if isinstance(leads, dict) else {})
         self.muted = self._str_set(data.get("muted"))
         self.hidden_accounts = self._str_set(data.get("hidden_accounts"))
+        style = data.get("tile_style")
+        self.tile_style = style if isinstance(style, str) and style in TILE_STYLES \
+            else "stripe"
         if isinstance(data.get("autostart"), bool):
             self.autostart = data["autostart"]
         self.first_run_done = data.get("first_run_done") is True
@@ -186,6 +193,7 @@ class Settings:
                 "muted": sorted(self.muted),
                 "hidden_accounts": sorted(self.hidden_accounts),
                 "autostart": self.autostart,
+                "tile_style": self.tile_style,
                 "first_run_done": self.first_run_done,
                 "claude_model": self.claude_model,
                 "hidden_events": self.hidden_events,
@@ -267,6 +275,19 @@ class Settings:
         except OSError:
             self.hidden_accounts = before
             log.warning("could not save %s; stale hidden accounts kept", self.path)
+
+    def set_tile_style(self, style: str) -> None:
+        """"stripe" or "fill"; saved at once (rolled back and re-raised on OSError)."""
+        if style not in TILE_STYLES:
+            raise ValueError(f"unknown tile style {style!r}")
+        if style == self.tile_style:
+            return
+        before, self.tile_style = self.tile_style, style
+        try:
+            self.save()
+        except OSError:
+            self.tile_style = before
+            raise
 
     def set_autostart(self, enabled: bool) -> None:
         self.autostart = bool(enabled)

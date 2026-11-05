@@ -57,15 +57,16 @@ def settled_popup(qtbot, tmp_path, events, **kw):
 
 
 # -- size and paint ----------------------------------------------------------------------
-def test_flyout_same_size_as_popup_and_top_aligned(qtbot, tmp_path):
+def test_flyout_popup_width_top_aligned_and_fits_content(qtbot, tmp_path):
+    # v0.8.0: as wide as the popup and top aligned, but only as tall as its content.
     for i, tray in enumerate((TOP_TRAY, BOTTOM_RIGHT)):
         sub = tmp_path / str(i)
         sub.mkdir()
         p = popup_on(qtbot, sub, MANY + [ev("x", "Short", 18)], tray=tray)
         click(qtbot, rows(p)[-1])                     # short content, tall popup
         fly = p.flyout()
-        assert fly.size() == p.size() and fly.width() == WIDTH
-        assert fly.y() == p.y() and fly.geometry().bottom() == p.geometry().bottom()
+        assert fly.width() == WIDTH and fly.height() == fly.content_height() < p.height()
+        assert fly.y() == p.y() and fly.geometry().bottom() < p.geometry().bottom()
         assert fly.pos() == docked_pos(p) and p.flyout_side == "left"
         assert AREA.contains(fly.geometry())
 
@@ -76,15 +77,18 @@ def test_flyout_resizes_with_popup_when_chat_expands(qtbot, tmp_path):
     click(qtbot, rows(p)[0])
     fly = p.flyout()
     h0 = p.height()
-    assert fly.size() == p.size()
+
+    def fitted():
+        return fly.width() == WIDTH and fly.height() == min(p.height(), fly.content_height())
+    assert fitted()
     p.toggle_chat()                                   # the popup grows (and moves up)
     assert p.height() > h0 and fly.isVisible()
-    assert fly.size() == p.size() and fly.pos() == docked_pos(p)
+    assert fitted() and fly.pos() == docked_pos(p)    # follows the popup's top
     p.toggle_chat()                                   # and shrinks back
     assert p.height() == h0
-    assert fly.size() == p.size() and fly.pos() == docked_pos(p)
+    assert fitted() and fly.pos() == docked_pos(p)
     p.show_notice("A notice that makes the popup taller than before")
-    assert fly.size() == p.size() and fly.y() == p.y()
+    assert fitted() and fly.y() == p.y()
 
 
 def test_flyout_background_fully_painted_no_black_gap(qtbot, tmp_path):
@@ -93,13 +97,13 @@ def test_flyout_background_fully_painted_no_black_gap(qtbot, tmp_path):
     fly = p.flyout()
     assert not fly.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
     assert fly.testAttribute(Qt.WidgetAttribute.WA_StyledBackground)
-    assert fly.height() > 300                          # much taller than its content
+    assert fly.height() < p.height()                   # v0.8.0: fits its content
     img = fly.grab().toImage()
     w, h = img.width(), img.height()
     bg, border = QColor(theme.BG).rgb(), QColor(theme.BORDER).rgb()
     assert img.pixel(0, 0) == border and img.pixel(w - 1, h - 1) == border
     empty = [(2, 2), (w - 3, 2), (2, h - 3), (w - 3, h - 3), (w // 2, h - 3),
-             (w // 2, h - 40), (w // 2, h // 2 + 60), (w - 15, h // 2)]
+             (w - 15, h // 2)]
     assert [img.pixel(x, y) for x, y in empty] == [bg] * len(empty)
     black = QColor("#000000").rgb()
     assert not any(img.pixel(x, y) == black for y in range(0, h, 2) for x in range(0, w, 2))
@@ -114,7 +118,7 @@ def test_flyout_has_no_close_button(qtbot, tmp_path):
     assert [b.text() for b in fly.findChildren(QPushButton)
             if b.text() in ("✕", "×", "X")] == []
     assert fly.findChild(QLabel, "header").text() == HEADER_TEXT == "Meeting details"
-    assert [w.objectName() for w in fly.tab_chain()] == ["bigjoin", "hide", "color"]
+    assert [w.objectName() for w in fly.tab_chain()] == ["bigjoin"]   # v0.8.0
 
 
 def test_flyout_content_layout_fits_250px_width(qtbot, tmp_path):
@@ -138,9 +142,7 @@ def test_flyout_content_layout_fits_250px_width(qtbot, tmp_path):
     assert body.findChild(QLabel, "title").wordWrap()
     big = body.findChild(QPushButton, "bigjoin")
     assert big.width() == body.width()                 # full width
-    for name in ("hide", "color"):
-        b = body.findChild(QPushButton, name)
-        assert b.width() >= b.minimumSizeHint().width()  # nothing squeezed
+    assert body.findChild(QPushButton, "hide") is None  # v0.8.0: right-click only
     desc = fly.description_box()
     assert desc.verticalScrollBar().maximum() > 0      # the rest scrolls
 
@@ -304,8 +306,7 @@ def test_escape_closes_flyout_with_slide_back(qtbot, tmp_path, animated):
     qtbot.keyClick(row, Qt.Key.Key_Return)
     fly = p.flyout()
     qtbot.waitUntil(lambda: not fly.sliding())
-    qtbot.waitUntil(lambda: QApplication.focusWidget() is details(p).findChild(QPushButton,
-                                                                               "hide"))
+    qtbot.waitUntil(lambda: QApplication.focusWidget() is fly)   # no link: the panel
     qtbot.keyClick(QApplication.focusWidget(), Qt.Key.Key_Escape)
     assert fly.closing() and fly.sliding() and fly.isVisible() and p.isVisible()
     qtbot.waitUntil(lambda: not fly.isVisible())
@@ -384,8 +385,9 @@ def test_popup_final_geometry_equals_docked_geometry_after_animation(qtbot, tmp_
     assert fly.isVisible() and fly.docked_pos() == docked_pos(p)
     qtbot.waitUntil(lambda: not p.showing_animated())
     assert p.geometry() == p.docked_geometry() == docked
-    qtbot.waitUntil(lambda: not fly.sliding())
-    assert fly.pos() == docked_pos(p) and fly.size() == p.size()
+    qtbot.waitUntil(lambda: not fly.sliding() and not fly.height_animating())
+    assert fly.pos() == docked_pos(p) and fly.width() == p.width()
+    assert fly.height() == min(p.height(), fly.content_height())
 
 
 def test_popup_first_paint_within_budget_with_animation(qtbot, tmp_path, animated):
@@ -517,7 +519,7 @@ def _gap_above_buttons(fly) -> int:
     body = details_of(fly)
     desc = fly.description_box()
     join = body.findChild(QPushButton, "bigjoin")
-    below = join if join is not None else body.findChild(QPushButton, "hide")
+    below = join
     return below.mapTo(body, QPoint(0, 0)).y() - (desc.mapTo(body, QPoint(0, 0)).y()
                                                  + desc.height())
 
@@ -545,9 +547,10 @@ def test_long_description_fills_remaining_height_then_scrolls(qtbot, tmp_path):
     assert fly._scroll.verticalScrollBar().maximum() == 0    # inside the panel, which fits
     assert desc.height() > fly.height() // 3                 # it got the spare height
     assert 0 <= _gap_above_buttons(fly) < 12
-    hide = details_of(fly).findChild(QPushButton, "hide")
-    bottom = hide.mapTo(fly, QPoint(0, hide.height())).y()
-    assert fly.height() - bottom < 24                        # buttons at the bottom
+    assert fly.height() == p.height()                        # capped at the popup's height
+    join = details_of(fly).findChild(QPushButton, "bigjoin")
+    bottom = join.mapTo(fly, QPoint(0, join.height())).y()
+    assert fly.height() - bottom < 24                        # Join at the bottom
 
 
 def test_description_fills_space_above_buttons_no_blank_band(qtbot, tmp_path):
@@ -557,8 +560,8 @@ def test_description_fills_space_above_buttons_no_blank_band(qtbot, tmp_path):
         p, fly = _open_with(qtbot, sub, notes)
         gap = _gap_above_buttons(fly)
         assert 0 <= gap < 12, (i, gap)
-        hide = details_of(fly).findChild(QPushButton, "hide")
-        bottom = hide.mapTo(fly, QPoint(0, hide.height())).y()
+        join = details_of(fly).findChild(QPushButton, "bigjoin")
+        bottom = join.mapTo(fly, QPoint(0, join.height())).y()
         assert fly.height() - bottom < 24, (i, fly.height(), bottom)
         p.hide()
 

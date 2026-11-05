@@ -11,7 +11,6 @@ always above its owner, so "behind" is drawn with a window mask: while the panel
 overlaps the popup, the overlapping part is masked away."""
 from __future__ import annotations
 
-import html
 import math
 import os
 
@@ -23,7 +22,8 @@ from PyQt6.QtWidgets import (QApplication, QBoxLayout, QFrame, QLabel, QPushButt
                              QWidget)
 
 from ..textutil import calendar_label, html_to_text, meeting_label, safe_http_url
-from . import layout, meeting_menus, motion, theme
+from . import layout, motion, theme
+from .widgets import HoverButton
 from .linktext import LinkText, plain_tip
 from .popup import WIDTH   # one source of truth: the panel is as wide as the popup
 
@@ -38,7 +38,8 @@ MARGINS = 10
 DESCRIPTION_MIN_LINES = 3       # the description fills the rest of the panel; at least this
 HEADER_TEXT = "Meeting details"
 # Tab order inside the panel (whichever exist for the meeting).
-TAB_CHAIN = ("bigjoin", "hide", "color")
+TAB_CHAIN = ("bigjoin",)
+MIN_HEIGHT = 120                # the panel is never shorter than this
 
 
 def _set_scroll(box, value: int) -> None:
@@ -83,6 +84,13 @@ class _NotesBox(LinkText):
 
     def sizeHint(self) -> QSize:
         return QSize(super().sizeHint().width(), self.minimumHeight())
+
+
+def _set_opacity_fx(fx, value) -> None:
+    try:
+        fx.setOpacity(float(value))
+    except RuntimeError:                # its widget went away mid-fade
+        pass
 
 
 def _area(region: QRegion | None, full: QRect) -> int:
@@ -130,6 +138,15 @@ class DetailsFlyout(QWidget):
         self._header.setTextFormat(Qt.TextFormat.PlainText)
         self._header.setStyleSheet(f"color:{theme.MUTED};font-size:11px;")
         outer.addWidget(self._header)
+        # A thin bar in the meeting's effective color under the header.
+        self._color_bar = QFrame()
+        self._color_bar.setObjectName("colorbar")
+        self._color_bar.setFixedHeight(3)
+        outer.addWidget(self._color_bar)
+        self._ghost = None              # the old content fading out during a swap
+        self._ghost_anim = self._fade_in_anim = self._height_anim = None
+        self._height_target: int | None = None
+        self._content_h = None          # (content key, measured height)
         self._scroll = QScrollArea()
         self._scroll.setObjectName("flyoutscroll")
         self._scroll.setWidgetResizable(True)
@@ -158,7 +175,7 @@ class DetailsFlyout(QWidget):
                 ev.all_day, ev.calendar_name, ev.location, ev.description,
                 getattr(ev, "meeting_url", None),
                 theme.effective_color(ev, self._popup.settings),
-                meeting_menus.color_button_text(ev), bool(getattr(ev, "declined", False)))
+                bool(getattr(ev, "declined", False)))
 
     def set_event(self, ev) -> bool:
         """Show `ev`. If its content is what is shown already, nothing is rebuilt (a
@@ -177,6 +194,11 @@ class DetailsFlyout(QWidget):
         refocus = focus.objectName() if focus is not None and old is not None \
             and old.isAncestorOf(focus) else ""
         scroll = None
+        # Visible and open: the old content cross-fades into the new (a snapshot of it
+        # fades out on top), with the micro-animations on.
+        crossfade = (old is not None and self.isVisible() and not self.closing()
+                     and motion.micro_enabled())
+        ghost = old.grab() if crossfade else None
         if old is not None:
             box = old.findChild(QTextBrowser, "description")
             if same_meeting and box is not None:
@@ -185,8 +207,13 @@ class DetailsFlyout(QWidget):
             old.hide()
             old.deleteLater()
         self.builds += 1
+        self._color_bar.setStyleSheet(
+            f"background:{theme.effective_color(ev, self._popup.settings)};"
+            "border-radius:1px;")
         self._scroll.setWidget(self._build(ev))
         self._fix_tab_order()
+        if ghost is not None:
+            self._crossfade(ghost)
         if refocus:
             w = self.body().findChild(QWidget, refocus)
             (w or self.first_control()).setFocus()
@@ -231,10 +258,9 @@ class DetailsFlyout(QWidget):
         lay.addWidget(self._label(layout.format_range(ev, popup.now()), "when"))
         cal_name = calendar_label(ev.calendar_name)
         if cal_name:                    # an email as the name: no calendar line at all
-            lay.addWidget(self._label(
-                f'<span style="color:{theme.effective_color(ev, popup.settings)};">'
-                f'&#9632;</span> {html.escape(cal_name)}', "calendar",
-                Qt.TextFormat.RichText))
+            cal = self._label(cal_name, "calendar")
+            cal.setStyleSheet(f"color:{theme.MUTED};")
+            lay.addWidget(cal)
         if ev.location:
             loc = self._label(ev.location, "location")
             loc.setStyleSheet(f"color:{theme.MUTED};")
@@ -253,60 +279,133 @@ class DetailsFlyout(QWidget):
                                       desc.fit_height(width, DESCRIPTION_MIN_LINES)))
             desc.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
             desc.link_opened.connect(lambda _u: popup.hide())
-            # Out of the Tab chain (Join -> Hide… -> Color…); links still click.
+            # Out of the Tab chain (Join is the only stop); links still click.
             desc.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
             lay.addWidget(desc, 1)
         url = getattr(ev, "meeting_url", None)
         if safe_http_url(url) is not None:
-            join = QPushButton(meeting_label(url))
+            join = HoverButton(meeting_label(url), theme.LINK, "#a9c8ff", "#0b0d10",
+                               extra="font-weight:bold;padding:5px 10px;border-radius:4px;",
+                               focus="border:2px solid #f1f3f4;")
             join.setObjectName("bigjoin")
             join.setCursor(Qt.CursorShape.PointingHandCursor)
             join.setToolTip(plain_tip(url))
             join.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-            join.setStyleSheet(
-                f"QPushButton{{background:{theme.LINK};color:#0b0d10;font-weight:bold;"
-                "padding:5px 10px;border:none;border-radius:4px;}"
-                "QPushButton:hover{background:#a9c8ff;}"
-                "QPushButton:focus{border:2px solid #f1f3f4;}")
             join.clicked.connect(lambda _c=False, u=url: popup._join(u))
             # Full width, never wider than the panel, whatever the label's font metrics.
             join.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
             lay.addWidget(join)
-        style = (f"QPushButton{{background:{theme.BORDER};color:{theme.TEXT};font-size:11px;"
-                 "padding:3px 8px;border:none;border-radius:3px;}"
-                 "QPushButton:hover{background:#4a4d51;}"
-                 f"QPushButton:focus{{border:1px solid {theme.LINK};}}")
-        hide_btn = QPushButton("Hide…")
-        hide_btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        hide_btn.setObjectName("hide")
-        hide_btn.setToolTip("Hide in SmartCal only (Google is not changed)")
-        hide_btn.setStyleSheet(style)
-        hide_btn.clicked.connect(lambda _c=False, e=ev, b=hide_btn: popup.show_hide_menu(e, b))
-        color_btn = QPushButton(meeting_menus.color_button_text(ev))
-        color_btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        color_btn.setObjectName("color")
-        color_btn.setToolTip("Color in SmartCal only (Google is not changed)")
-        color_btn.setStyleSheet(style)
-        color_btn.clicked.connect(
-            lambda _c=False, e=ev, b=color_btn: popup.show_color_menu(e, b))
-        spacing = 6
-        side_by_side = (hide_btn.sizeHint().width() + spacing
-                        + color_btn.sizeHint().width()) <= width
-        actions = QBoxLayout(QBoxLayout.Direction.LeftToRight if side_by_side
-                             else QBoxLayout.Direction.TopToBottom)
-        actions.setObjectName("actions")
-        actions.setSpacing(spacing)
-        actions.addWidget(hide_btn)
-        actions.addWidget(color_btn)
-        if side_by_side:
-            actions.addStretch(1)
-        else:                           # stacked: each one as wide as the panel
-            for b in (hide_btn, color_btn):
-                b.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        lay.addLayout(actions)
-        if not has_desc:
-            lay.addStretch(1)           # no notes: spare height stays below the buttons
+        # v0.8.0: no Hide…/Color… here (right-click the meeting instead), and no stretch:
+        # the panel's height fits its content (see content_height).
         return box
+
+    # -- fitted height ---------------------------------------------------------
+    def content_height(self) -> int:
+        """The panel height that shows everything with no blank band: margins, header,
+        color bar and the body at its natural height (the description fully wrapped).
+        The popup caps it at its own height (the description then scrolls). Measured
+        once per content (the popup asks on every move/resize frame)."""
+        key = (self._shown_key, self.builds)
+        if self._content_h is not None and self._content_h[0] == key:
+            return self._content_h[1]
+        h = self._measure_content_height()
+        self._content_h = (key, h)
+        return h
+
+    def _measure_content_height(self) -> int:
+        outer = self.layout()
+        m = outer.contentsMargins()
+        h = (m.top() + m.bottom() + self._header.sizeHint().height()
+             + self._color_bar.height() + 2 * outer.spacing())
+        body = self.body()
+        if body is None or body.layout() is None:
+            return max(MIN_HEIGHT, h)
+        width = self.inner_width()
+        lay = body.layout()
+        lay.activate()
+        body_h = (lay.totalHeightForWidth(width) if lay.hasHeightForWidth()
+                  else lay.sizeHint().height())
+        box = self.description_box()
+        if box is not None:
+            body_h += max(0, box.fit_height(width) - box.minimumHeight())
+        return max(MIN_HEIGHT, h + body_h)
+
+    def _apply_size(self, size: QSize, animate: bool = True) -> None:
+        """Width at once; a height change of the open, visible panel tweens (InOutCubic,
+        motion.NORMAL) with the micro-animations on, else it is set at once."""
+        target_h = size.height()
+        if self.width() != size.width():
+            self.setFixedSize(size.width(), self.height())
+        if self._height_target == target_h and (self.height() == target_h
+                                                or self.height_animating()):
+            return
+        motion.stop(self._height_anim)
+        self._height_anim = None
+        self._height_target = target_h
+        ms = motion.micro_duration(motion.NORMAL) \
+            if animate and self.isVisible() and not self._closing else 0
+        if not ms or self.height() == target_h:
+            self._resize_height(target_h)
+            return
+        self._height_anim = motion.tween(self, self.height(), target_h, ms,
+                                         self._resize_height)
+
+    def target_height(self) -> int:
+        return self._height_target if self._height_target is not None else self.height()
+
+    def height_animating(self) -> bool:
+        return motion.alive(self._height_anim)
+
+    def _resize_height(self, h: int) -> None:
+        if self.height() != h:
+            self.setFixedSize(self.width(), h)
+            self._update_mask()
+
+    def _crossfade(self, ghost) -> None:
+        """The old content (a snapshot) fades out over the new one, which fades in."""
+        from PyQt6.QtWidgets import QGraphicsOpacityEffect
+        self._end_crossfade()
+        view = self._scroll.viewport()
+        label = QLabel(view)
+        label.setObjectName("ghost")
+        label.setPixmap(ghost)
+        label.setGeometry(0, 0, ghost.width(), ghost.height())
+        label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        out_fx = QGraphicsOpacityEffect(label)
+        out_fx.setOpacity(1.0)
+        label.setGraphicsEffect(out_fx)
+        label.show()
+        label.raise_()
+        self._ghost = label
+        body = self.body()
+        in_fx = QGraphicsOpacityEffect(body)
+        in_fx.setOpacity(0.0)
+        body.setGraphicsEffect(in_fx)
+        ms = motion.micro_duration(motion.CROSSFADE_MS)
+        self._ghost_anim = motion.tween(self, 1.0, 0.0, ms,
+                                        lambda v, fx=out_fx: _set_opacity_fx(fx, v),
+                                        kind="leave")
+        self._fade_in_anim = motion.tween(self, 0.0, 1.0, ms,
+                                          lambda v, fx=in_fx: _set_opacity_fx(fx, v),
+                                          self._end_crossfade, kind="enter")
+
+    def crossfading(self) -> bool:
+        return self._ghost is not None
+
+    def _end_crossfade(self) -> None:
+        motion.stop(self._ghost_anim)
+        motion.stop(self._fade_in_anim)
+        self._ghost_anim = self._fade_in_anim = None
+        if self._ghost is not None:
+            try:
+                self._ghost.hide()
+                self._ghost.deleteLater()
+            except RuntimeError:
+                pass
+            self._ghost = None
+        body = self.body()
+        if body is not None and body.graphicsEffect() is not None:
+            body.setGraphicsEffect(None)
 
     # -- focus ---------------------------------------------------------------
     def tab_chain(self) -> list[QWidget]:
@@ -330,7 +429,7 @@ class DetailsFlyout(QWidget):
         self.first_control().setFocus(Qt.FocusReason.TabFocusReason)
 
     def focusNextPrevChild(self, forward: bool) -> bool:
-        """Tab / Shift+Tab cycle through Join, Hide… and Color… only."""
+        """Tab / Shift+Tab stay on the panel's controls (Join) only."""
         chain = self.tab_chain()
         focus = QApplication.focusWidget()
         if chain and focus in chain:
@@ -352,13 +451,12 @@ class DetailsFlyout(QWidget):
         return QPoint(self._tucked)
 
     def place(self, size: QSize, docked: QPoint, tucked: QPoint,
-              behind: QRect | None) -> None:
+              behind: QRect | None, animate: bool = True) -> None:
         """Size the panel and set where it docks (`docked`) and where it hides behind
         the popup (`tucked`); `behind` is the popup's rect it slides behind (None: no
         slide, e.g. over the popup on a narrow screen). While a slide runs, the slide
         owns the position: only its end moves. Fade-only mode: always docked."""
-        if self.size() != size:
-            self.setFixedSize(size)
+        self._apply_size(size, animate)
         if self.isHidden():
             self._mode = slide_mode()   # read per opening: no restart needed to switch
         if self._mode == "fade":
@@ -564,6 +662,11 @@ class DetailsFlyout(QWidget):
 
     def hideEvent(self, e):
         self._stop_animations()         # never keeps moving a hidden window
+        motion.stop(self._height_anim)  # ...nor resizing or fading one
+        self._height_anim = None
+        if self._height_target is not None and self.height() != self._height_target:
+            self.setFixedSize(self.width(), self._height_target)
+        self._end_crossfade()
         self._closing = False
         super().hideEvent(e)
 

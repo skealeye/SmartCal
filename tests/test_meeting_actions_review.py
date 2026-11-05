@@ -8,7 +8,8 @@ from smartcal.ui import meeting_menus
 from smartcal.ui.window import EventDetails
 from test_meeting_actions_ui import (DESC, NOW, SERIES, _menu_action, _open_color_menu,
                                      build_dialog, chips_by_id, click, details, ev,
-                                     make_popup, make_window, rows, store, titles)
+                                     make_popup, make_window, right_click, row_menu, rows,
+                                     store, titles)
 
 
 # -- after a menu / modal closes ----------------------------------------------------------
@@ -54,14 +55,12 @@ def test_menus_are_deleted_after_closing(qtbot, tmp_path):
     menu.hide()
     qtbot.waitUntil(lambda: gone == [1])
     w = make_window(qtbot, tmp_path, SERIES)
-    qtbot.mouseClick(chips_by_id(w)["s1_1104"], Qt.MouseButton.LeftButton)
-    qtbot.wait(50)                                    # let the details window settle
-    w.details.color_button.click()
-    first = w.details.menu()
+    right_click(chips_by_id(w)["s1_1104"])
+    first = w.menu()
     gone2, gone3 = [], []
     first.destroyed.connect(lambda *_: gone2.append(1))
-    w.details.hide_button.click()                     # replaced by a new menu
-    second = w.details.menu()
+    right_click(chips_by_id(w)["s1_1105"])            # replaced by a new menu
+    second = w.menu()
     second.destroyed.connect(lambda *_: gone3.append(1))
     qtbot.waitUntil(lambda: gone2 == [1])             # the replaced menu is freed
     if not gone3:
@@ -152,12 +151,12 @@ def test_failed_save_rolls_back_and_says_so(qtbot, tmp_path):
     changed = []
     p.meetings_changed.connect(lambda: changed.append(1))
     click(qtbot, rows(p)[0])
-    click(qtbot, details(p).findChild(QPushButton, "hide"))
+    row_menu(p, rows(p)[0])
     _menu_action(p, meeting_menus.HIDE_SERIES).trigger()
     assert titles(p) == ["Standup", "Lunch"]
     assert p.settings.hidden_events == {}
     assert p.notice_text() == "Couldn't save — your settings file is not writable"
-    click(qtbot, details(p).findChild(QPushButton, "color"))
+    row_menu(p, rows(p)[0])
     _menu_action(p, meeting_menus.RESET_COLOR).trigger()
     assert p.settings.event_color(SERIES[0]) == "#3fa364"
     assert changed == []

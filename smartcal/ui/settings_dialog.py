@@ -9,13 +9,14 @@ import copy
 import logging
 
 from PyQt6.QtCore import QEvent, Qt, pyqtSignal
-from PyQt6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
-                             QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
+                             QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
                              QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
                              QTabWidget, QVBoxLayout, QWidget)
 
 from .. import agenda
 from ..textutil import plain_tip
+from .meeting_menus import STYLE_NAMES
 from . import theme
 
 log = logging.getLogger(__name__)
@@ -166,6 +167,14 @@ class SettingsDialog(QDialog):
         self.model_edit = QLineEdit(self.settings.claude_model)
         form.addRow(self.autostart_box)
         form.addRow("Claude model", self.model_edit)
+        # Also one click away: right-click a meeting > Color style.
+        self.tile_style_box = QComboBox()
+        for key, name in STYLE_NAMES:
+            self.tile_style_box.addItem(name, key)
+        self._tile_style_orig = getattr(self.settings, "tile_style", "stripe")
+        self.tile_style_box.setCurrentIndex(
+            max(0, self.tile_style_box.findData(self._tile_style_orig)))
+        form.addRow("Meeting color", self.tile_style_box)
         return w
 
     # -- meetings tab (hidden meetings, meeting colors; local to SmartCal) ---
@@ -197,7 +206,7 @@ class SettingsDialog(QDialog):
 
     def refresh_meetings(self) -> None:
         """Re-list hidden/colored meetings if they changed while the dialog was open
-        (e.g. Hide… in the popup). Pending Unhide/Reset marks are kept."""
+        (e.g. a hide from the popup). Pending Unhide/Reset marks are kept."""
         if self._meetings_snapshot() != self._meetings_seen:
             self._fill_meetings()
 
@@ -236,7 +245,7 @@ class SettingsDialog(QDialog):
 
         heading("Hidden meetings")
         if not self.settings.hidden_events:
-            lay.addWidget(QLabel("No hidden meetings. Use Hide… on a meeting to hide it."))
+            lay.addWidget(QLabel("No hidden meetings. Right-click a meeting > Hide this meeting to hide it."))
         for key, info in reversed(list(self.settings.hidden_events.items())):
             scope = "whole series" if info.get("scope") == "series" else "this meeting"
             label, button = add_row(info.get("title") or "(no title)",
@@ -246,7 +255,7 @@ class SettingsDialog(QDialog):
 
         heading("Colored meetings")
         if not self.settings.event_colors:
-            lay.addWidget(QLabel("No colored meetings. Use Color… on a meeting to color it."))
+            lay.addWidget(QLabel("No colored meetings. Right-click a meeting > Color to color it."))
         for key, color in reversed(list(self.settings.event_colors.items())):
             title = self.settings.event_color_titles.get(key) or "(no title)"
             scope = "whole series" if key.startswith("s:") else "this meeting"
@@ -407,7 +416,7 @@ class SettingsDialog(QDialog):
     # -- apply -------------------------------------------------------------
     _FIELDS = ("hidden_calendars", "shown_calendars", "lead_minutes", "default_lead_minutes",
                "muted", "autostart", "claude_model", "hidden_events", "event_colors",
-               "event_color_titles", "hidden_accounts")
+               "event_color_titles", "hidden_accounts", "tile_style")
 
     def accept(self) -> None:
         s = self.settings
@@ -420,6 +429,9 @@ class SettingsDialog(QDialog):
             if spin.value() != orig:
                 s.lead_minutes[cid] = spin.value()
         s.autostart = self.autostart_box.isChecked()
+        style = self.tile_style_box.currentData()
+        if style != self._tile_style_orig:   # only if changed here (the right-click
+            s.tile_style = style             # menu may have changed it meanwhile)
         s.claude_model = self.model_edit.text().strip() or s.claude_model
         for account, box in self.account_shown.items():
             if self._account_changed(account):   # only what was changed here
