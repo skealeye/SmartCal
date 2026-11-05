@@ -12,6 +12,7 @@ from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from .. import agenda, google_auth
+from . import placement
 
 log = logging.getLogger(__name__)
 
@@ -118,6 +119,10 @@ class TrayController(QSystemTrayIcon):
     def _tray_rect(self):
         return self.geometry()
 
+    def tray_geometry(self):
+        """The icon's screen rect (empty when it sits in the overflow flyout)."""
+        return self._tray_rect()
+
     def _on_activated(self, reason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self.toggle_popup()
@@ -180,7 +185,7 @@ class TrayController(QSystemTrayIcon):
         dlg = RemindersDialog(self.reminders)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         track_dialog(self._reminders_ref, dlg)
-        dlg.show()
+        placement.show_near_tray(dlg, self.tray_geometry())
 
     @property
     def _reminders_dialog(self):

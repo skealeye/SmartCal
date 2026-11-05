@@ -21,6 +21,7 @@ from smartcal.settings import Settings
 from smartcal.single_instance import SingleInstance
 from smartcal.undo import UndoStore
 from smartcal.toast import ToastSender, register_app_id
+from smartcal.ui.placement import show_near_tray
 from smartcal.ui.popup import AgendaPopup
 from smartcal.ui.settings_dialog import SettingsDialog
 from smartcal.ui.tray import TrayController, dialog_visible, track_dialog
@@ -110,9 +111,7 @@ def main() -> int:
         dlg.applied.connect(on_settings_applied)
         tray.signin_changed.connect(dlg.refresh_signin)
         track_dialog(dialog_ref, dlg)
-        dlg.show()
-        dlg.raise_()
-        dlg.activateWindow()
+        show_near_tray(dlg, tray.tray_geometry())   # opened from the tray menu
 
     assistant_ref: list[Assistant] = []
 
@@ -135,6 +134,7 @@ def main() -> int:
                           on_open_settings=open_settings, reminders=reminders,
                           on_before_exit=window.save_state)
     toast.tray = tray
+    window.tray_geometry = tray.tray_geometry   # first open: next to the tray icon
     popup.chat_attention.connect(guarded(tray.notify_attention))
     instance.activated.connect(guarded(tray.show_popup))   # a second launch was refused
     tray.show()

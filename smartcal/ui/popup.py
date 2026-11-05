@@ -5,13 +5,13 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 
-from PyQt6.QtCore import QEvent, QPoint, QRect, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QPoint, QRect, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea,
                              QVBoxLayout, QWidget)
 
 from .. import __version__, agenda
-from . import theme
+from . import placement, theme
 
 WIDTH = 250
 MARGIN = 8
@@ -195,14 +195,8 @@ class AgendaPopup(QWidget):
         return self._status.text()
 
     # -- rendering ---------------------------------------------------------
-    def _area(self, point: QPoint | None = None) -> QRect:
-        from PyQt6.QtGui import QGuiApplication
-        point = point if point is not None else (
-            self._tray_geom.center() if self._tray_geom is not None and not self._tray_geom.isEmpty()
-            else None)
-        screen = (QGuiApplication.screenAt(point) if point is not None else None) \
-            or QGuiApplication.primaryScreen()
-        return screen.availableGeometry()
+    def _area(self) -> QRect:
+        return placement.area_for(self._tray_geom)
 
     def refresh(self, now: datetime | None = None) -> None:
         now = now or datetime.now().astimezone()
@@ -284,19 +278,7 @@ class AgendaPopup(QWidget):
 
     # -- placement / focus ---------------------------------------------------
     def compute_position(self, tray: QRect | None, area: QRect) -> QPoint:
-        w, h = self.width(), self.height()
-        if tray is None or tray.isEmpty():
-            # Icon is hidden in the overflow flyout: bottom-right of the work area.
-            x, y = area.right() + 1 - w - MARGIN, area.bottom() + 1 - h - MARGIN
-        else:
-            x = tray.center().x() - w // 2
-            if tray.top() < area.center().y():  # taskbar at top
-                y = tray.bottom() + 1 + 6
-            else:
-                y = tray.top() - h - 6
-        x = max(area.left() + MARGIN, min(x, area.right() + 1 - w - MARGIN))
-        y = max(area.top() + MARGIN, min(y, area.bottom() + 1 - h - MARGIN))
-        return QPoint(x, y)
+        return placement.compute_position(QSize(self.width(), self.height()), tray, area)
 
     def _place(self) -> None:
         self.move(self.compute_position(self._tray_geom, self._area()))

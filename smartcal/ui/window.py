@@ -4,7 +4,7 @@ from __future__ import annotations
 import html
 from datetime import date, datetime, timedelta
 
-from PyQt6.QtCore import QByteArray, QRect, QSettings, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QByteArray, QRect, QSettings, QSize, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QGuiApplication, QPainter
 from PyQt6.QtWidgets import (QButtonGroup, QDialog, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QLabel,
                              QMainWindow, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
@@ -13,12 +13,13 @@ from PyQt6.QtWidgets import (QButtonGroup, QDialog, QFrame, QGraphicsOpacityEffe
 from .. import agenda
 from ..config import data_dir
 from ..sync import synced_days
-from . import layout, theme
+from . import layout, placement, theme
 
 HOUR_H = 48
 GUTTER_W = 52
 VIEWS = ("day", "week", "month")
 DEFAULT_SCROLL_HOUR = 7
+DEFAULT_SIZE = QSize(1000, 700)
 
 DECLINED_OPACITY = 0.45
 GRID = "#2e3033"
@@ -425,6 +426,7 @@ class CalendarWindow(QMainWindow):
         super().__init__(parent)
         self.cache, self.settings = cache, settings
         self.now = lambda: datetime.now().astimezone()
+        self.tray_geometry = lambda: None   # run.py: the tray icon's rect
         self._qs = qsettings or QSettings(
             str(data_dir() / "window.ini"), QSettings.Format.IniFormat)
         self.view = "week"
@@ -495,8 +497,9 @@ class CalendarWindow(QMainWindow):
     def _restore_geometry(self) -> None:
         geom = self._qs.value("window/geometry")
         ok = isinstance(geom, (QByteArray, bytes)) and self.restoreGeometry(geom)
-        if not ok or not self._on_a_screen():
-            self._center_default()
+        self._needs_default_place = not ok or not self._on_a_screen()
+        if self._needs_default_place:
+            self._center_default()   # until the first show places it near the tray
 
     def _on_a_screen(self) -> bool:
         frame = self.frameGeometry()
@@ -526,9 +529,15 @@ class CalendarWindow(QMainWindow):
 
     def show_view(self, view: str) -> None:
         self.set_view(view)
+        first = self._needs_default_place   # first open, nothing saved: next to the tray
+        self._needs_default_place = False
+        if first:
+            placement.place_window_near_tray(self, self.tray_geometry(), DEFAULT_SIZE)
         if self.isMinimized():
             self.showNormal()
         self.show()
+        if first:   # again, now that the real frame and minimum size are known
+            placement.place_window_near_tray(self, self.tray_geometry(), self.size())
         self.raise_()
         self.activateWindow()
 
@@ -615,6 +624,7 @@ class CalendarWindow(QMainWindow):
             self.details.close()
             self.details.deleteLater()
         self.details = EventDetails(event, self.now(), self)
+        placement.center_over(self.details, self)   # opened from the window: over it
         self.details.show()
         self.details.raise_()
 
