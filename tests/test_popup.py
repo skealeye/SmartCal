@@ -96,8 +96,11 @@ def test_popup_stays_open_while_a_modal_box_is_up(qtbot, tmp_path):
     QApplication.sendEvent(popup, QEvent(QEvent.Type.WindowDeactivate))   # connected once
     assert popup.isVisible()
     popup.active_modal = lambda: None
-    modal.finished.emit(0)             # the box closed: the popup takes focus back
-    assert popup.isVisible() and activated == [1]
+    popup.active_window = lambda: popup    # the popup's window is still the active one
+    popup.app_active = lambda: True
+    modal.finished.emit(0)             # the box closed: one event-loop pass later...
+    qtbot.waitUntil(lambda: activated == [1])   # ...the popup takes focus back
+    assert popup.isVisible()
     QApplication.sendEvent(popup, QEvent(QEvent.Type.WindowDeactivate))
     assert not popup.isVisible()       # no modal any more: normal hide
 

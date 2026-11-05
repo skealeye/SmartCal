@@ -62,6 +62,26 @@ def _capped(d: dict) -> dict:
     return dict(list(d.items())[-MAX_MEETING_ENTRIES:])
 
 
+def _evict_hidden(hidden: dict, today: date, keep: str | None = None) -> dict:
+    """Cap hidden meetings at MAX_MEETING_ENTRIES. Evicted first: one-off hides whose
+    date has passed (oldest first), then other one-off hides (oldest first), and only
+    then whole-series hides (oldest first): a hidden series keeps mattering. `keep`
+    (the entry just added) is never evicted."""
+    excess = len(hidden) - MAX_MEETING_ENTRIES
+    if excess <= 0:
+        return hidden
+    today_iso = today.isoformat()
+    order = [k for k in hidden if k != keep]              # insertion order = age
+    expired = [k for k in order if hidden[k]["scope"] == "event"
+               and hidden[k]["when"] < today_iso]
+    expired.sort(key=lambda k: hidden[k]["when"])         # stable: ties keep age order
+    current = [k for k in order if hidden[k]["scope"] == "event"
+               and hidden[k]["when"] >= today_iso]
+    series = [k for k in order if hidden[k]["scope"] != "event"]
+    drop = set((expired + current + series)[:excess])
+    return {k: v for k, v in hidden.items() if k not in drop}
+
+
 class Settings:
     def __init__(self, path: str | Path | None = None):
         self.path = Path(path) if path else data_dir() / "settings.json"
@@ -131,7 +151,7 @@ class Settings:
             except ValueError:
                 continue
             out[k] = {"title": _title(title), "scope": scope, "when": when}
-        return _capped(out)
+        return _evict_hidden(out, date.today())
 
     @staticmethod
     def _load_colors(value) -> dict[str, str]:
@@ -219,6 +239,20 @@ class Settings:
         self.save()
 
     # -- hidden meetings (local to SmartCal) ---------------------------------
+    # Every mutator saves at once. If the save fails (OSError) the in-memory change is
+    # rolled back and the OSError re-raised, so the UI can say so and nothing half-applies.
+    def _meeting_state(self) -> tuple:
+        return (dict(self.hidden_events), dict(self.event_colors),
+                dict(self.event_color_titles))
+
+    def _save_or_rollback(self, before: tuple) -> None:
+        try:
+            self.save()
+        except OSError:
+            self.hidden_events, self.event_colors, self.event_color_titles = before
+            log.warning("could not save %s; meeting change rolled back", self.path)
+            raise
+
     def hide_event(self, event, scope: str = "event") -> str:
         """Hide one occurrence ("event") or a whole recurring series ("series") in
         SmartCal's agenda, windows and toasts. Returns the key used."""
@@ -232,16 +266,21 @@ class Settings:
             when = start.date().isoformat()
         except (AttributeError, ValueError):
             when = date.today().isoformat()
-        self.hidden_events.pop(key, None)       # re-hiding moves it to the newest end
-        self.hidden_events[key] = {"title": _title(getattr(event, "title", "")),
-                                   "scope": scope, "when": when}
-        self.hidden_events = _capped(self.hidden_events)
-        self.save()
+        before = self._meeting_state()
+        hidden = dict(self.hidden_events)
+        hidden.pop(key, None)                   # re-hiding moves it to the newest end
+        hidden[key] = {"title": _title(getattr(event, "title", "")),
+                       "scope": scope, "when": when}
+        self.hidden_events = _evict_hidden(hidden, date.today(), keep=key)
+        self._save_or_rollback(before)
         return key
 
     def unhide(self, key: str) -> None:
-        if self.hidden_events.pop(key, None) is not None:
-            self.save()
+        if key not in self.hidden_events:
+            return
+        before = self._meeting_state()
+        self.hidden_events = {k: v for k, v in self.hidden_events.items() if k != key}
+        self._save_or_rollback(before)
 
     def is_event_hidden(self, event) -> bool:
         if not self.hidden_events:
@@ -257,22 +296,28 @@ class Settings:
         if not isinstance(color, str) or not _COLOR.fullmatch(color):
             raise ValueError(f"not a #rrggbb color: {color!r}")
         key = color_key(event)
-        self.event_colors.pop(key, None)
-        self.event_colors[key] = color.lower()
-        self.event_color_titles[key] = _title(getattr(event, "title", ""))
-        self.event_colors = _capped(self.event_colors)
-        self.event_color_titles = {k: v for k, v in self.event_color_titles.items()
-                                   if k in self.event_colors}
-        self.save()
+        before = self._meeting_state()
+        colors = dict(self.event_colors)
+        colors.pop(key, None)
+        colors[key] = color.lower()
+        self.event_colors = _capped(colors)
+        titles = dict(self.event_color_titles)
+        titles[key] = _title(getattr(event, "title", ""))
+        self.event_color_titles = {k: v for k, v in titles.items() if k in self.event_colors}
+        self._save_or_rollback(before)
         return key
 
     def clear_event_color(self, event) -> None:
         self.clear_color_key(color_key(event))
 
     def clear_color_key(self, key: str) -> None:
-        self.event_color_titles.pop(key, None)
-        if self.event_colors.pop(key, None) is not None:
-            self.save()
+        if key not in self.event_colors:
+            return
+        before = self._meeting_state()
+        self.event_colors = {k: v for k, v in self.event_colors.items() if k != key}
+        self.event_color_titles = {k: v for k, v in self.event_color_titles.items()
+                                   if k != key}
+        self._save_or_rollback(before)
 
     def event_color(self, event) -> str | None:
         return self.event_colors.get(color_key(event)) if self.event_colors else None

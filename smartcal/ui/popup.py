@@ -6,8 +6,8 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 
-from PyQt6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QUrl, pyqtSignal
-from PyQt6.QtGui import QCursor, QDesktopServices
+from PyQt6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QCursor, QDesktopServices, QGuiApplication
 from PyQt6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QPushButton,
                              QScrollArea, QSizePolicy, QStyle, QVBoxLayout, QWidget)
 
@@ -47,6 +47,10 @@ class AgendaPopup(QWidget):
         self.cursor_pos = lambda: QCursor.pos()
         self.active_modal = QApplication.activeModalWidget
         self.active_popup = QApplication.activePopupWidget
+        self.active_window = QApplication.activeWindow
+        self.app_active = lambda: (QGuiApplication.applicationState()
+                                   == Qt.ApplicationState.ApplicationActive)
+        self._settle_pending = False
         self._menu = None
         self._expanded_key: tuple | None = None
         self._watched_modals: list = []
@@ -143,14 +147,24 @@ class AgendaPopup(QWidget):
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key.Key_Escape:
-            row = self.expanded_row()
-            if row is not None:          # Esc first collapses an expanded meeting
-                self.toggle_row(row)
-                row.setFocus()
-                return
-            self.hide()
+            self.handle_escape()
             return
         super().keyPressEvent(e)
+
+    def handle_escape(self) -> None:
+        """The one place Esc is decided (rows, the chat and the popup all end up here):
+        collapse the expanded meeting, else collapse the chat, else close the popup."""
+        row = self.expanded_row()
+        if row is not None:
+            in_chat = self._chat is not None and self._chat.isAncestorOf(
+                QApplication.focusWidget())
+            self.toggle_row(row)
+            if not in_chat:
+                row.setFocus()
+        elif self.chat_expanded():
+            self._collapse_chat()
+        else:
+            self.hide()
 
     def toggle_chat(self) -> None:
         if self._chat_factory is None:
@@ -160,7 +174,7 @@ class AgendaPopup(QWidget):
             self._chat = ChatWidget(self._chat_factory)
             self._chat.changed.connect(self.chat_changed)
             self._chat.attention.connect(self.chat_attention)
-            self._chat.collapse_requested.connect(self._collapse_chat)
+            self._chat.collapse_requested.connect(self.handle_escape)   # Esc in the chat
             self._outer.insertWidget(self._outer.indexOf(self._footer), self._chat)
             expand = True
         else:
@@ -282,7 +296,7 @@ class AgendaPopup(QWidget):
     def _make_row(self, ev, time_text: str, is_next: bool) -> "AgendaRow":
         row = AgendaRow(ev, time_text, is_next, theme.effective_color(ev, self.settings))
         url = getattr(ev, "meeting_url", None)
-        if url and url.lower().startswith(("http://", "https://")):
+        if safe_http_url(url) is not None:     # same check as the click handler
             join = QPushButton("Join")
             join.setObjectName("join")
             join.setToolTip(meeting_label(url))
@@ -294,6 +308,7 @@ class AgendaPopup(QWidget):
                 "QPushButton:hover{background:#a9c8ff;}")
             join.clicked.connect(lambda _c=False, u=url: self._join(u))
             row.head_layout.addWidget(join, 0, Qt.AlignmentFlag.AlignVCenter)
+            row.join_button = join
         row.toggle_requested.connect(self.toggle_row)
         return row
 
@@ -318,6 +333,7 @@ class AgendaPopup(QWidget):
                     other.set_expanded(False)
             row.set_expanded(True, self._build_details)
             self._expanded_key = _row_key(row.event)
+            self._fix_tab_order(row)
         for r in self.row_widgets():
             if isinstance(r, AgendaRow):
                 r.layout().invalidate()  # size hints now, not on the next event loop pass
@@ -326,6 +342,19 @@ class AgendaPopup(QWidget):
         self._resize()
         if row.is_expanded():
             self._scroll.ensureWidgetVisible(row, 0, 0)
+
+    def _fix_tab_order(self, row: "AgendaRow") -> None:
+        """Tab goes row -> Join -> Hide… -> Color… -> next row."""
+        d = row.details
+        chain = [row, row.join_button, d.findChild(QPushButton, "bigjoin"),
+                 d.findChild(QPushButton, "hide"), d.findChild(QPushButton, "color")]
+        rows = [r for r in self.row_widgets() if isinstance(r, AgendaRow)]
+        i = rows.index(row) if row in rows else -1
+        if 0 <= i < len(rows) - 1:
+            chain.append(rows[i + 1])
+        chain = [w for w in chain if w is not None]
+        for a, b in zip(chain, chain[1:]):
+            QWidget.setTabOrder(a, b)
 
     def _build_details(self, ev) -> QWidget:
         """The expanded part of a row; built on first expand only (keeps refresh fast)."""
@@ -360,6 +389,8 @@ class AgendaPopup(QWidget):
                                f"border:1px solid {theme.BORDER};font-size:11px;}}")
             desc.setFixedHeight(desc.fit_height(DETAILS_WIDTH - _scrollbar_w(), DESCRIPTION_LINES))
             desc.link_opened.connect(lambda _u: self.hide())
+            # Out of the Tab chain (row -> Join -> Hide… -> Color…); links still click.
+            desc.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
             lay.addWidget(desc)
         url = getattr(ev, "meeting_url", None)
         if safe_http_url(url) is not None:
@@ -381,11 +412,13 @@ class AgendaPopup(QWidget):
                  "padding:3px 8px;border:none;border-radius:3px;}"
                  "QPushButton:hover{background:#4a4d51;}")
         hide_btn = QPushButton("Hide…")
+        hide_btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         hide_btn.setObjectName("hide")
         hide_btn.setToolTip("Hide in SmartCal only (Google is not changed)")
         hide_btn.setStyleSheet(style)
         hide_btn.clicked.connect(lambda _c=False, e=ev, b=hide_btn: self.show_hide_menu(e, b))
         color_btn = QPushButton(meeting_menus.color_button_text(ev))
+        color_btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         color_btn.setObjectName("color")
         color_btn.setToolTip("Color in SmartCal only (Google is not changed)")
         color_btn.setStyleSheet(style)
@@ -401,16 +434,36 @@ class AgendaPopup(QWidget):
         return self._menu
 
     def _show_menu(self, menu, button) -> None:
-        if self._menu is not None and self._menu is not menu:
-            self._menu.deleteLater()
+        if self._menu is not menu:
+            meeting_menus.discard(self._menu)
         self._menu = menu
-        menu.aboutToHide.connect(self._after_menu)
+        menu.aboutToHide.connect(self._settle_after_close)
+        meeting_menus.delete_when_closed(menu)
         menu.popup(button.mapToGlobal(button.rect().bottomLeft()))
 
-    def _after_menu(self) -> None:
-        if self.isVisible():
-            self.raise_()
-            self.activateWindow()
+    def _settle_after_close(self, *_args) -> None:
+        """A menu or modal box closed. Wait one event-loop pass for Windows to settle
+        activation, then: if the click went to another app (no active window, or the
+        app is not active), close the popup like any focus loss; else take focus back.
+        Re-activating blindly could leave the popup up but inactive, with no further
+        WindowDeactivate to ever hide it."""
+        if self._settle_pending:
+            return
+        self._settle_pending = True
+        QTimer.singleShot(0, self._settle)
+
+    def _settle(self) -> None:
+        self._settle_pending = False
+        if not self.isVisible():
+            return
+        if self.active_modal() is not None or meeting_menus.is_open(self._menu):
+            return                      # something else still holds focus on purpose
+        active = self.active_window()
+        if active is None or not self.app_active() or active is not self:
+            self.hide()
+            return
+        self.raise_()
+        self.activateWindow()
 
     def show_hide_menu(self, ev, button) -> None:
         # The menu belongs to the popup (not the row): a refresh never deletes it.
@@ -423,17 +476,25 @@ class AgendaPopup(QWidget):
             lambda color, e=ev: self.color_meeting(e, color)), button)
 
     def hide_meeting(self, ev, scope: str) -> None:
-        self.settings.hide_event(ev, scope)
+        try:
+            self.settings.hide_event(ev, scope)
+        except OSError:                 # rolled back by Settings; say so, change nothing
+            self.show_notice(meeting_menus.SAVE_FAILED)
+            return
         self._expanded_key = None
         self.refresh()
         self.show_notice(meeting_menus.HIDDEN_NOTICE)
         self.meetings_changed.emit()
 
     def color_meeting(self, ev, color) -> None:
-        if color is None:
-            self.settings.clear_event_color(ev)
-        else:
-            self.settings.set_event_color(ev, color)
+        try:
+            if color is None:
+                self.settings.clear_event_color(ev)
+            else:
+                self.settings.set_event_color(ev, color)
+        except OSError:
+            self.show_notice(meeting_menus.SAVE_FAILED)
+            return
         self.refresh()          # keeps this row expanded
         self.meetings_changed.emit()
 
@@ -466,8 +527,8 @@ class AgendaPopup(QWidget):
         if e.type() == QEvent.Type.WindowDeactivate and self.isVisible():
             modal = self.active_modal()
             menu = self.active_popup()
-            if menu is None and self._menu is not None and self._menu.isVisible():
-                menu = self._menu
+            if not self._owns(menu):    # e.g. the tray's own context menu: not ours
+                menu = self._menu if meeting_menus.is_open(self._menu) else None
             if modal is not None and modal is not self:
                 self._reactivate_after(modal)   # e.g. the "Undo anyway" confirm box
             elif menu is not None and menu is not self:
@@ -475,6 +536,14 @@ class AgendaPopup(QWidget):
             else:
                 self.hide()
         return super().event(e)
+
+    def _owns(self, w) -> bool:
+        """True if `w` (a popup menu) was opened from this popup or its children."""
+        while w is not None:
+            if w is self:
+                return True
+            w = w.parentWidget()
+        return False
 
     def _reactivate_after(self, modal) -> None:
         """Stay open while a modal box or a popup menu is up; take focus back when it
@@ -489,9 +558,7 @@ class AgendaPopup(QWidget):
         def done(*_args, m=modal) -> None:
             if m in self._watched_modals:
                 self._watched_modals.remove(m)
-            if self.isVisible():
-                self.raise_()
-                self.activateWindow()
+            self._settle_after_close()
         finished.connect(done)
 
     def hideEvent(self, e):
@@ -533,6 +600,7 @@ class AgendaRow(QFrame):
         super().__init__(parent)
         self.event = ev
         self.details: QWidget | None = None
+        self.join_button: QPushButton | None = None
         self.setObjectName("row")
         bg = theme.BG_NEXT if is_next else "transparent"
         self.setStyleSheet(f"QFrame#row{{background:{bg};border-radius:4px;"

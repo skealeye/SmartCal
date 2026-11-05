@@ -1,7 +1,6 @@
 """Day / Week / Month window. Read-only; reads only from the cache."""
 from __future__ import annotations
 
-import html
 from datetime import date, datetime, timedelta
 
 from PyQt6.QtCore import QByteArray, QRect, QSettings, QSize, Qt, QTimer, QUrl, pyqtSignal
@@ -13,7 +12,7 @@ from PyQt6.QtWidgets import (QButtonGroup, QDialog, QFrame, QGraphicsOpacityEffe
 from .. import agenda
 from ..config import data_dir
 from ..sync import synced_days
-from ..textutil import html_to_text, meeting_label, safe_http_url
+from ..textutil import html_to_text, meeting_label, plain_tip, safe_http_url
 from . import layout, meeting_menus, placement, theme
 from .linktext import LinkText
 
@@ -33,11 +32,6 @@ def _text_on(color: str) -> str:
     c = QColor(color)
     lum = 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
     return "#202124" if lum > 150 else "#ffffff"
-
-
-def plain_tip(text: str) -> str:
-    """A tooltip string Qt will not interpret as rich text markup."""
-    return f"<p style='white-space:pre'>{html.escape(text)}</p>"
 
 
 def _calendar_color(event) -> str:
@@ -408,7 +402,7 @@ class EventDetails(QDialog):
         lay.addWidget(self.time_label)
         self.join_button = None
         url = event.meeting_url
-        if url and url.lower().startswith(("http://", "https://")):
+        if safe_http_url(url) is not None:     # same check as the click handler
             self.join_button = QPushButton(meeting_label(url))
             self.join_button.setObjectName("join")
             self.join_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -462,7 +456,9 @@ class EventDetails(QDialog):
         return self._menu
 
     def _popup_menu(self, menu, button) -> None:
+        meeting_menus.discard(self._menu)
         self._menu = menu
+        meeting_menus.delete_when_closed(menu)
         menu.popup(button.mapToGlobal(button.rect().bottomLeft()))
 
     def show_hide_menu(self) -> None:
@@ -716,17 +712,25 @@ class CalendarWindow(QMainWindow):
         return self.notice_label.text() if not self.notice_label.isHidden() else ""
 
     def hide_meeting(self, event, scope: str) -> None:
-        self.settings.hide_event(event, scope)
+        try:
+            self.settings.hide_event(event, scope)
+        except OSError:                 # rolled back by Settings; say so, change nothing
+            self.show_notice(meeting_menus.SAVE_FAILED)
+            return
         self._close_details()
         self.show_notice(meeting_menus.HIDDEN_NOTICE)
         self.refresh()
         self.meetings_changed.emit()
 
     def color_meeting(self, event, color) -> None:
-        if color is None:
-            self.settings.clear_event_color(event)
-        else:
-            self.settings.set_event_color(event, color)
+        try:
+            if color is None:
+                self.settings.clear_event_color(event)
+            else:
+                self.settings.set_event_color(event, color)
+        except OSError:
+            self.show_notice(meeting_menus.SAVE_FAILED)
+            return
         if self.details is not None and self.details.event is event:
             self.details.update_color()
         self.refresh()

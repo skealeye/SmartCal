@@ -14,6 +14,7 @@ HIDE_ONE = "Hide this meeting"
 HIDE_SERIES = "Hide all in this series"
 RESET_COLOR = "Reset to calendar color"
 HIDDEN_NOTICE = "Hidden. Undo in Settings > Meetings."
+SAVE_FAILED = "Couldn't save — your settings file is not writable"
 
 
 def is_recurring(event) -> bool:
@@ -78,6 +79,33 @@ def color_menu(parent, event, current: str | None, on_pick) -> QMenu:
     reset.triggered.connect(lambda _c=False: on_pick(None))
     menu.addAction(reset)
     return menu
+
+
+def delete_when_closed(menu: QMenu) -> None:
+    """Free the menu once it closes. deleteLater runs on a later event-loop pass, after
+    the triggered action's handler, so a chosen action still runs."""
+    menu.aboutToHide.connect(menu.deleteLater)
+
+
+def is_open(menu) -> bool:
+    """True for a live, visible menu (False for None or an already deleted one)."""
+    if menu is None:
+        return False
+    try:
+        return bool(menu.isVisible())
+    except RuntimeError:
+        return False
+
+
+def discard(menu) -> None:
+    """Delete an older menu that is being replaced (safe if it is already gone)."""
+    if menu is None:
+        return
+    try:
+        menu.hide()
+        menu.deleteLater()
+    except RuntimeError:
+        pass
 
 
 def find_action(menu: QMenu, text: str) -> QAction | None:

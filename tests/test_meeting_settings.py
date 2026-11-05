@@ -46,7 +46,9 @@ def test_hide_this_occurrence_only(tmp_path):
     assert [e.title for e in agenda.today(cache, s, NOW)] == ["Lunch"]
     tomorrow = NOW + timedelta(days=1)
     assert [e.id for e in agenda.today(cache, s, tomorrow)] == ["s1_1105"]
-    assert s.hidden_events[key] == {"title": "Standup", "scope": "event", "when": "2026-11-04"}
+    # "when" is the meeting's own local date, whatever the machine's time zone.
+    local_day = SERIES[0].start.astimezone().date().isoformat()
+    assert s.hidden_events[key] == {"title": "Standup", "scope": "event", "when": local_day}
 
 
 def test_hide_series_hides_all_occurrences(tmp_path):

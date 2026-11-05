@@ -87,7 +87,7 @@ Open from the tray icon menu: accounts (add/remove), reminder lead time, start w
 
 **Meetings** tab: lists hidden meetings (title, "this meeting" or "whole series", date) with an **Unhide** button each, and colored meetings with a **Reset** button each. Changes apply when you click **OK**.
 
-Hidden meetings and meeting colors are stored in `%APPDATA%\SmartCal\settings.json` (keys `hidden_events`, `event_colors`, `event_color_titles`; at most 500 of each). They are never sent to Google.
+Hidden meetings and meeting colors are stored in `%APPDATA%\SmartCal\settings.json` (keys `hidden_events`, `event_colors`, `event_color_titles`; at most 500 of each). They are never sent to Google. When Google splits a series in two ("this and following" edits), the new series starts with a fresh hide/color state.
 
 ## Troubleshooting
 

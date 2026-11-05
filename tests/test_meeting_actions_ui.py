@@ -219,21 +219,30 @@ def test_expanding_is_fast(qtbot, tmp_path):
 
 
 # -- menus keep the popup open ------------------------------------------------------
+def _open_color_menu(qtbot, p):
+    click(qtbot, rows(p)[0])
+    click(qtbot, rows(p)[0].details.findChild(QPushButton, "color"))
+    QApplication.processEvents()      # deliver what the platform queued for the open menu
+    return p.menu()
+
+
 def test_menu_does_not_hide_popup(qtbot, tmp_path):
     p = make_popup(qtbot, tmp_path, [ev("1", "A", 10)])
-    click(qtbot, rows(p)[0])
     activated = []
     p.activateWindow = lambda: activated.append(1)
-    click(qtbot, rows(p)[0].details.findChild(QPushButton, "color"))
-    menu = p.menu()
+    menu = _open_color_menu(qtbot, p)
     assert menu is not None
     p.active_popup = lambda: menu
     QApplication.sendEvent(p, QEvent(QEvent.Type.WindowDeactivate))
     assert p.isVisible()
+    # The menu closes (Esc or a choice) while the popup's window is still the active
+    # one: it stays open and takes focus back, one event-loop pass later.
     p.active_popup = lambda: None
-    menu.hide()                                       # menu closed: focus comes back
-    assert p.isVisible() and activated
+    p.active_window = lambda: p
+    p.app_active = lambda: True
     menu.hide()
+    qtbot.waitUntil(lambda: activated == [1])
+    assert p.isVisible()
     QApplication.sendEvent(p, QEvent(QEvent.Type.WindowDeactivate))
     assert not p.isVisible()                          # no menu any more: normal hide
 

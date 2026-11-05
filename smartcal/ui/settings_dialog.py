@@ -8,7 +8,7 @@ from __future__ import annotations
 import copy
 import logging
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, Qt, pyqtSignal
 from PyQt6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
                              QHBoxLayout, QLabel, QLineEdit, QListWidget, QMessageBox,
                              QPushButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout,
@@ -147,12 +147,39 @@ class SettingsDialog(QDialog):
         # key -> (title label, Unhide/Reset button)
         self.hidden_rows: dict[str, tuple[QLabel, QPushButton]] = {}
         self.color_rows: dict[str, tuple[QLabel, QPushButton]] = {}
+        self._meetings_seen = None
         w = QWidget()
         outer = QVBoxLayout(w)
         note = QLabel("Hidden and colored meetings are kept in SmartCal only; "
                       "nothing changes in Google Calendar.")
         note.setWordWrap(True)
         outer.addWidget(note)
+        self._meetings_scroll = QScrollArea()
+        self._meetings_scroll.setWidgetResizable(True)
+        self._meetings_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer.addWidget(self._meetings_scroll, 1)
+        self._fill_meetings()
+        return w
+
+    def _meetings_snapshot(self):
+        s = self.settings
+        return (list(s.hidden_events.items()), list(s.event_colors.items()),
+                dict(s.event_color_titles))
+
+    def refresh_meetings(self) -> None:
+        """Re-list hidden/colored meetings if they changed while the dialog was open
+        (e.g. Hide… in the popup). Pending Unhide/Reset marks are kept."""
+        if self._meetings_snapshot() != self._meetings_seen:
+            self._fill_meetings()
+
+    def event(self, e):
+        if e.type() == QEvent.Type.WindowActivate:
+            self.refresh_meetings()
+        return super().event(e)
+
+    def _fill_meetings(self) -> None:
+        self._meetings_seen = self._meetings_snapshot()
+        self.hidden_rows, self.color_rows = {}, {}
         inner = QWidget()
         lay = QVBoxLayout(inner)
 
@@ -203,23 +230,24 @@ class SettingsDialog(QDialog):
             lay.itemAt(lay.count() - 1).layout().insertWidget(0, swatch)
             self.color_rows[key] = (label, button)
         lay.addStretch(1)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setWidget(inner)
-        outer.addWidget(scroll, 1)
-        return w
+        for key in self._unhide & set(self.hidden_rows):
+            self._show_mark(key, self._unhide, self.hidden_rows)
+        for key in self._reset_colors & set(self.color_rows):
+            self._show_mark(key, self._reset_colors, self.color_rows)
+        self._meetings_scroll.setWidget(inner)      # the old list widget is deleted
 
     def _mark(self, key: str, pending: set, rows: dict) -> None:
         """Toggle a pending Unhide/Reset; nothing is saved until OK."""
-        label, button = rows[key]
-        verb = "Unhide" if rows is self.hidden_rows else "Reset"
         if key in pending:
             pending.discard(key)
-            button.setText(verb)
         else:
             pending.add(key)
-            button.setText(f"Undo {verb.lower()}")
+        self._show_mark(key, pending, rows)
+
+    def _show_mark(self, key: str, pending: set, rows: dict) -> None:
+        label, button = rows[key]
+        verb = "Unhide" if rows is self.hidden_rows else "Reset"
+        button.setText(f"Undo {verb.lower()}" if key in pending else verb)
         font = label.font()
         font.setStrikeOut(key in pending)
         label.setFont(font)

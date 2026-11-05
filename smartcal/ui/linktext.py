@@ -5,19 +5,14 @@ The HTML is built by `textutil.linkify_to_html` from text that is already plain
 Qt never follows a link by itself; every click is re-validated and only http(s) opens."""
 from __future__ import annotations
 
-import html
-
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices, QTextOption
 from PyQt6.QtWidgets import QTextBrowser
 
-from ..textutil import linkify_to_html, safe_http_url
+from ..textutil import linkify_to_html, plain_tip, safe_http_url
 from . import theme
 
-
-def plain_tip(text: str) -> str:
-    """A tooltip string Qt will not interpret as rich text markup."""
-    return f"<p style='white-space:pre'>{html.escape(text)}</p>"
+__all__ = ["LinkText", "plain_tip"]
 
 
 class LinkText(QTextBrowser):

@@ -140,18 +140,28 @@ _TRAILING_PUNCT = ".,;:!?"
 
 
 def _trim_url(url: str) -> str:
-    """Drop trailing sentence punctuation and unbalanced closing brackets."""
-    while url:
-        last = url[-1]
+    """Drop trailing sentence punctuation and unbalanced closing brackets.
+
+    Bracket counts are taken once and updated as characters are dropped (linear time,
+    even for a 20,000-character run of ")")."""
+    opens = {")": url.count("("), "]": url.count("[")}
+    closes = {")": url.count(")"), "]": url.count("]")}
+    end = len(url)
+    while end:
+        last = url[end - 1]
         if last in _TRAILING_PUNCT:
-            url = url[:-1]
-        elif last == ")" and url.count(")") > url.count("("):
-            url = url[:-1]
-        elif last == "]" and url.count("]") > url.count("["):
-            url = url[:-1]
+            end -= 1
+        elif last in closes and closes[last] > opens[last]:
+            closes[last] -= 1
+            end -= 1
         else:
             break
-    return url
+    return url[:end]
+
+
+def plain_tip(text: str) -> str:
+    """A tooltip string Qt will not interpret as rich text markup."""
+    return f"<p style='white-space:pre'>{html.escape(text)}</p>"
 
 
 def linkify_to_html(plain: str) -> str:

@@ -130,7 +130,9 @@ class _Item(QFrame):
 class ChatWidget(QWidget):
     changed = pyqtSignal()   # a calendar write or undo happened
     attention = pyqtSignal(str)          # needs the owner while the popup is hidden
-    collapse_requested = pyqtSignal()    # Esc in the chat
+    # Esc in the chat. The chat does not collapse itself: the popup decides
+    # (expanded meeting first, then the chat, then the popup; AgendaPopup.handle_escape).
+    collapse_requested = pyqtSignal()
 
     def __init__(self, assistant_factory: Callable[[], object], parent=None):
         super().__init__(parent)
