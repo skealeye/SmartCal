@@ -1,7 +1,10 @@
-"""The tray agenda popup ("A. Agenda list" layout). Reads only from the cache."""
+"""The tray agenda popup ("A. Agenda list" layout). Reads only from the cache.
+
+Clicking a meeting selects it and shows its details in a pop-out (DetailsFlyout) on
+the left of the popup. Popup + flyout (+ their menus and modal boxes) are one group:
+focus moving between them keeps both open; the group closes when neither is active."""
 from __future__ import annotations
 
-import html
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -9,18 +12,16 @@ from datetime import datetime
 from PyQt6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QCursor, QDesktopServices, QGuiApplication
 from PyQt6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QPushButton,
-                             QScrollArea, QSizePolicy, QStyle, QVBoxLayout, QWidget)
+                             QScrollArea, QVBoxLayout, QWidget)
 
 from .. import __version__, agenda
-from ..textutil import html_to_text, meeting_label, safe_http_url
-from . import layout, meeting_menus, placement, theme
-from .linktext import LinkText, plain_tip
+from ..textutil import meeting_label, safe_http_url
+from . import meeting_menus, placement, theme
 
 WIDTH = 250
 MARGIN = 8
 MAX_HEIGHT = 480
-DETAILS_WIDTH = WIDTH - 20 - 4 - 6 - 4 - 2   # popup margins, stripe, spacing, row margins
-DESCRIPTION_LINES = 8                         # longer descriptions scroll
+BG_SELECTED = "#3a3f4b"       # the selected meeting (the next-up one stays BG_NEXT blue)
 
 
 @dataclass
@@ -52,7 +53,9 @@ class AgendaPopup(QWidget):
                                    == Qt.ApplicationState.ApplicationActive)
         self._settle_pending = False
         self._menu = None
-        self._expanded_key: tuple | None = None
+        self._selected_key: tuple | None = None
+        self._flyout = None             # DetailsFlyout, built on the first selection
+        self.flyout_side = ""           # where it went last: "left", "right" or "over"
         self._watched_modals: list = []
         self.last_hidden_at = -1e9
         self.last_hidden_cursor = QPoint()
@@ -152,15 +155,12 @@ class AgendaPopup(QWidget):
         super().keyPressEvent(e)
 
     def handle_escape(self) -> None:
-        """The one place Esc is decided (rows, the chat and the popup all end up here):
-        collapse the expanded meeting, else collapse the chat, else close the popup."""
-        row = self.expanded_row()
-        if row is not None:
+        """The one place Esc is decided (rows, the flyout, the chat and the popup all end
+        up here): close the details flyout, else collapse the chat, else close the popup."""
+        if self.flyout_open():
             in_chat = self._chat is not None and self._chat.isAncestorOf(
                 QApplication.focusWidget())
-            self.toggle_row(row)
-            if not in_chat:
-                row.setFocus()
+            self.close_flyout(restore_focus=not in_chat)
         elif self.chat_expanded():
             self._collapse_chat()
         else:
@@ -251,19 +251,21 @@ class AgendaPopup(QWidget):
                 item.widget().hide()
                 item.widget().deleteLater()
         self._rows = []
-        expanded = None
+        selected = None
         for ev in events:
             is_next = nxt is not None and ev.id == nxt.id and ev.account == nxt.account
             time_text = "All day" if ev.all_day else f"{ev.start:%I:%M %p}".lstrip("0")
             self._rows.append(RowInfo(ev.title, is_next, time_text))
             row = self._make_row(ev, time_text, is_next)
             self._rows_box.addWidget(row)
-            if self._expanded_key is not None and _row_key(ev) == self._expanded_key:
-                expanded = row
-        if expanded is not None:   # a refresh keeps the open meeting open
-            expanded.set_expanded(True, self._build_details)
-        else:
-            self._expanded_key = None
+            if self._selected_key is not None and _row_key(ev) == self._selected_key:
+                selected = row
+        if selected is not None:   # a refresh keeps the selected meeting's details open
+            selected.set_selected(True)
+            if self.flyout_open():
+                self._flyout.set_event(selected.event)   # swapped in place
+        elif self._selected_key is not None:
+            self.close_flyout(restore_focus=False)   # gone: hidden, deleted, synced away
         if events:
             self._empty.hide()
         else:
@@ -273,6 +275,7 @@ class AgendaPopup(QWidget):
             self._empty.show()
         self._scroll.setVisible(bool(events))
         self._resize()
+        self._place_flyout()
 
     def _resize(self) -> None:
         """Cap the list height (header/footer stay visible), then re-anchor if shown."""
@@ -317,117 +320,99 @@ class AgendaPopup(QWidget):
             QDesktopServices.openUrl(QUrl(url))
             self.hide()
 
-    # -- expanded row ---------------------------------------------------------
-    def expanded_row(self) -> "AgendaRow | None":
-        return next((r for r in self.row_widgets()
-                     if isinstance(r, AgendaRow) and r.is_expanded()), None)
+    # -- selection + details flyout ----------------------------------------------
+    def flyout(self):
+        """The details flyout (None until the first selection)."""
+        return self._flyout
 
-    def toggle_row(self, row: "AgendaRow") -> None:
-        """Accordion: expanding one row collapses the one that was open."""
-        if row.is_expanded():
-            row.set_expanded(False)
-            self._expanded_key = None
-        else:
-            for other in self.row_widgets():
-                if isinstance(other, AgendaRow) and other is not row and other.is_expanded():
-                    other.set_expanded(False)
-            row.set_expanded(True, self._build_details)
-            self._expanded_key = _row_key(row.event)
-            self._fix_tab_order(row)
+    def flyout_open(self) -> bool:
+        return self._flyout is not None and not self._flyout.isHidden()
+
+    def selected_row(self) -> "AgendaRow | None":
+        if self._selected_key is None:
+            return None
+        return next((r for r in self.row_widgets() if isinstance(r, AgendaRow)
+                     and _row_key(r.event) == self._selected_key), None)
+
+    def toggle_row(self, row: "AgendaRow", keyboard: bool = False) -> None:
+        """Select `row` and show its details in the flyout; the selected row again
+        closes the flyout. `keyboard`: Enter/Space, so focus moves into the flyout."""
+        if self.flyout_open() and self._selected_key == _row_key(row.event):
+            self.close_flyout(restore_focus=keyboard)
+            return
+        self.select_row(row, keyboard)
+
+    def select_row(self, row: "AgendaRow", keyboard: bool = False) -> None:
+        if not self.isVisible():
+            return                      # the flyout never outlives (or precedes) the popup
+        self._selected_key = _row_key(row.event)
         for r in self.row_widgets():
             if isinstance(r, AgendaRow):
-                r.layout().invalidate()  # size hints now, not on the next event loop pass
-                r.layout().activate()
-        self._rows_box.invalidate()
-        self._resize()
-        if row.is_expanded():
-            self._scroll.ensureWidgetVisible(row, 0, 0)
+                r.set_selected(r is row)
+        self._scroll.ensureWidgetVisible(row, 0, 0)
+        fly = self._ensure_flyout()
+        fly.set_event(row.event)        # one instance; the content swaps in place
+        self._place_flyout(force=True)
+        if fly.isHidden():
+            fly.show()                  # WA_ShowWithoutActivating: the popup keeps focus
+            self._place_flyout(force=True)
+        fly.raise_()
+        if keyboard:
+            fly.activateWindow()
+            fly.focus_first()
 
-    def _fix_tab_order(self, row: "AgendaRow") -> None:
-        """Tab goes row -> Join -> Hide… -> Color… -> next row."""
-        d = row.details
-        chain = [row, row.join_button, d.findChild(QPushButton, "bigjoin"),
-                 d.findChild(QPushButton, "hide"), d.findChild(QPushButton, "color")]
-        rows = [r for r in self.row_widgets() if isinstance(r, AgendaRow)]
-        i = rows.index(row) if row in rows else -1
-        if 0 <= i < len(rows) - 1:
-            chain.append(rows[i + 1])
-        chain = [w for w in chain if w is not None]
-        for a, b in zip(chain, chain[1:]):
-            QWidget.setTabOrder(a, b)
+    def close_flyout(self, restore_focus: bool = True) -> None:
+        """Close the details and clear the selection. If the flyout had focus, the popup
+        takes it back right after (so activation never stays with some other app's
+        window), and the formerly selected row gets keyboard focus. Hidden first: the
+        flyout's own deactivation then no longer counts for the group."""
+        row = self.selected_row()
+        self._selected_key = None
+        for r in self.row_widgets():
+            if isinstance(r, AgendaRow):
+                r.set_selected(False)
+        fly = self._flyout
+        if fly is None or fly.isHidden():
+            return
+        reclaim = fly.isActiveWindow() or (restore_focus and not self.isActiveWindow())
+        fly.hide()
+        if reclaim and self.isVisible():
+            self.raise_()
+            self.activateWindow()
+        if restore_focus and self.isVisible():
+            (row or self).setFocus()
 
-    def _build_details(self, ev) -> QWidget:
-        """The expanded part of a row; built on first expand only (keeps refresh fast)."""
-        box = QWidget()
-        box.setObjectName("details")
-        lay = QVBoxLayout(box)
-        lay.setContentsMargins(0, 2, 0, 6)
-        lay.setSpacing(4)
-        when = QLabel(layout.format_range(ev, self.now()))
-        when.setObjectName("when")
-        when.setTextFormat(Qt.TextFormat.PlainText)
-        when.setWordWrap(True)
-        lay.addWidget(when)
-        cal = QLabel(f'<span style="color:{theme.effective_color(ev, self.settings)};">'
-                     f'&#9632;</span> {html.escape(ev.calendar_name or "")}')
-        cal.setObjectName("calendar")
-        cal.setTextFormat(Qt.TextFormat.RichText)
-        cal.setWordWrap(True)
-        lay.addWidget(cal)
-        if ev.location:
-            loc = QLabel(ev.location)
-            loc.setObjectName("location")
-            loc.setTextFormat(Qt.TextFormat.PlainText)
-            loc.setWordWrap(True)
-            loc.setStyleSheet(f"color:{theme.MUTED};")
-            lay.addWidget(loc)
-        description = html_to_text(ev.description or "")
-        if description:
-            desc = LinkText(description)
-            desc.setObjectName("description")
-            desc.setStyleSheet(f"QTextBrowser{{background:{theme.BG};color:{theme.TEXT};"
-                               f"border:1px solid {theme.BORDER};font-size:11px;}}")
-            desc.setFixedHeight(desc.fit_height(DETAILS_WIDTH - _scrollbar_w(), DESCRIPTION_LINES))
-            desc.link_opened.connect(lambda _u: self.hide())
-            # Out of the Tab chain (row -> Join -> Hide… -> Color…); links still click.
-            desc.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-            lay.addWidget(desc)
-        url = getattr(ev, "meeting_url", None)
-        if safe_http_url(url) is not None:
-            join = QPushButton(meeting_label(url))
-            join.setObjectName("bigjoin")
-            join.setCursor(Qt.CursorShape.PointingHandCursor)
-            join.setToolTip(plain_tip(url))
-            join.setStyleSheet(
-                f"QPushButton{{background:{theme.LINK};color:#0b0d10;font-weight:bold;"
-                "padding:5px 10px;border:none;border-radius:4px;}"
-                "QPushButton:hover{background:#a9c8ff;}")
-            join.clicked.connect(lambda _c=False, u=url: self._join(u))
-            # Never wider than the popup, whatever the label's font metrics.
-            join.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-            lay.addWidget(join)
-        actions = QHBoxLayout()
-        actions.setSpacing(6)
-        style = (f"QPushButton{{background:{theme.BORDER};color:{theme.TEXT};font-size:11px;"
-                 "padding:3px 8px;border:none;border-radius:3px;}"
-                 "QPushButton:hover{background:#4a4d51;}")
-        hide_btn = QPushButton("Hide…")
-        hide_btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        hide_btn.setObjectName("hide")
-        hide_btn.setToolTip("Hide in SmartCal only (Google is not changed)")
-        hide_btn.setStyleSheet(style)
-        hide_btn.clicked.connect(lambda _c=False, e=ev, b=hide_btn: self.show_hide_menu(e, b))
-        color_btn = QPushButton(meeting_menus.color_button_text(ev))
-        color_btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        color_btn.setObjectName("color")
-        color_btn.setToolTip("Color in SmartCal only (Google is not changed)")
-        color_btn.setStyleSheet(style)
-        color_btn.clicked.connect(lambda _c=False, e=ev, b=color_btn: self.show_color_menu(e, b))
-        actions.addWidget(hide_btn)
-        actions.addWidget(color_btn)
-        actions.addStretch(1)
-        lay.addLayout(actions)
-        return box
+    def _ensure_flyout(self):
+        if self._flyout is None:
+            from .flyout import DetailsFlyout
+            self._flyout = DetailsFlyout(self)
+        return self._flyout
+
+    def _place_flyout(self, force: bool = False) -> None:
+        """Left of the popup, top aligned with the selected row, inside the work area of
+        the popup's screen (right of it, or over it, when the left has no room)."""
+        fly = self._flyout
+        if fly is None or (fly.isHidden() and not force):
+            return
+        row = self.selected_row()
+        if row is None:
+            return
+        area = self._area()
+        fly.fit_to(area)
+        self._rows_box.activate()
+        top = row.mapToGlobal(QPoint(0, 0)).y()
+        anchor = QRect(self.pos(), self.size())
+        pos, self.flyout_side = placement.beside(fly.size(), anchor, top, area)
+        if fly.pos() != pos:
+            fly.move(pos)
+
+    def moveEvent(self, e):
+        super().moveEvent(e)
+        self._place_flyout()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._place_flyout()
 
     # -- Hide… / Color… menus ---------------------------------------------------
     def menu(self):
@@ -442,9 +427,11 @@ class AgendaPopup(QWidget):
         menu.popup(button.mapToGlobal(button.rect().bottomLeft()))
 
     def _settle_after_close(self, *_args) -> None:
-        """A menu or modal box closed. Wait one event-loop pass for Windows to settle
-        activation, then: if the click went to another app (no active window, or the
-        app is not active), close the popup like any focus loss; else take focus back.
+        """A menu or modal box closed (or activation left the group with nowhere known to
+        go). Wait one event-loop pass for Windows to settle activation, then: if the
+        click went to another app (no active window, the app is not active, or the
+        active window is neither the popup nor the flyout), close the group like any
+        focus loss; else the group window that is active takes focus back.
         Re-activating blindly could leave the popup up but inactive, with no further
         WindowDeactivate to ever hide it."""
         if self._settle_pending:
@@ -459,14 +446,15 @@ class AgendaPopup(QWidget):
         if self.active_modal() is not None or meeting_menus.is_open(self._menu):
             return                      # something else still holds focus on purpose
         active = self.active_window()
-        if active is None or not self.app_active() or active is not self:
-            self.hide()
+        if active is None or not self.app_active() or not self._is_group_window(active):
+            self.hide()                 # hides the flyout too
             return
-        self.raise_()
-        self.activateWindow()
+        active.raise_()
+        active.activateWindow()
 
     def show_hide_menu(self, ev, button) -> None:
-        # The menu belongs to the popup (not the row): a refresh never deletes it.
+        # The menu belongs to the popup (not the row or the flyout's content): a refresh
+        # or a content swap never deletes it.
         self._show_menu(meeting_menus.hide_menu(
             self, ev, lambda scope, e=ev: self.hide_meeting(e, scope)), button)
 
@@ -481,7 +469,7 @@ class AgendaPopup(QWidget):
         except OSError:                 # rolled back by Settings; say so, change nothing
             self.show_notice(meeting_menus.SAVE_FAILED)
             return
-        self._expanded_key = None
+        self.close_flyout(restore_focus=False)   # its meeting is gone
         self.refresh()
         self.show_notice(meeting_menus.HIDDEN_NOTICE)
         self.meetings_changed.emit()
@@ -495,7 +483,7 @@ class AgendaPopup(QWidget):
         except OSError:
             self.show_notice(meeting_menus.SAVE_FAILED)
             return
-        self.refresh()          # keeps this row expanded
+        self.refresh()          # keeps the flyout open, recolored
         self.meetings_changed.emit()
 
     def show_notice(self, text: str) -> None:
@@ -525,22 +513,41 @@ class AgendaPopup(QWidget):
 
     def event(self, e):
         if e.type() == QEvent.Type.WindowDeactivate and self.isVisible():
-            modal = self.active_modal()
-            menu = self.active_popup()
-            if not self._owns(menu):    # e.g. the tray's own context menu: not ours
-                menu = self._menu if meeting_menus.is_open(self._menu) else None
-            if modal is not None and modal is not self:
-                self._reactivate_after(modal)   # e.g. the "Undo anyway" confirm box
-            elif menu is not None and menu is not self:
-                self._reactivate_after(menu)    # the Hide…/Color… menu
-            else:
-                self.hide()
+            self._group_deactivated(self)
         return super().event(e)
 
+    def _group_deactivated(self, source) -> None:
+        """`source` (the popup or the flyout) lost activation. The group stays open if
+        the other group window took it, or a menu/modal box of the group is up;
+        otherwise it closes (popup and flyout)."""
+        if not self.isVisible():
+            return
+        active = self.active_window()
+        if active is not None and active is not source and self._is_group_window(active):
+            return                      # e.g. a click in the flyout: still the same group
+        modal = self.active_modal()
+        menu = self.active_popup()
+        if not self._owns(menu):    # e.g. the tray's own context menu: not ours
+            menu = self._menu if meeting_menus.is_open(self._menu) else None
+        if modal is not None and not self._is_group_window(modal):
+            self._reactivate_after(modal)   # e.g. the "Undo anyway" confirm box
+        elif menu is not None and not self._is_group_window(menu):
+            self._reactivate_after(menu)    # the Hide…/Color… menu
+        elif active is None and self.flyout_open():
+            # Windows may report "no active window" for a moment while activation moves
+            # between the popup and the flyout: decide one event-loop pass later.
+            self._settle_after_close()
+        else:
+            self.hide()
+
+    def _is_group_window(self, w) -> bool:
+        return w is self or (w is not None and w is self._flyout and self.flyout_open())
+
     def _owns(self, w) -> bool:
-        """True if `w` (a popup menu) was opened from this popup or its children."""
+        """True if `w` (a popup menu) was opened from the popup, the flyout or their
+        children."""
         while w is not None:
-            if w is self:
+            if w is self or (w is self._flyout and w is not None):
                 return True
             w = w.parentWidget()
         return False
@@ -564,7 +571,7 @@ class AgendaPopup(QWidget):
     def hideEvent(self, e):
         self.last_hidden_at = self.clock()
         self.last_hidden_cursor = self.cursor_pos()
-        self._expanded_key = None        # opens collapsed next time
+        self.close_flyout(restore_focus=False)   # never outlives the popup
         self._notice.hide()
         super().hideEvent(e)
 
@@ -585,27 +592,20 @@ def _row_key(ev) -> tuple:
     return (ev.account, ev.calendar_id, ev.id)
 
 
-def _scrollbar_w() -> int:
-    style = QApplication.style()
-    return style.pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent) if style else 12
-
-
 class AgendaRow(QFrame):
-    """One agenda row. Click (outside its buttons and details), Enter or Space toggles
-    the inline details; the compact Join button never toggles."""
+    """One agenda row. Click (outside its compact Join button), Enter or Space selects
+    it and shows its details in the flyout (again: closes them); Join never selects."""
 
-    toggle_requested = pyqtSignal(object)
+    toggle_requested = pyqtSignal(object, bool)   # row, by keyboard
 
     def __init__(self, ev, time_text: str, is_next: bool, color: str, parent=None):
         super().__init__(parent)
         self.event = ev
-        self.details: QWidget | None = None
         self.join_button: QPushButton | None = None
+        self.is_next = is_next
+        self._selected = False
         self.setObjectName("row")
-        bg = theme.BG_NEXT if is_next else "transparent"
-        self.setStyleSheet(f"QFrame#row{{background:{bg};border-radius:4px;"
-                           f"border:1px solid transparent;}}"
-                           f"QFrame#row:focus{{border:1px solid {theme.LINK};}}")
+        self._restyle()
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAccessibleName(f"{time_text} {ev.title}")
@@ -643,32 +643,36 @@ class AgendaRow(QFrame):
         self._body.addWidget(self.head)
         lay.addLayout(self._body, 1)
 
-    def is_expanded(self) -> bool:
-        return self.details is not None and not self.details.isHidden()
+    def _restyle(self) -> None:
+        """Selected: gray-blue with a light border; next up (not selected): blue."""
+        if self._selected:
+            bg, border = BG_SELECTED, theme.MUTED
+        else:
+            bg, border = (theme.BG_NEXT if self.is_next else "transparent"), "transparent"
+        self.setStyleSheet(f"QFrame#row{{background:{bg};border-radius:4px;"
+                           f"border:1px solid {border};}}"
+                           f"QFrame#row:focus{{border:1px solid {theme.LINK};}}")
 
-    def set_expanded(self, expanded: bool, builder=None) -> None:
-        if expanded and self.details is None:
-            if builder is None:
-                return
-            self.details = builder(self.event)
-            self._body.addWidget(self.details)
-        if self.details is not None:
-            self.details.setVisible(expanded)
+    def is_selected(self) -> bool:
+        return self._selected
+
+    def set_selected(self, selected: bool) -> None:
+        if selected != self._selected:
+            self._selected = selected
+            self._restyle()
 
     def mousePressEvent(self, e):
         e.accept()
 
     def mouseReleaseEvent(self, e):
-        pos = e.position().toPoint()
-        in_details = self.is_expanded() and self.details.geometry().contains(pos)
-        if e.button() == Qt.MouseButton.LeftButton and self.rect().contains(pos) \
-                and not in_details:
-            self.toggle_requested.emit(self)
+        if e.button() == Qt.MouseButton.LeftButton and self.rect().contains(
+                e.position().toPoint()):
+            self.toggle_requested.emit(self, False)
         e.accept()
 
     def keyPressEvent(self, e):
         if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
-            self.toggle_requested.emit(self)
+            self.toggle_requested.emit(self, True)
             e.accept()
             return
         super().keyPressEvent(e)

@@ -1,4 +1,4 @@
-"""Popup row expansion, linkified descriptions, Hide…/Color… in the popup, the window
+"""Popup details flyout, linkified descriptions, Hide…/Color… in the popup, the window
 and Settings > Meetings. Offscreen Qt, real widgets, real Settings and Cache."""
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -92,34 +92,40 @@ def opened(monkeypatch):
     return o
 
 
-# -- expansion ----------------------------------------------------------------
-def test_popup_row_click_expands_and_collapses(qtbot, tmp_path):
+# -- details flyout (was: inline expansion) ------------------------------------------
+def details(p):
+    """The flyout's content for the selected meeting."""
+    return p.flyout().body()
+
+
+def test_popup_row_click_opens_and_closes_flyout(qtbot, tmp_path):
     p = make_popup(qtbot, tmp_path, [ev("1", "Standup", 10, location="Room 4", description=DESC)])
     [row] = rows(p)
-    assert row.details is None                       # built lazily, on first expand
+    assert p.flyout() is None                        # built lazily, on first selection
     h0 = p.height()
     click(qtbot, row.findChild(QLabel, "title"))     # a click on the title reaches the row
-    assert row.is_expanded() and p.expanded_row() is row
-    assert p.height() > h0
-    d = row.details
+    assert row.is_selected() and p.selected_row() is row and p.flyout_open()
+    assert p.height() == h0                          # the list does not grow
+    d = details(p)
     assert d.findChild(QLabel, "when").text() == "Wed, Nov 4, 2026 · 10:00 AM – 10:30 AM"
     assert d.findChild(QLabel, "location").text() == "Room 4"
     assert "Primary" in d.findChild(QLabel, "calendar").text()
     assert d.findChild(QPushButton, "hide").text() == "Hide…"
     assert d.findChild(QPushButton, "color").text() == "Color…"
     click(qtbot, row.findChild(QFrame, "stripe"))
-    assert not row.is_expanded() and p.expanded_row() is None
+    assert not row.is_selected() and p.selected_row() is None and not p.flyout_open()
     assert p.height() == h0
 
 
-def test_only_one_row_expanded(qtbot, tmp_path):
+def test_only_one_row_selected(qtbot, tmp_path):
     p = make_popup(qtbot, tmp_path, [ev("1", "A", 10), ev("2", "B", 11), ev("3", "C", 12)])
     a, b, c = rows(p)
     click(qtbot, a)
     click(qtbot, b)
-    assert [r.is_expanded() for r in rows(p)] == [False, True, False]
+    assert [r.is_selected() for r in rows(p)] == [False, True, False]
     click(qtbot, c)
-    assert [r.is_expanded() for r in rows(p)] == [False, False, True]
+    assert [r.is_selected() for r in rows(p)] == [False, False, True]
+    assert p.flyout().event_shown.id == "3"
 
 
 def test_row_join_button_does_not_toggle(qtbot, tmp_path, opened):
@@ -129,37 +135,37 @@ def test_row_join_button_does_not_toggle(qtbot, tmp_path, opened):
     join = row.findChild(QPushButton, "join")
     click(qtbot, join)
     assert opened.urls == [z]
-    assert not row.is_expanded() and row.details is None
+    assert not row.is_selected() and p.flyout() is None
 
 
-def test_enter_toggles_row(qtbot, tmp_path):
+def test_enter_toggles_flyout(qtbot, tmp_path):
     p = make_popup(qtbot, tmp_path, [ev("1", "A", 10), ev("2", "B", 11)])
     a, b = rows(p)
     assert a.focusPolicy() & Qt.FocusPolicy.TabFocus
     qtbot.keyClick(a, Qt.Key.Key_Return)
-    assert a.is_expanded()
+    assert a.is_selected() and p.flyout_open()
     qtbot.keyClick(a, Qt.Key.Key_Space)
-    assert not a.is_expanded()
+    assert not a.is_selected() and not p.flyout_open()
     qtbot.keyClick(b, Qt.Key.Key_Enter)
-    assert b.is_expanded()
-    qtbot.keyClick(b, Qt.Key.Key_Escape)            # Esc collapses first...
-    assert not b.is_expanded() and p.isVisible()
+    assert b.is_selected() and p.flyout_open()
+    qtbot.keyClick(b, Qt.Key.Key_Escape)            # Esc closes the flyout first...
+    assert not b.is_selected() and not p.flyout_open() and p.isVisible()
     qtbot.keyClick(p, Qt.Key.Key_Escape)            # ...then closes the popup
     assert not p.isVisible()
 
 
-def test_expanded_row_shows_linkified_description(qtbot, tmp_path, opened):
+def test_flyout_shows_linkified_description(qtbot, tmp_path, opened):
     z = "https://meet.google.com/abc-defg-hij"
     p = make_popup(qtbot, tmp_path, [ev("1", "Sync", 10, description=DESC, meeting_url=z)])
     [row] = rows(p)
     click(qtbot, row)
-    box = row.details.findChild(QTextBrowser, "description")
+    box = details(p).findChild(QTextBrowser, "description")
     assert box.isReadOnly() and not box.openLinks() and not box.openExternalLinks()
     assert box.toPlainText() == ("Agenda: not bold & more\n"
                                  "Notes at https://docs.example.com/a?x=1&y=2.\n"
                                  "Bad: javascript:alert(1) file:///C:/x www.example.com")
     assert box.anchors() == ["https://docs.example.com/a?x=1&y=2"]
-    big = row.details.findChild(QPushButton, "bigjoin")
+    big = details(p).findChild(QPushButton, "bigjoin")
     assert big.text() == "Join Google Meet"
     # Only http(s) opens, whatever the anchor says.
     for bad in ("javascript:alert(1)", "file:///C:/Windows/notepad.exe", "mailto:a@b.c"):
@@ -167,29 +173,31 @@ def test_expanded_row_shows_linkified_description(qtbot, tmp_path, opened):
     assert opened.urls == [] and p.isVisible()
     box.anchorClicked.emit(QUrl("https://docs.example.com/a?x=1&y=2"))
     assert opened.urls == ["https://docs.example.com/a?x=1&y=2"]
-    assert not p.isVisible()                          # like Join: opening a link closes it
+    assert not p.isVisible() and not p.flyout().isVisible()   # like Join: closes both
 
 
-def test_description_is_capped_at_about_eight_lines(qtbot, tmp_path):
+def test_description_is_capped_at_about_ten_lines(qtbot, tmp_path):
     long = "\n".join(f"line {i}" for i in range(60))
     p = make_popup(qtbot, tmp_path, [ev("1", "Sync", 10, description=long)])
     click(qtbot, rows(p)[0])
-    box = rows(p)[0].details.findChild(QTextBrowser, "description")
-    assert box.height() <= 10 * box.fontMetrics().lineSpacing() + 20
+    box = details(p).findChild(QTextBrowser, "description")
+    assert box.height() <= 12 * box.fontMetrics().lineSpacing() + 20
     assert box.verticalScrollBar().maximum() > 0      # the rest scrolls
 
 
-def test_refresh_keeps_the_open_row_open(qtbot, tmp_path):
+def test_refresh_keeps_the_flyout_open(qtbot, tmp_path):
     p = make_popup(qtbot, tmp_path, [ev("1", "A", 10), ev("2", "B", 11)])
     click(qtbot, rows(p)[1])
+    fly = p.flyout()
     p.refresh()
-    assert [r.is_expanded() for r in rows(p)] == [False, True]
+    assert [r.is_selected() for r in rows(p)] == [False, True]
+    assert p.flyout() is fly and fly.isVisible() and fly.event_shown.id == "2"
     p.hide()
     p.refresh()
-    assert p.expanded_row() is None                   # reopens collapsed
+    assert p.selected_row() is None and not fly.isVisible()   # reopens with nothing open
 
 
-def test_popup_height_cap_with_expanded_row(qtbot, tmp_path):
+def test_popup_height_cap_with_flyout_open(qtbot, tmp_path):
     events = [ev(str(i), f"Event {i}", 8 + i // 3, (i % 3) * 20) for i in range(30)]
     events[10].description = "\n".join(f"line {i}" for i in range(200))
     events[10].location = "Room " * 40
@@ -201,15 +209,17 @@ def test_popup_height_cap_with_expanded_row(qtbot, tmp_path):
     p.refresh()
     p.show_near_tray(QRect(980, 580, 20, 20))
     qtbot.waitExposed(p)
+    h0 = p.height()
     click(qtbot, rows(p)[10])
-    assert rows(p)[10].is_expanded()
-    assert p.height() <= min(480, 600 - 24)
+    assert rows(p)[10].is_selected() and p.flyout_open()
+    assert p.height() == h0 <= min(480, 600 - 24)
     assert QRect(0, 0, 1000, 600).contains(p.geometry())
+    assert QRect(0, 0, 1000, 600).contains(p.flyout().geometry())
     assert p._footer.isVisible() and p._footer.geometry().bottom() <= p.rect().bottom()
     assert p._header.isVisible()
 
 
-def test_expanding_is_fast(qtbot, tmp_path):
+def test_opening_flyout_is_fast(qtbot, tmp_path):
     import time
     p = make_popup(qtbot, tmp_path, [ev("1", "Sync", 10, description=DESC * 50)])
     t0 = time.perf_counter()
@@ -221,7 +231,7 @@ def test_expanding_is_fast(qtbot, tmp_path):
 # -- menus keep the popup open ------------------------------------------------------
 def _open_color_menu(qtbot, p):
     click(qtbot, rows(p)[0])
-    click(qtbot, rows(p)[0].details.findChild(QPushButton, "color"))
+    click(qtbot, details(p).findChild(QPushButton, "color"))
     QApplication.processEvents()      # deliver what the platform queued for the open menu
     return p.menu()
 
@@ -262,7 +272,7 @@ def test_hide_this_occurrence_only_from_popup(qtbot, tmp_path):
     changed = []
     p.meetings_changed.connect(lambda: changed.append(1))
     click(qtbot, rows(p)[0])
-    click(qtbot, rows(p)[0].details.findChild(QPushButton, "hide"))
+    click(qtbot, details(p).findChild(QPushButton, "hide"))
     assert [a.text() for a in p.menu().actions()] == [meeting_menus.HIDE_ONE,
                                                       meeting_menus.HIDE_SERIES]
     _menu_action(p, meeting_menus.HIDE_ONE).trigger()
@@ -292,7 +302,7 @@ def test_hide_series_from_window_details(qtbot, tmp_path):
 def test_one_off_meeting_has_no_series_option(qtbot, tmp_path):
     p = make_popup(qtbot, tmp_path, [ev("1", "A", 10)])
     click(qtbot, rows(p)[0])
-    click(qtbot, rows(p)[0].details.findChild(QPushButton, "hide"))
+    click(qtbot, details(p).findChild(QPushButton, "hide"))
     assert [a.text() for a in p.menu().actions()] == [meeting_menus.HIDE_ONE]
 
 
@@ -317,10 +327,10 @@ def test_hidden_meeting_not_in_popup_window_next_or_toasts(qtbot, tmp_path):
 
 
 # -- colors ---------------------------------------------------------------------------
-def test_color_from_popup_applies_to_series_and_keeps_row_open(qtbot, tmp_path):
+def test_color_from_popup_applies_to_series_and_keeps_flyout_open(qtbot, tmp_path):
     p = make_popup(qtbot, tmp_path, SERIES)
     click(qtbot, rows(p)[0])
-    color_btn = rows(p)[0].details.findChild(QPushButton, "color")
+    color_btn = details(p).findChild(QPushButton, "color")
     assert color_btn.text() == "Color… (series)"
     click(qtbot, color_btn)
     menu = p.menu()
@@ -328,10 +338,10 @@ def test_color_from_popup_applies_to_series_and_keeps_row_open(qtbot, tmp_path):
     assert names == [n for n, _ in theme.PALETTE]
     assert not _menu_action(p, meeting_menus.RESET_COLOR).isEnabled()
     _menu_action(p, "Basil").trigger()
-    assert rows(p)[0].is_expanded()
+    assert rows(p)[0].is_selected() and p.flyout_open()
     assert "#3fa364" in rows(p)[0].findChild(QFrame, "stripe").styleSheet()
     assert p.settings.event_color(SERIES[1]) == "#3fa364"
-    click(qtbot, rows(p)[0].details.findChild(QPushButton, "color"))
+    click(qtbot, details(p).findChild(QPushButton, "color"))
     assert _menu_action(p, "Basil").isChecked()
     _menu_action(p, meeting_menus.RESET_COLOR).trigger()
     assert "#4285f4" in rows(p)[0].findChild(QFrame, "stripe").styleSheet()

@@ -41,6 +41,23 @@ def clamp(pos: QPoint, size: QSize, area: QRect) -> QPoint:
     return QPoint(x, y)
 
 
+def beside(size: QSize, anchor: QRect, top: int, area: QRect) -> tuple[QPoint, str]:
+    """Top-left for a pop-out of `size` next to the window at `anchor`, its top at `top`
+    (clamped so it stays inside `area`). Left of the anchor with a GAP if that fits,
+    else right of it, else over the anchor's left part. Returns (pos, "left"/"right"/
+    "over")."""
+    w, h = size.width(), size.height()
+    y = max(area.top() + MARGIN, min(top, area.bottom() + 1 - h - MARGIN))
+    left_x = anchor.left() - GAP - w
+    if left_x >= area.left() + MARGIN:
+        return QPoint(left_x, y), "left"
+    right_x = anchor.right() + 1 + GAP
+    if right_x + w <= area.right() + 1 - MARGIN:
+        return QPoint(right_x, y), "right"
+    x = max(area.left() + MARGIN, min(anchor.left(), area.right() + 1 - w - MARGIN))
+    return QPoint(x, y), "over"
+
+
 def area_for(tray: QRect | None) -> QRect:
     """Work area of the screen that holds the tray icon (else the primary screen)."""
     screen = None

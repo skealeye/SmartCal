@@ -7,8 +7,8 @@ from smartcal.settings import Settings
 from smartcal.ui import meeting_menus
 from smartcal.ui.window import EventDetails
 from test_meeting_actions_ui import (DESC, NOW, SERIES, _menu_action, _open_color_menu,
-                                     build_dialog, chips_by_id, click, ev, make_popup,
-                                     make_window, rows, store, titles)
+                                     build_dialog, chips_by_id, click, details, ev,
+                                     make_popup, make_window, rows, store, titles)
 
 
 # -- after a menu / modal closes ----------------------------------------------------------
@@ -69,22 +69,22 @@ def test_menus_are_deleted_after_closing(qtbot, tmp_path):
     qtbot.waitUntil(lambda: gone3 == [1])
 
 
-# -- Esc order: expanded row -> chat -> popup ----------------------------------------------
+# -- Esc order: details flyout -> chat -> popup --------------------------------------------
 def _popup_with_chat(qtbot, tmp_path):
     p = make_popup(qtbot, tmp_path, [ev("1", "A", 10), ev("2", "B", 11)])
     p.attach_chat(lambda: None)
     return p
 
 
-def test_esc_from_chat_input_collapses_row_then_chat_then_popup(qtbot, tmp_path):
+def test_esc_from_chat_input_closes_flyout_then_chat_then_popup(qtbot, tmp_path):
     p = _popup_with_chat(qtbot, tmp_path)
     p.toggle_chat()
     assert p.chat_expanded()
     click(qtbot, rows(p)[0])
-    assert rows(p)[0].is_expanded()
+    assert p.flyout_open()
     chat_input = p.chat()._input
     qtbot.keyClick(chat_input, Qt.Key.Key_Escape)
-    assert not rows(p)[0].is_expanded() and p.chat_expanded() and p.isVisible()
+    assert not p.flyout_open() and p.chat_expanded() and p.isVisible()
     qtbot.keyClick(chat_input, Qt.Key.Key_Escape)
     assert not p.chat_expanded() and p.isVisible()
     qtbot.keyClick(p, Qt.Key.Key_Escape)
@@ -95,32 +95,32 @@ def test_esc_from_row_with_chat_closed(qtbot, tmp_path):
     p = _popup_with_chat(qtbot, tmp_path)
     a = rows(p)[0]
     qtbot.keyClick(a, Qt.Key.Key_Return)
-    assert a.is_expanded()
+    assert a.is_selected() and p.flyout_open()
     qtbot.keyClick(a, Qt.Key.Key_Escape)
-    assert not a.is_expanded() and p.isVisible() and not p.chat_expanded()
+    assert not a.is_selected() and not p.flyout_open() and p.isVisible() \
+        and not p.chat_expanded()
     qtbot.keyClick(a, Qt.Key.Key_Escape)
     assert not p.isVisible()
 
 
 # -- Tab order -----------------------------------------------------------------------
-def test_tab_order_in_expanded_row(qtbot, tmp_path):
+def test_tab_order_in_popup_rows_with_flyout_open(qtbot, tmp_path):
     z = "https://zoom.us/j/1"
     p = make_popup(qtbot, tmp_path, [ev("1", "A", 10, meeting_url=z, description=DESC),
                                      ev("2", "B", 11)])
     p.activateWindow()
     qtbot.waitActive(p)
     a, b = rows(p)
-    p.toggle_row(a)
-    d = a.details
-    expected = [a.join_button, d.findChild(QPushButton, "bigjoin"),
-                d.findChild(QPushButton, "hide"), d.findChild(QPushButton, "color"), b]
+    p.toggle_row(a)                    # mouse-style selection: focus stays in the popup
+    p.activateWindow()
+    qtbot.waitActive(p)
     a.setFocus()
     qtbot.waitUntil(lambda: QApplication.focusWidget() is a)
     seen = []
-    for _ in expected:
+    for _ in range(2):                 # the compact Join stays reachable, then the next row
         p.focusNextChild()
         seen.append(QApplication.focusWidget())
-    assert seen == expected
+    assert seen == [a.join_button, b]
 
 
 # -- Join buttons use safe_http_url ------------------------------------------------------
@@ -129,11 +129,12 @@ def test_unsafe_meeting_urls_show_no_join_button(qtbot, tmp_path):
                              "https://a b.com/")):
         sub = tmp_path / str(i)
         sub.mkdir()
-        p = make_popup(qtbot, sub, [ev("1", "A", 10, meeting_url=bad)], show=False)
+        p = make_popup(qtbot, sub, [ev("1", "A", 10, meeting_url=bad)])
         row = rows(p)[0]
         assert row.join_button is None and row.findChild(QPushButton, "join") is None
         p.toggle_row(row)
-        assert row.details.findChild(QPushButton, "bigjoin") is None
+        assert details(p).findChild(QPushButton, "bigjoin") is None
+        p.hide()
         d = EventDetails(ev("1", "A", 10, meeting_url=bad), NOW)
         qtbot.addWidget(d)
         assert d.join_button is None
@@ -151,12 +152,12 @@ def test_failed_save_rolls_back_and_says_so(qtbot, tmp_path):
     changed = []
     p.meetings_changed.connect(lambda: changed.append(1))
     click(qtbot, rows(p)[0])
-    click(qtbot, rows(p)[0].details.findChild(QPushButton, "hide"))
+    click(qtbot, details(p).findChild(QPushButton, "hide"))
     _menu_action(p, meeting_menus.HIDE_SERIES).trigger()
     assert titles(p) == ["Standup", "Lunch"]
     assert p.settings.hidden_events == {}
     assert p.notice_text() == "Couldn't save — your settings file is not writable"
-    click(qtbot, rows(p)[0].details.findChild(QPushButton, "color"))
+    click(qtbot, details(p).findChild(QPushButton, "color"))
     _menu_action(p, meeting_menus.RESET_COLOR).trigger()
     assert p.settings.event_color(SERIES[0]) == "#3fa364"
     assert changed == []

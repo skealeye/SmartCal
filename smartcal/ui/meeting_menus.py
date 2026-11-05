@@ -1,4 +1,4 @@
-"""The "Hide…" and "Color…" menus shared by the popup's expanded row and the details window.
+"""The "Hide…" and "Color…" menus shared by the popup's details flyout and the details window.
 
 Both only change SmartCal's own settings (hidden meetings, meeting colors); nothing is
 sent to Google."""
