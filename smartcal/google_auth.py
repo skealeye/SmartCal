@@ -40,6 +40,24 @@ class SignInCancelled(Exception):
     """The owner cancelled a pending Google sign-in (not an error)."""
 
 
+TIMED_OUT_TEXT = "Sign-in timed out. Please try again."
+
+
+class SignInTimedOut(Exception):
+    """Nobody finished the browser consent within SIGNIN_TIMEOUT (not an error)."""
+
+    def __init__(self, message: str = TIMED_OUT_TEXT):
+        super().__init__(message)
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    """google_auth_oauthlib reports its local-server timeout as an AttributeError
+    ("'NoneType' object has no attribute 'replace'": no redirect URI arrived)."""
+    if isinstance(exc, TimeoutError):
+        return True
+    return isinstance(exc, AttributeError) and "NoneType" in str(exc)
+
+
 def free_port() -> int:
     """A free local TCP port for the OAuth redirect server."""
     import socket
@@ -56,9 +74,15 @@ def _make_flow():
     return InstalledAppFlow.from_client_secrets_file(str(secret), SCOPES)
 
 
-def _http_get(url: str) -> None:
+def _opener():
+    """A urllib opener that never uses a proxy: the cancel request goes to localhost,
+    and a system proxy would swallow it (the sign-in would then not end)."""
     import urllib.request
-    with urllib.request.urlopen(url, timeout=3) as resp:   # noqa: S310 - localhost only
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _http_get(url: str) -> None:
+    with _opener().open(url, timeout=3) as resp:   # noqa: S310 - localhost only
         resp.read()
 
 
@@ -88,38 +112,52 @@ class SignIn:
         self._port_fn = port_fn
         self._lock = threading.Lock()
         self.port: int | None = None
-        self._cancelled = False
+        self._running = False
+        self.cancel_requested = False
 
     def run(self, label: str = "new") -> str:
-        """Blocking (run it on a worker thread); returns the new account's email."""
-        flow = self._flow_factory()
-        port = self._port_fn()
+        """Blocking (run it on a worker thread); returns the new account's email.
+        Raises SignInCancelled (cancel() called, even before the port was chosen) or
+        SignInTimedOut (nobody finished the browser consent in time)."""
         with self._lock:
-            self.port, self._cancelled = port, False
+            self._running, self.cancel_requested = True, False
+        port = None
         try:
+            flow = self._flow_factory()
+            port = self._port_fn()
+            with self._lock:
+                if self.cancel_requested:     # Cancel clicked while we were starting
+                    raise SignInCancelled()
+                self.port = port
             try:
                 creds = flow.run_local_server(port=port, open_browser=True,
                                               timeout_seconds=SIGNIN_TIMEOUT)
-            except Exception:
-                if self._cancelled:
+            except Exception as exc:
+                if self.cancel_requested:
                     raise SignInCancelled() from None
+                if _is_timeout(exc):
+                    raise SignInTimedOut() from None
                 raise
-            if creds is None or self._cancelled:
+            if creds is None or self.cancel_requested:
                 raise SignInCancelled()
             return self._store(creds)
         finally:
             with self._lock:
                 if self.port == port:
                     self.port = None
+                self._running = False
 
     def cancel(self) -> bool:
-        """End a pending sign-in; False if none is running."""
+        """End a pending sign-in; False if none is running. A cancel that arrives
+        before the redirect port is chosen is remembered and ends the run there."""
         import threading
         with self._lock:
-            port = self.port
-            if port is None:
+            if not self._running:
                 return False
-            self._cancelled = True
+            self.cancel_requested = True
+            port = self.port
+        if port is None:
+            return True
         url = f"http://localhost:{port}/?error=access_denied"
 
         def poke() -> None:

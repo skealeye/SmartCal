@@ -7,8 +7,8 @@ from datetime import datetime
 
 from PyQt6.QtCore import QEvent, QPoint, QRect, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QCursor
-from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea,
-                             QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QPushButton,
+                             QScrollArea, QVBoxLayout, QWidget)
 
 from .. import __version__, agenda
 from . import placement, theme
@@ -38,6 +38,8 @@ class AgendaPopup(QWidget):
         # Injectable for tests.
         self.clock = time.monotonic
         self.cursor_pos = lambda: QCursor.pos()
+        self.active_modal = QApplication.activeModalWidget
+        self._watched_modals: list = []
         self.last_hidden_at = -1e9
         self.last_hidden_cursor = QPoint()
         self._anchored = False
@@ -294,8 +296,29 @@ class AgendaPopup(QWidget):
 
     def event(self, e):
         if e.type() == QEvent.Type.WindowDeactivate and self.isVisible():
-            self.hide()
+            modal = self.active_modal()
+            if modal is not None and modal is not self:
+                self._reactivate_after(modal)   # e.g. the "Undo anyway" confirm box
+            else:
+                self.hide()
         return super().event(e)
+
+    def _reactivate_after(self, modal) -> None:
+        """Stay open while a modal box is up; take focus back when it closes."""
+        if modal in self._watched_modals:
+            return
+        finished = getattr(modal, "finished", None)
+        if finished is None:
+            return
+        self._watched_modals.append(modal)
+
+        def done(*_args, m=modal) -> None:
+            if m in self._watched_modals:
+                self._watched_modals.remove(m)
+            if self.isVisible():
+                self.raise_()
+                self.activateWindow()
+        finished.connect(done)
 
     def hideEvent(self, e):
         self.last_hidden_at = self.clock()

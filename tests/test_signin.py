@@ -63,6 +63,93 @@ def test_cancel_makes_a_request_that_ends_the_flow_as_cancelled():
     assert s.port is None and s.cancel() is False
 
 
+def test_cancel_before_port_is_set_is_not_lost():
+    flow = StubFlow()
+    started, release = threading.Event(), threading.Event()
+    s = SignIn(flow_factory=lambda: flow, store=lambda c: "new@x.com",
+               http_get=lambda url: None, port_fn=lambda: (started.set(), release.wait(5), 54321)[2])
+    out = []
+
+    def run():
+        try:
+            out.append(s.run())
+        except SignInCancelled:
+            out.append("cancelled")
+    t = threading.Thread(target=run)
+    t.start()
+    assert started.wait(5)
+    assert s.port is None and s.cancel() is True   # no port yet: remembered
+    release.set()
+    t.join(5)
+    assert out == ["cancelled"] and flow.kwargs is None   # never opened the browser
+    assert s.cancel() is False and s.port is None
+
+
+def test_cancel_request_does_not_leak_into_the_next_signin():
+    s, flow = make_signin()
+    assert s.cancel() is False                      # nothing running: nothing recorded
+    flow.request.set()
+    assert s.run() == "new@x.com"
+
+
+def test_signin_timeout_is_reported_as_timed_out_not_error():
+    from smartcal.google_auth import SignInTimedOut
+
+    class TimesOut(StubFlow):
+        def run_local_server(self, **kw):
+            None.replace("http", "https")            # what oauthlib does after 120 s
+
+    class SocketTimeout(StubFlow):
+        def run_local_server(self, **kw):
+            raise TimeoutError()
+
+    for flow in (TimesOut(), SocketTimeout()):
+        s = SignIn(flow_factory=lambda f=flow: f, store=lambda c: "x", http_get=lambda u: None,
+                   port_fn=lambda: 54321)
+        try:
+            s.run()
+        except SignInTimedOut as exc:
+            assert str(exc) == "Sign-in timed out. Please try again."
+        else:
+            raise AssertionError("expected SignInTimedOut")
+
+
+def test_tray_shows_timeout_as_plain_balloon(qtbot, tmp_path, caplog):
+    from smartcal.google_auth import SignInTimedOut
+
+    def add(label):
+        raise SignInTimedOut()
+    messages = []
+    tray, _ = build(qtbot, tmp_path, add_account_fn=add)
+    tray.showMessage = lambda *a, **k: messages.append(a)
+    with caplog.at_level(logging.ERROR):
+        tray.add_account()
+        qtbot.waitUntil(lambda: not tray.signin_pending(), timeout=3000)
+    assert messages == [("SmartCal", "Sign-in timed out. Please try again.",
+                         tray.MessageIcon.Information)]
+    assert "add account failed" not in caplog.text
+
+
+def test_cancel_request_bypasses_proxies(monkeypatch):
+    import urllib.request
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:8080")
+
+    def proxy_handlers(opener):
+        return [h for h in opener.handlers if isinstance(h, urllib.request.ProxyHandler)]
+    assert proxy_handlers(urllib.request.build_opener())       # the default would use it
+    assert proxy_handlers(google_auth._opener()) == []         # ours never does
+    seen = []
+
+    class FakeOpener:
+        def open(self, url, timeout):
+            seen.append((url, timeout))
+            import io
+            return io.BytesIO(b"")
+    monkeypatch.setattr(google_auth, "_opener", lambda: FakeOpener())
+    google_auth._http_get("http://localhost:1/?error=access_denied")
+    assert seen == [("http://localhost:1/?error=access_denied", 3)]
+
+
 def test_free_port_is_a_port():
     assert 0 < google_auth.free_port() < 65536
 

@@ -87,9 +87,11 @@ def main() -> int:
         window.refresh()
         tray.update_tooltip()
 
+    autostart_watcher = autostart.SettingsWatcher(settings)   # after apply_at_startup
+
     @guarded
     def on_settings_applied() -> None:
-        autostart.apply(settings.autostart)
+        autostart_watcher.settings_applied()   # Run key only when the box was toggled
         refresh_views()
         notifier.check()
 

@@ -227,6 +227,9 @@ class TrayController(QSystemTrayIcon):
                 self._add_account_fn("new")
             except google_auth.SignInCancelled:
                 status = "cancelled"
+            except google_auth.SignInTimedOut:
+                status = "timeout"
+                log.info("sign-in timed out")
             except BaseException as exc:  # noqa: BLE001 - reported to the user
                 log.exception("add account failed")
                 status, message = "error", str(exc) or type(exc).__name__
@@ -253,6 +256,10 @@ class TrayController(QSystemTrayIcon):
             elif status == "cancelled":
                 if current:
                     self.showMessage("SmartCal", "Sign-in cancelled",
+                                     QSystemTrayIcon.MessageIcon.Information)
+            elif status == "timeout":
+                if current:
+                    self.showMessage("SmartCal", google_auth.TIMED_OUT_TEXT,
                                      QSystemTrayIcon.MessageIcon.Information)
             elif current:
                 self.showMessage("SmartCal", f"Could not add account: {message}",

@@ -77,6 +77,31 @@ def test_popup_hides_on_focus_loss(qtbot, tmp_path):
     assert not popup.isVisible()
 
 
+def test_popup_stays_open_while_a_modal_box_is_up(qtbot, tmp_path):
+    from PyQt6.QtCore import QObject, pyqtSignal
+
+    class FakeModal(QObject):          # stands in for the "Undo anyway" confirm box
+        finished = pyqtSignal(int)
+
+    cache, settings = make(tmp_path, [ev("1", "Standup", 10)])
+    popup = AgendaPopup(cache, settings)
+    qtbot.addWidget(popup)
+    modal = FakeModal()
+    popup.active_modal = lambda: modal
+    activated = []
+    popup.activateWindow = lambda: activated.append(1)
+    popup.show()
+    qtbot.waitExposed(popup)
+    QApplication.sendEvent(popup, QEvent(QEvent.Type.WindowDeactivate))
+    QApplication.sendEvent(popup, QEvent(QEvent.Type.WindowDeactivate))   # connected once
+    assert popup.isVisible()
+    popup.active_modal = lambda: None
+    modal.finished.emit(0)             # the box closed: the popup takes focus back
+    assert popup.isVisible() and activated == [1]
+    QApplication.sendEvent(popup, QEvent(QEvent.Type.WindowDeactivate))
+    assert not popup.isVisible()       # no modal any more: normal hide
+
+
 def test_popup_show_under_200ms(qtbot, tmp_path):
     events = [ev(str(i), f"Event {i}", 8 + i // 3, (i % 3) * 20, cal="primary" if i % 2 else "work")
               for i in range(30)]

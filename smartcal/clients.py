@@ -44,6 +44,14 @@ class ClientPool:
             return len(self._clients)
 
     def _prune(self) -> None:
-        dead = [k for k, (t, _) in self._clients.items() if not t.is_alive()]
+        dead = [k for k, (t, _) in self._clients.items() if not _alive(t)]
         for k in dead:
             del self._clients[k]
+
+
+def _alive(thread) -> bool:
+    """is_alive(), treating a thread whose state cannot be read as dead."""
+    try:
+        return thread.is_alive()
+    except RuntimeError:
+        return False

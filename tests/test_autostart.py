@@ -73,3 +73,24 @@ def test_enable_disable_noop_when_no_system_writes(monkeypatch):
         autostart.disable()
     create.assert_not_called()
     open_key.assert_not_called()
+
+
+def test_settings_ok_touches_run_key_only_when_autostart_toggled():
+    class S:
+        autostart = True
+    calls = []
+    s = S()
+    w = autostart.SettingsWatcher(s, apply_fn=calls.append)
+    assert w.settings_applied() is False and w.settings_applied() is False   # other edits
+    assert calls == []                  # an existing (installed exe) Run value is left alone
+    s.autostart = False
+    assert w.settings_applied() is True and calls == [False]
+    assert w.settings_applied() is False and calls == [False]
+    s.autostart = True
+    assert w.settings_applied() is True and calls == [False, True]
+
+
+def test_run_py_applies_autostart_through_the_watcher():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "run.py").read_text(encoding="utf-8")
+    assert "autostart.apply(" not in src and "SettingsWatcher(settings)" in src

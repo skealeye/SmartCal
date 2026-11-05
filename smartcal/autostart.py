@@ -63,6 +63,27 @@ def apply(enabled: bool) -> None:
         logging.getLogger(__name__).exception("could not update autostart")
 
 
+class SettingsWatcher:
+    """Applies the autostart setting after Settings OK only when the box was toggled.
+
+    Pressing OK for any other change must not touch the Run key: from a source run
+    that would repoint login at this checkout instead of the installed exe."""
+
+    def __init__(self, settings, apply_fn=None):
+        self.settings = settings
+        self._apply = apply_fn or apply
+        self.last = bool(settings.autostart)
+
+    def settings_applied(self) -> bool:
+        """Call after the settings were saved; True if the Run key was updated."""
+        now = bool(self.settings.autostart)
+        if now == self.last:
+            return False
+        self.last = now
+        self._apply(now)
+        return True
+
+
 def current_value(key_path: str = RUN_KEY) -> str | None:
     """The Run-key command now registered for SmartCal, or None."""
     import winreg

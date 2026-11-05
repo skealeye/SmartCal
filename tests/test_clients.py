@@ -140,3 +140,13 @@ def test_real_service_is_built_with_a_20_second_http_timeout(monkeypatch):
     assert "credentials" not in seen
     assert http.http.timeout == 20
     assert isinstance(http.credentials, Creds)
+
+
+def test_prune_treats_unreadable_thread_as_dead():
+    class Broken:
+        def is_alive(self):
+            raise RuntimeError("thread state gone")
+    pool = ClientPool(lambda a: object())
+    pool._clients[(1, "a")] = (Broken(), object())
+    pool.get("b")                      # prunes; must not raise
+    assert (1, "a") not in pool._clients and len(pool) == 1
