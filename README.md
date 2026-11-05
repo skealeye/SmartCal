@@ -112,3 +112,5 @@ Hidden meetings and meeting colors are stored in `%APPDATA%\SmartCal\settings.js
 pip install -r requirements-dev.txt
 pytest
 ```
+
+Tests run offscreen by default (`tests/conftest.py` forces `QT_QPA_PLATFORM=offscreen`, even if your shell sets another platform), so no windows appear on your screen. To run them on the real display on purpose, set `SMARTCAL_TESTS_REAL_DISPLAY=1`.
