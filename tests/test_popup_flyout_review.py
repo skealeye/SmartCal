@@ -229,3 +229,140 @@ def test_overlay_on_narrow_screen_keeps_selected_row_clickable(qtbot, tmp_path):
         assert not g.intersects(global_rect(row)), (i, g, global_rect(row))
     click(qtbot, rows(p)[2])                          # the row is not covered: closes
     assert not p.flyout().isVisible()
+
+
+# -- v0.5.4: the reclaim grace is honored by every one-pass settle ---------------------------
+def grace_hooks(p, fly):
+    """Like Windows after the active flyout hides: no window reported active while focus
+    is being reclaimed, then the popup."""
+    p.active_window = lambda: (fly if fly.isVisible()
+                               else None if p.reclaim_check.isActive() else p)
+    p.app_active = lambda: True
+
+
+def test_watchdog_tick_during_reclaim_grace_does_not_close_popup(qtbot, tmp_path):
+    p = popup_on(qtbot, tmp_path, [ev("1", "A", 10)])
+    fly = open_details(qtbot, p, rows(p)[0])
+    grace_hooks(p, fly)
+    click(qtbot, fly.close_button)
+    assert p.reclaim_check.isActive() and p.active_window() is None
+    p._watchdog_tick()                                # inside the grace: no decision
+    p._settle()                                       # nor a stray one-pass settle
+    settle_qt()
+    assert p.isVisible()
+    qtbot.waitUntil(lambda: not p.reclaim_check.isActive())
+    settle_qt()
+    assert p.isVisible() and not fly.isVisible()
+
+
+def test_hide_from_flyout_keeps_popup_open_and_shows_notice(qtbot, tmp_path):
+    p = popup_on(qtbot, tmp_path, [ev("1", "A", 10), ev("2", "B", 11)])
+    fly = open_details(qtbot, p, rows(p)[0])
+    grace_hooks(p, fly)
+    click(qtbot, details(p).findChild(QPushButton, "hide"))
+    QApplication.processEvents()
+    menu = p.menu()
+    act = _menu_action(p, meeting_menus.HIDE_ONE)
+    menu.hide()                                       # aboutToHide: one-pass settle queued
+    act.trigger()                                     # ...then the action hides the flyout
+    assert not fly.isVisible() and p.reclaim_check.isActive()
+    qtbot.waitUntil(lambda: not p.reclaim_check.isActive())
+    settle_qt()
+    assert p.isVisible()
+    assert p.notice_text() == meeting_menus.HIDDEN_NOTICE
+    assert [r.title for r in p.rows()] == ["B"]
+
+
+def test_esc_and_close_button_twenty_times_never_close_popup(qtbot, tmp_path):
+    from PyQt6.QtCore import Qt
+    p = popup_on(qtbot, tmp_path, [ev("1", "A", 10), ev("2", "B", 11)])
+    fly = open_details(qtbot, p, rows(p)[0])
+    grace_hooks(p, fly)
+    for i in range(20):
+        p.select_row(rows(p)[i % 2])                  # open (or swap) the details
+        assert fly.isVisible()
+        if i % 2:
+            qtbot.keyClick(fly.close_button, Qt.Key.Key_Escape)
+        else:
+            click(qtbot, fly.close_button)
+        assert not fly.isVisible()
+        p._watchdog_tick()
+        settle_qt()
+        assert p.isVisible(), i
+        qtbot.waitUntil(lambda: not p.reclaim_check.isActive())
+        settle_qt()
+        assert p.isVisible(), i
+
+
+# -- v0.5.4: OS foreground check --------------------------------------------------------------
+def _active_popup(p):
+    p.active_window = lambda: p
+    p.app_active = lambda: True
+
+
+def test_watchdog_hides_group_when_qt_active_but_foreground_elsewhere_for_two_ticks(qtbot,
+                                                                                    tmp_path):
+    p = popup_on(qtbot, tmp_path, [ev("1", "A", 10)])
+    fly = open_details(qtbot, p, rows(p)[0])
+    _active_popup(p)
+    p.foreground_is_group = lambda: False             # another app owns the foreground
+    p._watchdog_tick()
+    assert p.isVisible() and fly.isVisible()          # one tick: maybe a transient flip
+    p._watchdog_tick()
+    assert not p.isVisible() and not fly.isVisible()
+
+
+def test_single_tick_foreground_elsewhere_does_not_hide(qtbot, tmp_path):
+    p = popup_on(qtbot, tmp_path, [ev("1", "A", 10)])
+    _active_popup(p)
+    fg = {"group": False}
+    p.foreground_is_group = lambda: fg["group"]
+    p._watchdog_tick()
+    fg["group"] = True                                # back before the next tick
+    p._watchdog_tick()
+    fg["group"] = False
+    p._watchdog_tick()                                # strikes start over
+    settle_qt()
+    assert p.isVisible()
+
+
+def test_foreground_check_ignored_while_menu_open(qtbot, tmp_path):
+    p = popup_on(qtbot, tmp_path, [ev("1", "A", 10)])
+    fly = open_details(qtbot, p, rows(p)[0])
+    click(qtbot, details(p).findChild(QPushButton, "color"))
+    QApplication.processEvents()
+    assert meeting_menus.is_open(p.menu())
+    p.active_window = lambda: fly
+    p.app_active = lambda: True
+    p.foreground_is_group = lambda: False
+    for _ in range(4):
+        p._watchdog_tick()
+    settle_qt()
+    assert p.isVisible() and fly.isVisible()
+
+
+def test_foreground_hook_failure_defaults_to_group(qtbot, tmp_path):
+    p = popup_on(qtbot, tmp_path, [ev("1", "A", 10)])
+    _active_popup(p)
+
+    def boom():
+        raise OSError("GetForegroundWindow failed")
+    p.foreground_is_group = boom
+    for _ in range(4):
+        p._watchdog_tick()
+    settle_qt()
+    assert p.isVisible()
+    assert p._os_foreground_is_group() is True        # offscreen: no opinion, never hides
+
+
+def test_watchdog_closes_when_a_non_group_smartcal_window_is_active(qtbot, tmp_path):
+    from PyQt6.QtWidgets import QWidget
+    p = popup_on(qtbot, tmp_path, [ev("1", "A", 10)])
+    fly = open_details(qtbot, p, rows(p)[0])
+    week = QWidget()                                  # e.g. the Week window or Settings
+    qtbot.addWidget(week)
+    p.active_window = lambda: week
+    p.app_active = lambda: True
+    p._watchdog_tick()
+    qtbot.waitUntil(lambda: not p.isVisible())
+    assert not fly.isVisible()

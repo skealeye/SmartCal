@@ -5,6 +5,7 @@ the left of the popup. Popup + flyout (+ their menus and modal boxes) are one gr
 focus moving between them keeps both open; the group closes when neither is active."""
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -53,6 +54,10 @@ class AgendaPopup(QWidget):
         self.active_window = QApplication.activeWindow
         self.app_active = lambda: (QGuiApplication.applicationState()
                                    == Qt.ApplicationState.ApplicationActive)
+        # Does the OS foreground window belong to the group? Qt can report the popup
+        # active while another app owns the foreground (a refused SetForegroundWindow).
+        self.foreground_is_group = self._os_foreground_is_group
+        self._foreground_strikes = 0
         self._settle_pending = False
         self._menu = None
         self._selected_key: tuple | None = None
@@ -504,6 +509,10 @@ class AgendaPopup(QWidget):
         self._settle_pending = False
         if not self.isVisible():
             return
+        if self.reclaim_check.isActive():
+            # Focus is on its way back from the flyout (Esc, ✕, Hide…): for a moment no
+            # window is reported active. The reclaim check settles when the grace ends.
+            return
         if self.active_modal() is not None or meeting_menus.is_open(self._menu):
             return                      # something else still holds focus on purpose
         active = self.active_window()
@@ -517,6 +526,9 @@ class AgendaPopup(QWidget):
         if active is None or not self.app_active() or not self._is_group_window(active):
             self.hide()                 # hides the flyout too
             return
+        if not self._foreground_ok():
+            return                      # another app has the foreground: don't push in;
+                                        # the watchdog closes the group if that persists
         active.raise_()
         active.activateWindow()
 
@@ -590,6 +602,9 @@ class AgendaPopup(QWidget):
         otherwise it closes (popup and flyout)."""
         if not self.isVisible():
             return
+        if self.reclaim_check.isActive():
+            return                      # focus is being reclaimed from the flyout: the
+                                        # reclaim check decides when the grace ends
         active = self.active_window()
         if active is not None and active is not source and self._is_group_window(active):
             return                      # e.g. a click in the flyout: still the same group
@@ -642,19 +657,66 @@ class AgendaPopup(QWidget):
 
     def showEvent(self, e):
         super().showEvent(e)
+        self._foreground_strikes = 0
         self.watchdog.start()
 
     def _watchdog_tick(self) -> None:
-        """Every WATCHDOG_MS while shown: if the app is not active (or no window is) and
-        no menu or modal box of the group is up, settle (closes the group if still so)."""
+        """Every WATCHDOG_MS while shown, unless a menu or modal box of the group is up or
+        focus is being reclaimed from the flyout (the reclaim check decides then):
+        - app not active, no active window, or a non-group window active (e.g. the
+          Week window, Settings): settle, which closes the group if still so;
+        - Qt says a group window is active but the OS foreground is elsewhere on two
+          ticks in a row (>= WATCHDOG_MS, not a transient flip): close the group."""
         if not self.isVisible():
             self.watchdog.stop()
             return
-        if self.active_modal() is not None or meeting_menus.is_open(self._menu) \
-                or self._owns(self.active_popup()):
+        if self.reclaim_check.isActive():
+            return                      # the next tick looks again
+        if self._group_menu_or_modal_open():
+            self._foreground_strikes = 0
             return
-        if not self.app_active() or self.active_window() is None:
+        active = self.active_window()
+        if not self.app_active() or active is None or not self._is_group_window(active):
+            self._foreground_strikes = 0
             self._settle_after_close()
+            return
+        if self._foreground_ok():
+            self._foreground_strikes = 0
+            return
+        self._foreground_strikes += 1
+        if self._foreground_strikes >= 2:
+            self._foreground_strikes = 0
+            self.hide()                 # hides the flyout too
+
+    def _group_menu_or_modal_open(self) -> bool:
+        return self.active_modal() is not None or meeting_menus.is_open(self._menu) \
+            or self._owns(self.active_popup())
+
+    def _foreground_ok(self) -> bool:
+        """foreground_is_group(), defaulting to True on any failure (behavior unchanged)."""
+        try:
+            return bool(self.foreground_is_group())
+        except Exception:  # noqa: BLE001 - a failsafe must never break the popup
+            return True
+
+    def _os_foreground_is_group(self) -> bool:
+        """Windows (real display) only: is the foreground window the popup, the flyout,
+        or a menu/modal box of the group? Elsewhere (offscreen, other OS): True."""
+        if sys.platform != "win32" or QGuiApplication.platformName() != "windows":
+            return True
+        import ctypes
+        fg = int(ctypes.windll.user32.GetForegroundWindow() or 0)
+        if not fg:
+            return True                 # in the middle of a switch: no opinion
+        group = [self]
+        if self._flyout is not None and self.flyout_open():
+            group.append(self._flyout)
+        if meeting_menus.is_open(self._menu):
+            group.append(self._menu)
+        for w in (self.active_modal(), self.active_popup()):
+            if w is not None:
+                group.append(w)
+        return fg in {int(w.winId()) for w in group}
 
     def hideEvent(self, e):
         self.watchdog.stop()
