@@ -490,6 +490,10 @@ class CalendarWindow(QMainWindow):
         self._qs.setValue("window/geometry", self.saveGeometry())
         self._qs.sync()
 
+    def save_state(self) -> None:
+        """Flush the window geometry to disk (used before a forced exit)."""
+        self._save_geometry()
+
     # -- navigation -----------------------------------------------------------
     def set_view(self, view: str) -> None:
         if view not in VIEWS:

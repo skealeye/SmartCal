@@ -79,6 +79,15 @@ def load_credentials(account: str):
             creds.refresh(Request())
         except RefreshError as exc:
             raise ReauthRequired(account) from exc
-        path.write_text(creds.to_json(), encoding="utf-8")
+        _write_atomic(path, creds.to_json())
         return creds
     raise ReauthRequired(account)
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Several threads may refresh the same token at once: never leave a torn file."""
+    import os
+    import threading
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)

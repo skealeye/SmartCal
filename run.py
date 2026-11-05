@@ -1,6 +1,6 @@
 import logging
+import os
 import sys
-import threading
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QApplication
@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import QApplication
 from smartcal import __version__, autostart
 from smartcal.actions import Actions
 from smartcal.assistant import Assistant, make_client
+from smartcal.clients import ClientPool
 from smartcal.config import data_dir
 from smartcal.db import Cache
 from smartcal.google_auth import list_accounts, remove_account
@@ -40,18 +41,13 @@ def main() -> int:
     except OSError:
         logging.getLogger(__name__).exception("could not register toast app id")
 
-    clients: dict[str, GoogleClient] = {}
-    clients_lock = threading.Lock()
-
-    def client_for(account: str) -> GoogleClient:
-        with clients_lock:
-            if account not in clients:
-                clients[account] = GoogleClient(account)
-            return clients[account]
+    # One GoogleClient per (thread, account): the sync thread and chat threads never
+    # share an httplib2 connection.
+    clients = ClientPool(GoogleClient)
+    client_for = clients.get
 
     def drop_clients() -> None:
-        with clients_lock:
-            clients.clear()
+        clients.clear()
 
     worker = LiveSyncWorker(cache, client_for, settings)
 
@@ -128,7 +124,8 @@ def main() -> int:
     popup.chat_changed.connect(on_chat_changed)
 
     tray = TrayController(popup, worker, cache, settings, on_accounts_changed=drop_clients,
-                          on_open_settings=open_settings, reminders=reminders)
+                          on_open_settings=open_settings, reminders=reminders,
+                          on_before_exit=window.save_state)
     toast.tray = tray
     popup.chat_attention.connect(guarded(tray.notify_attention))
     tray.show()
@@ -171,7 +168,12 @@ def main() -> int:
     worker.start()
     code = app.exec()
     worker.stop()
-    worker.wait(3000)
+    if not worker.wait(3000):
+        # Never terminate() a thread mid-request; state files are written atomically.
+        window.save_state()
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+        os._exit(code)
     return code
 
 

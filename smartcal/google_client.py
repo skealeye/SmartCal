@@ -1,7 +1,9 @@
 """Google Calendar client: maps API dicts to SmartCal models."""
 from __future__ import annotations
 
+import functools
 import re
+import threading
 from datetime import date, datetime, time
 
 from smartcal.google_auth import ReauthRequired
@@ -64,27 +66,51 @@ def _exec(request):
         raise
 
 
+HTTP_TIMEOUT = 20  # seconds; a stuck request must not hang the sync thread forever
+
+
+def _locked(method):
+    """Run the method under the client's lock: one request at a time per client."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class GoogleClient:
     """Calendar operations for one account.
 
     `service` is injectable for tests; when None the real API service is built
     lazily (raising ReauthRequired if the stored token is unusable).
+
+    The underlying httplib2 connection is not thread-safe: callers keep one client
+    per thread (see clients.ClientPool), and every public method also holds an
+    RLock so a shared client can never interleave two requests.
     """
 
     def __init__(self, account: str, service=None):
         self.account = account
         self._service = service
         self._cals: dict[str, CalendarInfo] | None = None
+        self._lock = threading.RLock()
 
     @property
     def service(self):
-        if self._service is None:
-            from googleapiclient.discovery import build
-            from smartcal.google_auth import load_credentials
-            self._service = build("calendar", "v3", credentials=load_credentials(self.account),
-                                  cache_discovery=False)
-        return self._service
+        with self._lock:
+            if self._service is None:
+                import google_auth_httplib2
+                import httplib2
+                from googleapiclient import discovery
+                from smartcal import google_auth
+                http = google_auth_httplib2.AuthorizedHttp(
+                    google_auth.load_credentials(self.account),
+                    http=httplib2.Http(timeout=HTTP_TIMEOUT))
+                self._service = discovery.build("calendar", "v3", http=http,
+                                                cache_discovery=False)
+            return self._service
 
+    @_locked
     def list_calendars(self) -> list[CalendarInfo]:
         out, page = [], None
         while True:
@@ -101,6 +127,7 @@ class GoogleClient:
         self._cals = {c.id: c for c in out}
         return out
 
+    @_locked
     def _cal(self, calendar_id: str) -> CalendarInfo:
         if self._cals is None:
             self.list_calendars()
@@ -126,6 +153,7 @@ class GoogleClient:
             raw_title=raw.get("summary") or "",
             busy=raw.get("transparency") != "transparent")
 
+    @_locked
     def list_events(self, start: datetime, end: datetime) -> list[Event]:
         """Events from every calendar in [start, end), recurrences expanded."""
         events: list[Event] = []
@@ -144,6 +172,7 @@ class GoogleClient:
                     break
         return events
 
+    @_locked
     def get_event(self, event_id: str, *, calendar_id: str) -> Event:
         raw = _exec(self.service.events().get(calendarId=calendar_id, eventId=event_id))
         if raw.get("status") == "cancelled" and "start" not in raw:
@@ -153,6 +182,7 @@ class GoogleClient:
                    "end": {"dateTime": now.isoformat()}}
         return self._to_event(raw, calendar_id)
 
+    @_locked
     def create_event(self, calendar_id: str, title: str, start: datetime, end: datetime,
                      all_day: bool = False, location: str = "", description: str = "") -> Event:
         """Create an event; for all_day, `end` is exclusive (midnight after last day)."""
@@ -163,6 +193,7 @@ class GoogleClient:
             calendarId=calendar_id, body=body, sendUpdates=NO_NOTIFY))
         return self._to_event(raw, calendar_id)
 
+    @_locked
     def update_event(self, event_id: str, *, calendar_id: str, **fields) -> Event:
         """Patch an event. Fields: title, start, end, all_day, location, description.
 
@@ -185,10 +216,12 @@ class GoogleClient:
             calendarId=calendar_id, eventId=event_id, body=body, sendUpdates=NO_NOTIFY))
         return self._to_event(raw, calendar_id)
 
+    @_locked
     def delete_event(self, event_id: str, *, calendar_id: str) -> None:
         _exec(self.service.events().delete(
             calendarId=calendar_id, eventId=event_id, sendUpdates=NO_NOTIFY))
 
+    @_locked
     def restore_event(self, before: Event) -> Event:
         """Bring back a deleted event with the fields of `before`.
 

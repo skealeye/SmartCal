@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from datetime import datetime
 
@@ -12,6 +13,8 @@ from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 from .. import agenda, google_auth
 
 log = logging.getLogger(__name__)
+
+STOP_WAIT_MS = 3000
 
 
 def dialog_visible(dlg) -> bool:
@@ -51,9 +54,13 @@ class TrayController(QSystemTrayIcon):
     _add_done = pyqtSignal(str)
 
     def __init__(self, popup, worker, cache, settings, parent=None,
-                 on_accounts_changed=None, add_account_fn=None, on_open_settings=None, reminders=None):
+                 on_accounts_changed=None, add_account_fn=None, on_open_settings=None, reminders=None,
+                 on_before_exit=None, exit_fn=os._exit):
         super().__init__(parent)
         self.popup, self.worker = popup, worker
+        self._on_before_exit = on_before_exit
+        self._exit = exit_fn
+        self._quit_app = QApplication.quit
         self.cache, self.settings = cache, settings
         self._on_accounts_changed = on_accounts_changed
         self._add_account_fn = add_account_fn or google_auth.add_account
@@ -182,9 +189,20 @@ class TrayController(QSystemTrayIcon):
             self._add_action.setEnabled(True)
 
     def quit(self) -> None:
+        """Stop the sync thread and quit. A thread stuck in a request (HTTP timeout is
+        20 s) is never terminate()d mid-write: state is flushed and the process exits.
+        Every state file is written atomically, so nothing is left half-written."""
         self.worker.stop()
-        if not self.worker.wait(3000):
-            self.worker.terminate()
-            self.worker.wait(1000)
+        if not self.worker.wait(STOP_WAIT_MS):
+            log.warning("sync thread did not stop; exiting without waiting for it")
+            try:
+                if self._on_before_exit:
+                    self._on_before_exit()
+                for handler in logging.getLogger().handlers:
+                    handler.flush()
+            except Exception:  # noqa: BLE001
+                log.exception("flush before exit failed")
+            self._exit(0)
+            return
         self.hide()
-        QApplication.quit()
+        self._quit_app()

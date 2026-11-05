@@ -136,6 +136,46 @@ def test_sync_now_action_passes_no_args(qtbot, tmp_path):
     assert worker.syncs == 1
 
 
+class StuckWorker(FakeWorker):
+    """A sync thread that never finishes (e.g. blocked in a network call)."""
+
+    def __init__(self):
+        super().__init__()
+        self.stopped = False
+
+    def stop(self):
+        self.stopped = True
+
+    def wait(self, ms):
+        return False
+
+    def terminate(self):
+        raise AssertionError("terminate() must never be called")
+
+
+def test_quit_with_stuck_worker_flushes_and_exits_without_terminate(qtbot, tmp_path):
+    exits, flushed, quits = [], [], []
+    worker = StuckWorker()
+    tray, _ = build(qtbot, tmp_path, worker, on_before_exit=lambda: flushed.append(1),
+                    exit_fn=exits.append)
+    tray._quit_app = lambda: quits.append(1)
+    tray.quit()
+    assert worker.stopped and flushed == [1] and exits == [0] and quits == []
+
+
+def test_quit_with_stopping_worker_quits_normally(qtbot, tmp_path):
+    exits, quits = [], []
+
+    class Worker(FakeWorker):
+        def wait(self, ms):
+            return True
+
+    tray, _ = build(qtbot, tmp_path, Worker(), exit_fn=exits.append)
+    tray._quit_app = lambda: quits.append(1)
+    tray.quit()
+    assert exits == [] and quits == [1]
+
+
 def test_settings_menu_action_opens_settings(qtbot, tmp_path):
     opened = []
     cache = Cache(tmp_path / "c.db")
