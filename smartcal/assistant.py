@@ -193,7 +193,8 @@ NOT_APPROVED_NOTE = ("SmartCal note: the user's reply was not a clear yes, so th
                      "Do not retry them unless the user asks again.")
 _AFFIRMATIVE = ("yes", "y", "yep", "yeah", "yup", "ok", "okay", "sure", "go ahead", "do it",
                 "confirm", "confirmed", "please do", "yes please", "sounds good", "correct",
-                "approved", "absolutely", "of course")
+                "approved", "absolutely", "of course", "alright", "fine", "k", "kk", "okie")
+_THUMBS_UP = re.compile("\U0001f44d[\U0001f3fb-\U0001f3ff]?\ufe0f?")
 LEADING_WORDS_MAX = 6
 # Messages longer than LEADING_WORDS_MAX words approve only when they are one of these.
 _AFFIRMATIVE_LONG = {"yes please go ahead and delete it", "yes please go ahead and do it",
@@ -221,6 +222,8 @@ def is_affirmative(text: str) -> bool:
     longer: must be one of a few exact phrases. Anything else is NOT approval."""
     t = unicodedata.normalize("NFKC", str(text or ""))
     t = _INVISIBLE.sub("", t).lower().translate(_APOSTROPHES).strip()
+    if _THUMBS_UP.fullmatch(t):           # a lone thumbs-up
+        return True
     if not t or "?" in t or _non_ascii_letter(t):
         return False
     words = re.findall(r"[a-z]+", t)          # every non-letter splits: don't -> don, t
@@ -236,11 +239,26 @@ def is_affirmative(text: str) -> bool:
     return any(words[:len(p)] == p for p in (phrase.split() for phrase in _AFFIRMATIVE))
 
 
+# Real confusables only (Cyrillic, Greek, a few Latin/Armenian), keyed by the lowercase ASCII
+# letter they imitate. Fullwidth Latin needs no entry: NFKC maps it to ASCII first.
+_CONFUSABLES = {
+    "a": "\u0430\u03b1", "b": "\u044c\u0432", "c": "\u0441\u03f2", "d": "\u0501",
+    "e": "\u0435\u0451", "g": "\u0261\u0581", "h": "\u04bb", "i": "\u0456\u03b9\u04cf\u0131",
+    "j": "\u0458", "k": "\u043a\u03ba", "l": "\u04cf\u0399\u03b9", "m": "\u043c",
+    "n": "\u043f\u03b7", "o": "\u043e\u03bf\u0585", "p": "\u0440\u03c1", "q": "\u051b",
+    "r": "\u0433", "s": "\u0455", "t": "\u0442\u03c4", "u": "\u03c5\u057d",
+    "v": "\u03bd\u0475", "w": "\u051d\u03c9", "x": "\u0445\u03c7", "y": "\u0443\u03b3",
+}
+
+
 def _lookalike(phrase: str) -> str:
-    """Regex for `phrase` where any letter may also be a non-ASCII letter (homoglyphs)."""
+    """Regex for lowercase `phrase` where a letter may also be one of its known homoglyphs."""
     parts = []
     for ch in phrase:
-        parts.append(r"\s*" if ch == " " else f"(?:{re.escape(ch)}|[^\\x00-\\x7f])")
+        if ch == " ":
+            parts.append(r"\s*")
+        else:
+            parts.append("[" + re.escape(ch + _CONFUSABLES.get(ch, "")) + "]")
     return "".join(parts)
 
 
@@ -258,9 +276,19 @@ def _pending_title(title: str) -> str:
     """Untrusted title for a pending line: one plain line, no quotes, no fake phrases."""
     t = clean_output(title).translate(str.maketrans({c: " " for c in "“”\"'\n"}))
     t = unicodedata.normalize("NFKC", t)
-    t = _FAKE_LINE.sub(" ", t)
+    t = _INVISIBLE.sub("", t)
+    t = _FAKE_LINE.sub(" ", t)    # removes only text that really imitates SmartCal's lines
     t = re.sub(r"\s+", " ", t).strip()
-    return (t if len(t) <= PENDING_TITLE else t[:PENDING_TITLE - 1].rstrip() + "…") or "(no title)"
+    if not t:
+        return "(untitled event)"
+    return t if len(t) <= PENDING_TITLE else t[:PENDING_TITLE - 1].rstrip() + "…"
+
+
+def _event_desc(ev, now: datetime, extra: str = "") -> str:
+    """'the event titled “T” (Thu Nov 5 6:00 PM[, extra])': always title AND time."""
+    when = _safe_when(ev.start, now, ev.all_day)
+    return f"the event titled “{_pending_title(ev.title)}” ({when}" + \
+        (f", {extra})" if extra else ")")
 
 
 class _ToolError(Exception):
@@ -507,7 +535,7 @@ class Assistant:
 
     def _reply(self, user_text: str) -> AssistantResult:
         text = clean_output(user_text, MAX_USER_TEXT)
-        dropped = self.gate.new_turn(user_text)   # judged on the FULL text, not the truncated   # anything but a clear yes cancels pending OKs
+        dropped = self.gate.new_turn(user_text)   # full text; anything but a clear yes cancels
         if not text:
             return AssistantResult("Type a message first.", False)
         saved = copy.deepcopy(self.history)
@@ -801,14 +829,21 @@ class Assistant:
                             f"{_safe_when(ev.start, now, ev.all_day)}")
         return {"ok": True, "event_id": ev.id, "account": account, "calendar_id": ev.calendar_id}
 
-    def _guarded(self, turn: _Turn, key: tuple, description: str, write):
-        """Run `write(allow_attendees)`; an event with attendees goes through the gate."""
+    def _guarded(self, turn: _Turn, key: tuple, describe, write):
+        """Run `write(allow_attendees)`; an event with attendees goes through the gate.
+        `describe(event)` builds the pending line from Google's current copy of the event.
+        A refused request (needs confirmation, or one already pending) uses no write."""
         self._spend_write(turn)
         try:
             return write(False)
-        except AttendeesRequireConfirmationError:
-            if not self.gate.allow(key, description):
+        except AttendeesRequireConfirmationError as exc:
+            try:
+                allowed = self.gate.allow(key, describe(exc.event))
+            except BaseException:
                 turn.writes -= 1          # nothing was written
+                raise
+            if not allowed:
+                turn.writes -= 1
                 return None
             return write(True)
 
@@ -816,9 +851,9 @@ class Assistant:
         start, end = self._dt(args, "new_start", now), self._dt(args, "new_end", now)
         event_id, account, calendar_id = self._locate(args)
         key = (account, calendar_id, event_id, "move", start.isoformat(), end.isoformat())
-        title = self._title(event_id, account, calendar_id)
-        ev = self._guarded(turn, key, f"move {title} (has other attendees) to "
-                                      f"{_when(start, now)}",
+        ev = self._guarded(turn, key,
+                           lambda e: f"move {_event_desc(e, now, 'has other attendees')} to "
+                                     f"{_when(start, now, e.all_day)}",
                            lambda ok: self.actions.move(event_id, start, end, account=account,
                                                         calendar_id=calendar_id,
                                                         allow_attendees=ok))
@@ -842,14 +877,13 @@ class Assistant:
         for k in raw:
             fields[k] = self._dt(raw, k, now) if k in ("start", "end") \
                 else _text(raw, k, required=(k == "title"), allow_empty=(k != "title"))
-        key = ("update",
+        event_id, account, calendar_id = self._locate(args)
+        key = (account, calendar_id, event_id, "update",
                _json({k: (v.isoformat() if isinstance(v, datetime) else v)
                       for k, v in sorted(fields.items())}))
-        event_id, account, calendar_id = self._locate(args)
-        key = (account, calendar_id, event_id) + key
-        title = self._title(event_id, account, calendar_id)
-        ev = self._guarded(turn, key, f"change {', '.join(sorted(fields))} of {title} "
-                                      f"(has other attendees)",
+        ev = self._guarded(turn, key,
+                           lambda e: f"change {', '.join(sorted(fields))} of "
+                                     f"{_event_desc(e, now, 'has other attendees')}",
                            lambda ok: self.actions.update(event_id, account=account,
                                                           calendar_id=calendar_id,
                                                           allow_attendees=ok, **fields))
@@ -861,10 +895,18 @@ class Assistant:
 
     def _delete_event(self, args, turn, now):
         event_id, account, calendar_id = self._locate(args)
-        cached = self._cached(event_id, account, calendar_id)
-        when = f" ({_safe_when(cached.start, now, cached.all_day)})" if cached else ""
+        if turn.writes >= MAX_WRITES:   # do not use up an approval that cannot run
+            self._spend_write(turn)
         key = (account, calendar_id, event_id, "delete")
-        if not self.gate.allow(key, f"delete {self._title(event_id, account, calendar_id)}{when}"):
+        current = self._cached(event_id, account, calendar_id)
+        if current is None:             # not cached: ask Google so the line has title + time
+            try:
+                current = self.actions.client(account).get_event(event_id,
+                                                                 calendar_id=calendar_id)
+            except Exception as exc:  # noqa: BLE001
+                log.info("delete_event lookup failed: %s", type(exc).__name__)
+                raise EventNotFoundError(event_id) from None
+        if not self.gate.allow(key, f"delete {_event_desc(current, now)}"):
             return NEEDS_CONFIRMATION
         self._spend_write(turn)
         self.actions.delete(event_id, account=account, calendar_id=calendar_id,
@@ -874,15 +916,9 @@ class Assistant:
         if last is not None and last.kind == "delete" and last.event_id == event_id:
             name = _line(last.summary, 100)
         else:
-            name = _line(cached.title, 100) if cached else "the event"
+            name = _line(current.title, 100)
         turn.changes.append(f"Done: deleted {name}")
         return {"ok": True}
-
-    def _title(self, event_id, account, calendar_id) -> str:
-        cached = self._cached(event_id, account, calendar_id)
-        if cached:
-            return f"the event titled \u201c{_pending_title(cached.title)}\u201d"
-        return f"the event with id {_pending_title(event_id)}"
 
     def _add_reminder(self, args, turn, now):
         text = _text(args, "text", required=True)

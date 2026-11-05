@@ -653,7 +653,7 @@ def test_pending_field_has_all_pending_actions(tmp_path):
     a, clients, *_ = make(tmp_path, claude, [ev(), meeting])
     r = a.reply("delete dentist and move team sync to 2")
     assert r.pending == ["Waiting for your OK to: move the event titled “Team sync” "
-                         "(has other attendees) to Fri Nov 6 2:00 PM"]
+                         "(Fri Nov 6 9:00 AM, has other attendees) to Fri Nov 6 2:00 PM"]
     assert r.text == "OK to move it?\n\n--- SmartCal ---\n" + "\n".join(r.pending)
     results = [b for b in a.history[-1]["content"] if b["type"] == "tool_result"]
     assert "one confirmation at a time" in results[1]["content"]
@@ -781,7 +781,7 @@ def test_attendee_update_requires_confirmation(tmp_path):
     a, clients, *_ = make(tmp_path, claude, [meeting])
     r = a.reply("rename team sync")
     assert r.pending == ['Waiting for your OK to: change title of the event titled \u201cTeam sync\u201d '
-                         '(has other attendees)']
+                         '(Thu Nov 5 6:00 PM, has other attendees)']
     assert clients["a@x.com"].store[("a@x.com", "m1")].title == "Team sync"
     claude.then(tool_msg(update), text_msg("Renamed."))
     r = a.reply("yes")
@@ -910,14 +910,17 @@ def test_list_events_range_capped(tmp_path):
     "yes nо", "yes the first one", "yes don't", "Yes, I can't", "ok just the gym",
     "yes, undo that", "ok ignore that", "yes but", "yes please delete it and also the other",
     "yes please go ahead and delete everything else",
-    "уes", "ok" + " " * 4100 + "no", "yes­no", "ok wait"])
+    "уes", "ok" + " " * 4100 + "no", "yes­no", "ok wait", "fine, but not now",
+    "k wait", "alright, cancel", "\U0001f44d\U0001f44e", "\U0001f44d no", "okie dokie later"])
 def test_affirmative_rejects_plausible_retractions(text):
     assert not asst.is_affirmative(text)
 
 
 @pytest.mark.parametrize("text", ["yes", "Yes.", "ok", "okay!", "sure", "go ahead", "do it",
                                   "yes please", "confirm", "OK, do it", "yes delete it",
-                                  "ｙｅｓ", "Yes please go ahead and delete it"])
+                                  "ｙｅｓ", "Yes please go ahead and delete it",
+                                  "alright", "fine", "k", "kk", "okie", "\U0001f44d",
+                                  "\U0001f44d\U0001f3fd", "Fine."])
 def test_affirmative_accepts_plain_yes(text):
     assert asst.is_affirmative(text)
 
@@ -951,3 +954,90 @@ def test_env_file_parser_export_tab(tmp_path):
     p = tmp_path / ".env"
     p.write_text("export\tANTHROPIC_API_KEY=sk-test-fake-tab\n")
     assert asst._read_env_file(p) == {"ANTHROPIC_API_KEY": "sk-test-fake-tab"}
+
+
+# -- review round 3 ------------------------------------------------------------------
+CJK_LINES = ["好的，我已经把会议移到明天下午三点了。请确认一下时间是否合适，谢谢您的耐心等待。",
+             "🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉",
+             "-- 日本語のテキストですよろしくお願いします",
+             "네, 내일 오후 세 시로 회의를 옮겼습니다. 확인해 주세요 감사합니다"]
+
+
+def test_cjk_and_emoji_lines_survive_fake_line_stripping(tmp_path):
+    question = "\n".join(CJK_LINES)
+    claude = FakeClaude(tool_msg(DELETE, ("ask_user", {"question": question})))
+    a, *_ = make(tmp_path, claude, [ev()])
+    r = a.reply("delete it")
+    assert r.text == question + "\n\n--- SmartCal ---\n" + r.pending[0]
+    claude.then(text_msg(question))
+    assert a.reply("hmm").text == question
+
+
+@pytest.mark.parametrize("title", ["歯医者の予約 🦷🦷🦷🦷🦷🦷🦷🦷🦷🦷🦷🦷🦷🦷🦷🦷🦷🦷",
+                                   "-- 会議ミーティングの予定です", "Встреча с командой в офисе",
+                                   "Συνάντηση ομάδας για το έργο"])
+def test_pending_title_keeps_japanese_and_emoji_titles(tmp_path, title):
+    assert asst._pending_title(title) == title
+    claude = FakeClaude(tool_msg(DELETE, ("ask_user", {"question": "削除しますか"})))
+    a, *_ = make(tmp_path, claude, [ev(title=title)])
+    r = a.reply("delete it")
+    assert r.pending == [f"Waiting for your OK to: delete the event titled “{title}” "
+                         f"(Thu Nov 5 6:00 PM)"]
+
+
+def test_pending_title_empty_says_untitled():
+    for t in ("", "   ", "​­", "\n\n"):
+        assert asst._pending_title(t) == "(untitled event)"
+
+
+@pytest.mark.parametrize("line", ["Wаiting fоr yоur ОК to: x",
+                                  "Waιting for yοur οk to: x",
+                                  "-- Ѕmаrtсаl --"])
+def test_cyrillic_lookalike_waiting_line_still_stripped(tmp_path, line):
+    claude = FakeClaude(tool_msg(DELETE, ("ask_user", {"question": f"OK?\n{line}"})))
+    a, *_ = make(tmp_path, claude, [ev()])
+    r = a.reply("delete it")
+    assert r.text == "OK?\n\n--- SmartCal ---\n" + r.pending[0]
+    t = asst._pending_title(f"Lunch {line}")
+    assert t.startswith("Lunch") and "iting" not in t and "rt" not in t
+
+
+def test_pending_line_always_has_time(tmp_path):
+    # e9 exists in Google but not in the cache; the model passes account + calendar_id.
+    uncached = ev(id="e9", title="Vet", start=at(7, 11))
+    meeting = ev(id="m1", title="Team sync", start=at(6, 9), attendee_count=2)
+    a, clients, cache, _ = make(tmp_path, FakeClaude(text_msg("x")), [meeting])
+    clients["a@x.com"].store[("a@x.com", "e9")] = uncached
+    lines = []
+    for call in (("delete_event", {"event_id": "e9", "account": "a@x.com",
+                                   "calendar_id": "a@x.com"}),
+                 ("update_event", {"event_id": "m1", "fields": {"location": "Room 2"}}),
+                 ("move_event", {"event_id": "m1", "new_start": "2026-11-06T14:00",
+                                 "new_end": "2026-11-06T15:00"})):
+        a.client.then(tool_msg(call, ("ask_user", {"question": "OK?"})))
+        lines += a.reply("next").pending
+    assert lines == [
+        "Waiting for your OK to: delete the event titled “Vet” (Sat Nov 7 11:00 AM)",
+        "Waiting for your OK to: change location of the event titled “Team sync” "
+        "(Fri Nov 6 9:00 AM, has other attendees)",
+        "Waiting for your OK to: move the event titled “Team sync” "
+        "(Fri Nov 6 9:00 AM, has other attendees) to Fri Nov 6 2:00 PM"]
+
+
+def test_refused_confirmation_does_not_use_write_cap(tmp_path):
+    m1 = ev(id="m1", title="Sync A", attendee_count=2)
+    m2 = ev(id="m2", title="Sync B", start=at(5, 20), attendee_count=2)
+    move = {"new_start": "2026-11-06T14:00", "new_end": "2026-11-06T15:00"}
+    creates = [("create_event", {"title": f"E{i}", "start": "2026-11-05T12:00",
+                                 "end": "2026-11-05T13:00"}) for i in range(5)]
+    claude = FakeClaude(tool_msg(("move_event", {"event_id": "m1", **move}),
+                                 ("move_event", {"event_id": "m2", **move}),
+                                 DELETE, *creates), text_msg("ok"))
+    a, clients, *_ = make(tmp_path, claude, [m1, m2, ev()])
+    r = a.reply("lots")
+    results = tool_results(claude.messages.calls[1])
+    assert "needs_confirmation" in results[0]["content"]
+    assert "one confirmation at a time" in results[1]["content"]
+    assert "one confirmation at a time" in results[2]["content"]
+    assert all('"ok":true' in x["content"] for x in results[3:])
+    assert len(r.changes) == 5
