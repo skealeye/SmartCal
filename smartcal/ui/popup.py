@@ -1277,8 +1277,8 @@ class AgendaPopup(QWidget):
         return super().event(e)
 
     def nativeEvent(self, event_type, message):
-        handled = nativebg.handle_erase(event_type, message, theme.BG)
-        return handled if handled is not None else super().nativeEvent(event_type, message)
+        # Never the base class's nativeEvent: its (False, None) crashes Qt (see nativebg).
+        return nativebg.native_event(event_type, message, theme.BG)
 
     def note_foreground(self) -> None:
         """A group window was activated (or a watchdog tick): remember if the OS really

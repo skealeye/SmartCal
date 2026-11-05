@@ -63,6 +63,64 @@ def install_excepthooks() -> None:
     threading.excepthook = _thread_hook
 
 
+CRASH_LOG_MAX_BYTES = 256 * 1024
+_crash_file = None          # kept open for the app's lifetime (faulthandler writes to it)
+_qt_handler = None          # a reference keeps the Qt message handler alive
+
+
+def enable_crash_log(path: str | Path, version: str = "") -> bool:
+    """v0.8.5: a native crash (access violation in Qt, ...) kills the process before
+    any Python logging runs; faulthandler then writes the Python stack of every thread
+    to `path` (crash.log next to smartcal.log). One short line per start says which
+    run a dump belongs to; past 256 KB the file starts over. Never raises."""
+    global _crash_file
+    import faulthandler
+    from datetime import datetime
+    try:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if p.exists() and p.stat().st_size > CRASH_LOG_MAX_BYTES:
+            p.replace(p.with_suffix(p.suffix + ".1"))
+        f = open(p, "a", encoding="utf-8", buffering=1)
+        f.write(f"--- SmartCal {version} started {datetime.now():%Y-%m-%d %H:%M:%S}\n")
+        f.flush()
+        faulthandler.enable(file=f, all_threads=True)
+    except (OSError, ValueError, RuntimeError):
+        return False
+    old, _crash_file = _crash_file, f
+    if old is not None:
+        try:
+            old.close()
+        except OSError:
+            pass
+    return True
+
+
+def install_qt_message_handler() -> None:
+    """Qt's own warnings and errors (qWarning, qCritical, qFatal) go to smartcal.log."""
+    global _qt_handler
+    from PyQt6.QtCore import QtMsgType, qInstallMessageHandler
+    qt_log = logging.getLogger("smartcal.qt")
+    levels = {QtMsgType.QtDebugMsg: logging.DEBUG, QtMsgType.QtInfoMsg: logging.INFO,
+              QtMsgType.QtWarningMsg: logging.WARNING,
+              QtMsgType.QtCriticalMsg: logging.ERROR, QtMsgType.QtFatalMsg: logging.CRITICAL}
+
+    def handler(mode, context, message) -> None:
+        try:
+            where = ""
+            if context is not None and context.file:
+                where = f" ({context.file}:{context.line})"
+            qt_log.log(levels.get(mode, logging.WARNING), "%s%s", message, where)
+            if mode == QtMsgType.QtFatalMsg:
+                for h in logging.getLogger().handlers:
+                    h.flush()
+        except Exception:  # noqa: BLE001 - a log call must never raise into Qt
+            pass
+
+    _qt_handler = handler
+    qInstallMessageHandler(handler)
+
+
 def guarded(fn):
     """Wrap a Qt slot so an exception is logged instead of propagating into Qt."""
     @functools.wraps(fn)

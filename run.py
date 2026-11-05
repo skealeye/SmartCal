@@ -14,7 +14,8 @@ from smartcal.db import Cache
 from smartcal.google_auth import list_accounts, remove_account
 from smartcal.google_client import GoogleClient
 from smartcal.live_sync import LiveSyncWorker
-from smartcal.logsetup import guarded, install_excepthooks, setup_logging
+from smartcal.logsetup import (enable_crash_log, guarded, install_excepthooks,
+                               install_qt_message_handler, setup_logging)
 from smartcal.notifier import Notifier
 from smartcal.reminders import ReminderFirer, Reminders
 from smartcal.settings import Settings
@@ -35,6 +36,11 @@ TOOK_OVER_TEXT = "SmartCal was already running but not responding; starting a ne
 def main() -> int:
     install_excepthooks()   # first: even a failure while setting up logging is caught
     setup_logging(data_dir() / "smartcal.log")
+    # A native crash leaves the Python stacks in crash.log; Qt's warnings go to the log.
+    if not enable_crash_log(data_dir() / "crash.log", __version__):
+        logging.getLogger(__name__).warning("could not open crash.log")
+    install_qt_message_handler()
+    logging.getLogger(__name__).info("SmartCal %s starting", __version__)
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("SmartCal")

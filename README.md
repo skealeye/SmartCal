@@ -106,7 +106,7 @@ Hidden meetings and meeting colors are stored in `%APPDATA%\SmartCal\settings.js
 
 ## Troubleshooting
 
-- Log: `%APPDATA%\SmartCal\smartcal.log`.
+- Log: `%APPDATA%\SmartCal\smartcal.log` (also Qt's own warnings). If SmartCal ever crashes outright, `%APPDATA%\SmartCal\crash.log` holds the Python stack at the moment of the crash.
 - Calendar stops syncing after about a week: sign in again (see 7-day expiry above).
 - Chat says no key: check `%APPDATA%\SmartCal\.env`.
 - Test without touching your real data: set `SMARTCAL_NO_SYSTEM_WRITES=1` (no Run key or toast app-id registry writes) and `SMARTCAL_DATA_DIR=<folder>` (use that folder instead of `%APPDATA%\SmartCal`).

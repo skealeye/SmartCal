@@ -620,8 +620,8 @@ class DetailsFlyout(QWidget):
             lay.activate()
 
     def nativeEvent(self, event_type, message):
-        handled = nativebg.handle_erase(event_type, message, theme.BG)
-        return handled if handled is not None else super().nativeEvent(event_type, message)
+        # Never the base class's nativeEvent: its (False, None) crashes Qt (see nativebg).
+        return nativebg.native_event(event_type, message, theme.BG)
 
     def _stop_animations(self) -> None:
         self._anim.stop()
