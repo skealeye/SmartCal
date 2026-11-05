@@ -21,10 +21,14 @@ from . import theme
 log = logging.getLogger(__name__)
 
 MAX_ITEMS = 50
+MAX_INPUT = 2000
+ATTENTION_TEXT = "Claude is waiting for your OK"
 LIST_HEIGHT = 200
 THINKING = "Thinking…"
 GENERIC_ERROR = "Something went wrong. Please try again."
 REAUTH_GENERIC = "Sign in again: right-click the tray icon > Add Google account…"
+UNDONE = "Undone"
+GONE = "Nothing to undo"
 STILL_WORKING = "Still working…"
 
 
@@ -51,6 +55,7 @@ class ChatWorker(QObject):
     def __init__(self, job: Callable[[], object], parent=None):
         super().__init__(parent)
         self._job = job
+        self.on_done = self.on_fail = None
 
     def start(self) -> None:
         threading.Thread(target=self._run, name="chat-worker", daemon=True).start()
@@ -96,6 +101,7 @@ class _Item(QFrame):
         self.approve_btn: QPushButton | None = None
         self.deny_btn: QPushButton | None = None
         self.undoable = False
+        self.remaining = 0        # writes of this reply not yet undone
         self.setObjectName("chatitem")
         self.lay = QVBoxLayout(self)
         self.lay.setContentsMargins(6, 4, 6, 4)
@@ -112,6 +118,8 @@ class _Item(QFrame):
 
 class ChatWidget(QWidget):
     changed = pyqtSignal()   # a calendar write or undo happened
+    attention = pyqtSignal(str)          # needs the owner while the popup is hidden
+    collapse_requested = pyqtSignal()    # Esc in the chat
 
     def __init__(self, assistant_factory: Callable[[], object], parent=None):
         super().__init__(parent)
@@ -120,6 +128,9 @@ class ChatWidget(QWidget):
         self._pending_worker: ChatWorker | None = None
         self._thinking: _Item | None = None
         self._items: list[_Item] = []
+        self._closing = False
+        self._gone: list[int] = []
+        self.destroyed.connect(lambda *_a, g=self._gone: g.append(1))
         self.setStyleSheet(
             f"QLabel{{color:{theme.TEXT};font-size:12px;}}"
             f"QLineEdit{{background:{theme.BG_NEXT};color:{theme.TEXT};"
@@ -147,6 +158,7 @@ class ChatWidget(QWidget):
         row = QHBoxLayout()
         row.setSpacing(4)
         self._input = QLineEdit()
+        self._input.setMaxLength(MAX_INPUT)
         self._input.setPlaceholderText("Ask Claude…")
         self._input.returnPressed.connect(self.send)
         self._send_btn = _button("Send")
@@ -177,6 +189,20 @@ class ChatWidget(QWidget):
     def focus_input(self) -> None:
         self._input.setFocus()
 
+    def closeEvent(self, e):
+        self._closing = True
+        super().closeEvent(e)
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_Escape:
+            self.collapse_requested.emit()
+            e.accept()
+            return
+        super().keyPressEvent(e)
+
+    def _dead(self) -> bool:
+        return self._closing or bool(self._gone)
+
     # -- sending --------------------------------------------------------------
     def send(self, text: str | None = None) -> None:
         if self.is_busy():
@@ -190,13 +216,24 @@ class ChatWidget(QWidget):
         self._add_user(text)
         self._start(lambda a: a.reply(text), self._on_reply)
 
-    def _start(self, call: Callable[[object], object], on_done) -> None:
+    def _start(self, call: Callable[[object], object], on_done, on_fail=None) -> None:
         self._set_busy(True)
         worker = ChatWorker(lambda: call(self._get_assistant()), self)
-        worker.done.connect(lambda r, w=worker: self._finish(w, on_done, r))
-        worker.failed.connect(lambda e, w=worker: self._finish(w, self._on_error, e))
+        worker.on_done, worker.on_fail = on_done, on_fail or self._on_error
+        worker.done.connect(self._worker_done, Qt.ConnectionType.QueuedConnection)
+        worker.failed.connect(self._worker_failed, Qt.ConnectionType.QueuedConnection)
         self._pending_worker = worker
         worker.start()
+
+    def _worker_done(self, value) -> None:
+        w = self._pending_worker
+        if w is not None:
+            self._finish(w, w.on_done, value)
+
+    def _worker_failed(self, exc) -> None:
+        w = self._pending_worker
+        if w is not None:
+            self._finish(w, w.on_fail, exc)
 
     def _get_assistant(self):
         # Runs on the worker thread; only one job runs at a time.
@@ -205,7 +242,7 @@ class ChatWidget(QWidget):
         return self._assistant
 
     def _finish(self, worker: ChatWorker, handler, value) -> None:
-        if worker is not self._pending_worker:
+        if worker is not self._pending_worker or self._dead():
             return
         try:
             self._remove_thinking()
@@ -245,9 +282,11 @@ class ChatWidget(QWidget):
             item.lay.addWidget(block)
             if getattr(result, "undoable", False):
                 item.undoable = True
+                item.remaining = len(changes)
                 for it in self._items:
                     it.set_buttons_enabled("undo", False)
-                item.undo_btn = _button("Undo")
+                item.undo_btn = _button(f"Undo ({len(changes)})" if len(changes) > 1
+                                        else "Undo")
                 item.undo_btn.clicked.connect(lambda _c=False, i=item: self._undo(i))
                 item.lay.addWidget(item.undo_btn, 0, Qt.AlignmentFlag.AlignLeft)
         if pending:
@@ -270,6 +309,8 @@ class ChatWidget(QWidget):
         self._append(item)
         if changes:
             self.changed.emit()
+        if pending and not self.window().isVisible():
+            self.attention.emit(ATTENTION_TEXT)
 
     def _on_error(self, exc) -> None:
         if isinstance(exc, AssistantError):
@@ -289,12 +330,46 @@ class ChatWidget(QWidget):
     def _undo(self, item: _Item) -> None:
         if self.is_busy():
             return
+        self._freeze_old_buttons()
         item.set_buttons_enabled("undo", False)
-        self._start(lambda a: a.undo_last(), self._on_undone)
+        n = max(1, item.remaining)
 
-    def _on_undone(self, line) -> None:
-        self._add_plain("claude", "Claude", str(line))
-        self.changed.emit()
+        def job(a):
+            lines, err = [], None
+            for _ in range(n):
+                try:
+                    line = str(a.undo_last())
+                except Exception as exc:  # noqa: BLE001 - shown by the UI thread
+                    err = exc
+                    break
+                lines.append(line)
+                if not line.startswith(UNDONE):
+                    break
+            return lines, err
+
+        def fail(exc):
+            self._on_error(exc)
+            self._refresh_undo(item)
+        self._start(job, lambda r: self._on_undone(item, r), fail)
+
+    def _refresh_undo(self, item: _Item, gone: bool = False) -> None:
+        if item.undo_btn is None:
+            return
+        left = item.remaining
+        item.undo_btn.setText(f"Undo ({left})" if left > 1 else "Undo")
+        item.undo_btn.setEnabled(left > 0 and not gone)
+
+    def _on_undone(self, item: _Item, result) -> None:
+        lines, err = result
+        for line in lines:
+            self._add_plain("claude", "Claude", line)
+        done = sum(1 for line in lines if line.startswith(UNDONE))
+        item.remaining = max(0, item.remaining - done)
+        if err is not None:
+            self._on_error(err)
+        self._refresh_undo(item, gone=bool(lines) and lines[-1].startswith(GONE))
+        if done:
+            self.changed.emit()
 
     def new_chat(self) -> None:
         if self.is_busy():

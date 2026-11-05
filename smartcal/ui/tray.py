@@ -61,6 +61,7 @@ class TrayController(QSystemTrayIcon):
         self.reminders = reminders
         self._reminders_dialog = None
         self._adding = False
+        self._attention = False
         self._icon_day = 0
         self.setIcon(make_icon(datetime.now().day))
         menu = QMenu()
@@ -101,6 +102,8 @@ class TrayController(QSystemTrayIcon):
             # The click that deactivated (hid) the popup also reached the tray icon.
             return
         else:
+            self._attention = False
+            self.update_tooltip()
             self.popup.refresh()
             self.popup.show_near_tray(rect)
 
@@ -110,7 +113,16 @@ class TrayController(QSystemTrayIcon):
             self._icon_day = now.day
             self.setIcon(make_icon(now.day))
         nxt = agenda.next_event(self.cache, self.settings, now)
-        self.setToolTip(f"Next: {agenda.describe_next(nxt, now)}" if nxt else "SmartCal")
+        tip = f"Next: {agenda.describe_next(nxt, now)}" if nxt else "SmartCal"
+        if self._attention:
+            tip = f"Claude is waiting for your OK\n{tip}"
+        self.setToolTip(tip)
+
+    def notify_attention(self, text: str) -> None:
+        """Plain-text cue that the chat needs the owner (popup is hidden)."""
+        self._attention = True
+        self.update_tooltip()
+        self.showMessage("SmartCal", text, QSystemTrayIcon.MessageIcon.Information, 10000)
 
     def open_settings(self) -> None:
         if self._on_open_settings:

@@ -30,6 +30,7 @@ class AgendaPopup(QWidget):
 
     view_requested = pyqtSignal(str)
     chat_changed = pyqtSignal()   # the chat changed calendars (write or undo)
+    chat_attention = pyqtSignal(str)
 
     def __init__(self, cache, settings, parent=None):
         super().__init__(parent)
@@ -116,6 +117,17 @@ class AgendaPopup(QWidget):
     def chat_expanded(self) -> bool:
         return self._chat is not None and not self._chat.isHidden()
 
+    def _collapse_chat(self) -> None:
+        if self.chat_expanded():
+            self.toggle_chat()
+            self.setFocus()
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_Escape:
+            self.hide()
+            return
+        super().keyPressEvent(e)
+
     def toggle_chat(self) -> None:
         if self._chat_factory is None:
             return
@@ -123,6 +135,8 @@ class AgendaPopup(QWidget):
             from .chat import ChatWidget
             self._chat = ChatWidget(self._chat_factory)
             self._chat.changed.connect(self.chat_changed)
+            self._chat.attention.connect(self.chat_attention)
+            self._chat.collapse_requested.connect(self._collapse_chat)
             self._outer.insertWidget(self._outer.indexOf(self._footer), self._chat)
             expand = True
         else:

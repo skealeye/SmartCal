@@ -2,6 +2,8 @@ import logging
 import threading
 import time
 
+from datetime import datetime, timedelta
+
 from PyQt6.QtCore import QEvent, QRect, Qt
 from PyQt6.QtWidgets import QApplication, QLabel, QPushButton
 
@@ -9,6 +11,7 @@ from smartcal.assistant import (PENDING_HEADER, PENDING_PREFIX, Assistant, Assis
                                 AssistantResult, make_client)
 from smartcal.db import Cache
 from smartcal.google_auth import ReauthRequired
+from smartcal.models import CalendarInfo, Event
 from smartcal.settings import Settings
 from smartcal.ui import chat as chat_mod
 from smartcal.ui.chat import ChatWidget
@@ -23,7 +26,7 @@ class FakeAssistant:
         self.undos = 0
         self.resets = 0
         self.reset_ok = True
-        self.undo_line = "Undid: added Lunch"
+        self.undo_line = "Undone: removed Lunch"
 
     def reply(self, text):
         self.calls.append(text)
@@ -118,7 +121,7 @@ def test_undo_button_calls_undo_last(qtbot):
     undo.click()
     qtbot.waitUntil(lambda: not w.is_busy(), timeout=3000)
     assert a.undos == 1
-    assert "Undid: added Lunch" in all_text(w)
+    assert "Undone: removed Lunch" in all_text(w)
     assert not undo.isEnabled()
 
 
@@ -332,10 +335,180 @@ def test_popup_stays_visible_while_typing_and_pending(qtbot, tmp_path):
     assert popup.isVisible() and a.calls == ["hello"]
 
 
-def test_popup_height_cap_with_chat_expanded(qtbot, tmp_path):
+# -- fix round 1 -------------------------------------------------------------------
+def two_changes():
+    return AssistantResult("ok", True, changes=["Done: added A", "Done: added B"])
+
+
+def test_undo_button_undoes_every_write_of_the_reply(qtbot):
+    w, a = make(qtbot, FakeAssistant([two_changes()]))
+    say(qtbot, w)
+    (undo,) = buttons(w, "Undo (2)")
+    undo.click()
+    qtbot.waitUntil(lambda: not w.is_busy(), timeout=3000)
+    assert a.undos == 2
+    assert not undo.isEnabled()
+
+
+def test_undo_stops_at_first_warning_and_stays_enabled(qtbot):
+    w, a = make(qtbot, FakeAssistant([two_changes()]))
+    lines = iter(["Can't undo: the event no longer exists.", "Undone: x"])
+    a.undo_last = lambda: (setattr(a, "undos", a.undos + 1), next(lines))[1]
+    say(qtbot, w)
+    (undo,) = buttons(w, "Undo (2)")
+    undo.click()
+    qtbot.waitUntil(lambda: not w.is_busy(), timeout=3000)
+    assert a.undos == 1
+    assert "Can't undo" in all_text(w)
+    assert undo.isEnabled() and undo.text() == "Undo (2)"
+
+
+def test_undo_partial_then_retry_shows_remaining(qtbot):
+    w, a = make(qtbot, FakeAssistant([two_changes()]))
+    lines = iter(["Undone: removed B", "Can't undo: nope", "Undone: removed A"])
+    a.undo_last = lambda: next(lines)
+    say(qtbot, w)
+    (undo,) = buttons(w, "Undo (2)")
+    undo.click()
+    qtbot.waitUntil(lambda: not w.is_busy(), timeout=3000)
+    assert undo.isEnabled() and undo.text() == "Undo"
+    undo.click()
+    qtbot.waitUntil(lambda: not w.is_busy(), timeout=3000)
+    assert not undo.isEnabled()
+
+
+def test_undo_retry_after_error_possible(qtbot):
+    for exc in (ReauthRequired("me@example.com"), AssistantError("busy")):
+        w, a = make(qtbot, FakeAssistant([AssistantResult("ok", True, changes=["Done: x"])]))
+
+        def boom(exc=exc):
+            raise exc
+        a.undo_last = boom
+        say(qtbot, w)
+        (undo,) = buttons(w, "Undo")
+        undo.click()
+        qtbot.waitUntil(lambda: not w.is_busy(), timeout=3000)
+        assert undo.isEnabled() and w.input_enabled()
+
+
+def test_undo_freezes_approve_deny(qtbot):
+    line = PENDING_PREFIX + "delete x"
+    r1 = AssistantResult("ok", True, changes=["Done: added A"])
+    r2 = AssistantResult("Sure?\n\n" + PENDING_HEADER + "\n" + line, False, pending=[line])
+    w, a = make(qtbot, FakeAssistant([r1, r2]))
+    say(qtbot, w, "a")
+    say(qtbot, w, "b")
+    (ok,) = buttons(w, "Approve")
+    assert ok.isEnabled()
+    buttons(w, "Undo")[0].click()
+    qtbot.waitUntil(lambda: not w.is_busy(), timeout=3000)
+    assert not ok.isEnabled()
+
+
+def test_changed_not_emitted_when_nothing_undone(qtbot):
+    w, a = make(qtbot, FakeAssistant([AssistantResult("ok", True, changes=["Done: x"])]))
+    a.undo_line = "Nothing to undo."
+    say(qtbot, w)
+    got = []
+    w.changed.connect(lambda: got.append(1))
+    buttons(w, "Undo")[0].click()
+    qtbot.waitUntil(lambda: not w.is_busy(), timeout=3000)
+    assert got == []
+    assert not buttons(w, "Undo")[0].isEnabled()
+
+
+def test_input_max_length_and_empty_ignored(qtbot):
+    w, a = make(qtbot)
+    assert w._input.maxLength() == 2000
+    w.send("   ")
+    w._input.setText("  ")
+    w._send_btn.click()
+    assert a.calls == [] and not w.is_busy()
+
+
+def test_handlers_run_on_main_thread(qtbot, monkeypatch):
+    w, a = make(qtbot)
+    seen = []
+    orig = w._on_reply
+    monkeypatch.setattr(w, "_on_reply",
+                        lambda r: (seen.append(threading.current_thread()), orig(r)))
+    say(qtbot, w)
+    assert seen == [threading.main_thread()]
+
+
+def _pending_result():
+    line = PENDING_PREFIX + "delete x"
+    return AssistantResult("Sure?\n\n" + PENDING_HEADER + "\n" + line, False, pending=[line])
+
+
+def test_attention_emitted_for_pending_when_popup_hidden(qtbot):
+    w, a = make(qtbot, FakeAssistant([_pending_result()]))
+    w.hide()
+    got = []
+    w.attention.connect(got.append)
+    say(qtbot, w)
+    assert got == ["Claude is waiting for your OK"]
+
+
+def test_no_attention_when_popup_visible(qtbot):
+    w, a = make(qtbot, FakeAssistant([_pending_result(), AssistantResult("plain", False)]))
+    got = []
+    w.attention.connect(got.append)
+    say(qtbot, w)
+    w.hide()
+    say(qtbot, w)       # hidden, but no pending block
+    assert got == []
+
+
+def test_tray_notify_attention_sets_tooltip_until_shown(qtbot, tmp_path):
+    cache = Cache(tmp_path / "c.db")
+    settings = Settings(tmp_path / "s.json")
+    popup = AgendaPopup(cache, settings)
+    qtbot.addWidget(popup)
+
+    class W:
+        def sync_now(self):
+            pass
+    tray = TrayController(popup, W(), cache, settings)
+    tray.showMessage = lambda *a, **k: None
+    tray.notify_attention("Claude is waiting for your OK")
+    assert "waiting for your OK" in tray.toolTip()
+    tray.toggle_popup()
+    assert "waiting for your OK" not in tray.toolTip()
+
+
+def test_escape_collapses_chat(qtbot, tmp_path):
     popup, _ = popup_with_chat(qtbot, tmp_path)
     popup.show_near_tray(QRect(700, 570, 20, 20))
+    qtbot.waitExposed(popup)
     popup._ask.click()
-    for _ in range(40):
-        popup.chat()._add_plain("claude", "Claude", "line " * 40)
-    assert popup.height() <= 480
+    qtbot.keyClick(popup.chat()._input, Qt.Key.Key_Escape)
+    assert not popup.chat_expanded() and popup.isVisible()
+    qtbot.keyClick(popup, Qt.Key.Key_Escape)
+    assert not popup.isVisible()
+
+
+def test_popup_height_cap_and_input_visible_with_30_events(qtbot, tmp_path):
+    cache = Cache(tmp_path / "c.db")
+    cache.upsert_calendars("a", [CalendarInfo("primary", "Primary", "#4285f4", True)])
+    today = datetime.now().astimezone().replace(hour=8, minute=0, second=0, microsecond=0)
+    for i in range(30):
+        st = today + timedelta(minutes=10 * i)
+        cache.upsert_events("a", [Event(id=str(i), account="a", calendar_id="primary",
+                                        calendar_name="Primary", color="#4285f4",
+                                        title=f"Event {i}", start=st,
+                                        end=st + timedelta(minutes=5))])
+    popup = AgendaPopup(cache, Settings(tmp_path / "s.json"))
+    qtbot.addWidget(popup)
+    popup.attach_chat(lambda: FakeAssistant())
+    popup.refresh(today)
+    assert len(popup.rows()) == 30
+    popup.show_near_tray(QRect(700, 570, 20, 20))
+    qtbot.waitExposed(popup)
+    popup._ask.click()
+    QApplication.processEvents()
+    assert popup.height() <= min(480, popup._area().height())
+    inp = popup.chat()._input
+    bottom = inp.mapTo(popup, inp.rect().bottomLeft()).y()
+    assert 0 <= bottom < popup.height()
+    assert bottom < popup._footer.geometry().top()

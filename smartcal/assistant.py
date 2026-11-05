@@ -1004,7 +1004,7 @@ def _describe(exc: Exception, shown=lambda account, calendar_id: True) -> str:
     if isinstance(exc, SeriesRefusedError):
         return "that is a whole recurring series; only single occurrences can be changed"
     if isinstance(exc, ReauthRequired):
-        return "that Google account must be signed in again in SmartCal settings"
+        return "that Google account must be signed in again: the owner can right-click the tray icon > Add Google account…"
     if isinstance(exc, ValueError):
         return f"invalid request: {_line(exc, 200)}"
     if isinstance(exc, OSError):

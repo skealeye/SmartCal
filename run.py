@@ -130,6 +130,7 @@ def main() -> int:
     tray = TrayController(popup, worker, cache, settings, on_accounts_changed=drop_clients,
                           on_open_settings=open_settings, reminders=reminders)
     toast.tray = tray
+    popup.chat_attention.connect(guarded(tray.notify_attention))
     tray.show()
 
     @guarded
