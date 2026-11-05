@@ -283,7 +283,7 @@ class AgendaPopup(QWidget):
             join.setObjectName("join")
             join.setToolTip(meeting_label(url))
             join.setCursor(Qt.CursorShape.PointingHandCursor)
-            join.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            join.setFocusPolicy(Qt.FocusPolicy.TabFocus)
             join.setStyleSheet(
                 f"QPushButton{{background:{theme.LINK};color:#0b0d10;font-size:11px;"
                 "font-weight:bold;padding:2px 8px;border:none;border-radius:3px;}"

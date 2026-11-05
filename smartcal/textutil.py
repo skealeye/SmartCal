@@ -11,6 +11,12 @@ _INPUT_CAP = 150_000          # never parse more than this many characters
 _TAG_START = re.compile(r"<[A-Za-z/!?]")
 _NEWLINE_AFTER = {"br", "p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6", "tr"}
 _SKIP = {"script", "style"}
+_BLOCK_START = {"p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "tr", "ul", "ol", "li",
+                "table", "blockquote"}
+_CELLS = {"td", "th"}
+_BAD_CHARS = re.compile("[\x00-\x08\x0e-\x1f\x7f-\x9f​-‏  "
+                        "‪-‮⁠-⁩﻿]")
+_UNSAFE_URL = re.compile(r"[\\\s\x00-\x1f\x7f-\x9f]")
 
 
 class _Converter(HTMLParser):
@@ -40,10 +46,15 @@ class _Converter(HTMLParser):
             return
         elif tag == "br":
             self._emit("\n")
-        elif tag == "li":
+        elif tag in _BLOCK_START:
             if self._link is None and not self._at_line_start():
                 self.out.append("\n")
-            self._emit("• ")
+            if tag == "li":
+                self._emit("• ")
+        elif tag in _CELLS:
+            if (self._link is None and not self._at_line_start()
+                    and not (self.out and self.out[-1].endswith("\t"))):
+                self.out.append("\t")
         elif tag == "a" and self._link is None:
             self._href = dict(attrs).get("href") or ""
             self._link = []
@@ -97,7 +108,9 @@ def html_to_text(s: str, limit: int = DESCRIPTION_LIMIT) -> str:
             text = html.unescape(re.sub(r"<[^>]*>", "", s))
     else:
         text = html.unescape(s)
+    text = text.replace("\x0b", "\n").replace("\x0c", "\n")
     text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\xa0", " ")
+    text = _BAD_CHARS.sub("", text)
     text = re.sub(r"[ \t]+\n", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip("\n")
     if len(text) > limit:
@@ -105,12 +118,26 @@ def html_to_text(s: str, limit: int = DESCRIPTION_LIMIT) -> str:
     return text
 
 
+def safe_http_url(url) -> str | None:
+    """The URL if it is a plain http(s) URL with no backslash, whitespace, control chars or
+    userinfo (`@` in the host part); else None."""
+    if not isinstance(url, str) or not url or _UNSAFE_URL.search(url):
+        return None
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return None
+    if parts.scheme.lower() not in ("http", "https") or not host or "@" in parts.netloc:
+        return None
+    return url
+
+
 def meeting_label(url: str | None) -> str:
     """Button label for a meeting link, decided by the parsed hostname only."""
-    try:
-        host = (urlsplit(url or "").hostname or "").lower().rstrip(".")
-    except ValueError:
+    if safe_http_url(url) is None:
         return "Join meeting"
+    host = (urlsplit(url).hostname or "").lower().rstrip(".")
     if host == "zoom.us" or host.endswith(".zoom.us"):
         return "Join Zoom meeting"
     if host == "meet.google.com":

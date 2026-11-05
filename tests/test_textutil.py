@@ -78,3 +78,38 @@ def test_meeting_label_by_host():
                 "https://meet.google.com.evil.com/a", "https://evil.com/?u=zoom.us",
                 "https://evil.com/zoom.us", "", None, "not a url"):
         assert meeting_label(bad) == "Join meeting"
+
+
+def test_control_and_bidi_chars_stripped_both_paths():
+    assert html_to_text("a\x00b‮txt") == "abtxt"
+    assert html_to_text("<b>a\x00b‮txt</b>") == "abtxt"
+    bad = "x‮⁦​‏﻿ y\x85z"
+    for src in (bad, f"<i>{bad}</i>"):
+        out = html_to_text(src)
+        assert out == "xyz"
+    assert html_to_text("a\r\nb\rc") == "a\nb\nc"
+    assert html_to_text("<p>a\r\nb</p>") == "a\nb"
+    assert html_to_text("a\x0bb\x0cc\td") == "a\nb\nc\td"
+
+
+def test_block_tags_break_before_and_cells_separate():
+    assert html_to_text("x<div>y</div>") == "x\ny"
+    assert html_to_text("text<p>para") == "text\npara"
+    assert html_to_text("t<h2>H</h2>b") == "t\nH\nb"
+    assert html_to_text("<table><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></table>") \
+        == "a\tb\nc"
+    assert html_to_text(OWNER).count("\n") == 1
+
+
+def test_unterminated_comment_and_cdata():
+    assert html_to_text("hi <!-- x").strip() in ("hi", "")
+    assert isinstance(html_to_text("hi <![CDATA[ x"), str)
+    assert isinstance(html_to_text("<!-- x" * 5000), str)
+
+
+def test_meeting_label_rejects_spoofed_urls():
+    assert meeting_label("HTTPS://US02WEB.ZOOM.US/j/1?pwd=abc") == "Join Zoom meeting"
+    for bad in ("https://evil.com\@zoom.us/j/1", "https://zoom.us@evil.com/",
+                "https://zoom.us\evil.com/", "https://zoom.us/j/1 2", "https://zoom.us/j/1\n",
+                "ftp://zoom.us/j/1", "javascript://zoom.us/%0aalert(1)"):
+        assert meeting_label(bad) == "Join meeting", bad

@@ -330,3 +330,23 @@ def test_meeting_url_prefers_conference_data_over_description():
                 _ev(id="b", hangoutLink="https://meet.google.com/zzz",
                     description="https://x.zoom.us/j/1"))
     assert got == {"a": "https://meet.google.com/aaa", "b": "https://meet.google.com/zzz"}
+
+
+def test_meeting_url_rejects_spoofed_and_unsafe_urls():
+    bad = ["https://evil.com\@zoom.us/j/1", "https://zoom.us@evil.com/",
+           "https://zoom.us\evil.com/", "https://zoom.us/j/1 2", "https://zoom.us/j/1\n",
+           "ftp://zoom.us/j/1"]
+    for i, u in enumerate(bad):
+        cd = {"entryPoints": [{"entryPointType": "video", "uri": u}]}
+        assert _urls(_ev(id="a", conferenceData=cd, hangoutLink=u)) == {"a": None}, u
+    # description-derived: backslash/userinfo hits are dropped
+    assert _urls(_ev(id="b", description="https://zoom.us@evil.com/ and https://x.zoom.us\@e.com/")) \
+        == {"b": None}
+
+
+def test_meeting_url_uppercase_and_trailing_punctuation():
+    assert _urls(_ev(id="a", description="Go HTTPS://US02WEB.ZOOM.US/j/1?pwd=abc!")) \
+        == {"a": "HTTPS://US02WEB.ZOOM.US/j/1?pwd=abc"}
+    assert _urls(_ev(id="b", description="see https://teams.microsoft.com/l/x?y=1:")) \
+        == {"b": "https://teams.microsoft.com/l/x?y=1"}
+    assert _urls(_ev(id="c", description="http://Zoom.US/j/9?")) == {"c": "http://Zoom.US/j/9"}

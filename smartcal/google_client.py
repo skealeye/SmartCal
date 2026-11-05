@@ -9,10 +9,10 @@ from datetime import date, datetime, time
 
 from smartcal.google_auth import ReauthRequired
 from smartcal.models import CalendarInfo, Event
-from smartcal.textutil import html_to_text, meeting_label  # noqa: F401  (re-exported)
+from smartcal.textutil import html_to_text, meeting_label, safe_http_url  # noqa: F401
 
-_ZOOM_RE = re.compile(r"https?://(?:[\w-]+\.)?zoom\.us/[^\s<>\"')]+")
-_TEAMS_RE = re.compile(r"https?://teams\.(?:microsoft|live)\.com/[^\s<>\"')]+")
+_ZOOM_RE = re.compile(r"https?://(?:[\w-]+\.)?zoom\.us/[^\s<>\"')]+", re.I)
+_TEAMS_RE = re.compile(r"https?://teams\.(?:microsoft|live)\.com/[^\s<>\"')]+", re.I)
 
 
 _HREF_RE = re.compile(r"""href\s*=\s*["']([^"']+)["']""", re.I)
@@ -24,10 +24,9 @@ def _meeting_url(raw: dict) -> str | None:
     entry_points = cd.get("entryPoints") if isinstance(cd, dict) else None
     for ep in entry_points if isinstance(entry_points, list) else []:
         uri = ep.get("uri") if isinstance(ep, dict) else None
-        if (isinstance(ep, dict) and ep.get("entryPointType") == "video"
-                and isinstance(uri, str) and uri.lower().startswith(("http://", "https://"))):
+        if isinstance(ep, dict) and ep.get("entryPointType") == "video" and safe_http_url(uri):
             return uri
-    if raw.get("hangoutLink"):
+    if safe_http_url(raw.get("hangoutLink")):
         return raw["hangoutLink"]
     location = raw.get("location") or ""
     desc = raw.get("description") or ""
@@ -38,7 +37,9 @@ def _meeting_url(raw: dict) -> str | None:
         for text in sources:
             m = rx.search(text)
             if m:
-                return m.group(0).rstrip(".,;")
+                url = m.group(0).rstrip(".,;:!?")
+                if safe_http_url(url):
+                    return url
     return None
 
 
