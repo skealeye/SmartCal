@@ -3,3 +3,4 @@ google-auth-oauthlib
 google-auth-httplib2
 PyQt6
 winotify==1.1.0
+anthropic==2.5.0
