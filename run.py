@@ -21,6 +21,7 @@ from smartcal.settings import Settings
 from smartcal.single_instance import SingleInstance
 from smartcal.undo import UndoStore
 from smartcal.toast import ToastSender, register_app_id
+from smartcal.ui import motion
 from smartcal.ui.placement import show_near_tray
 from smartcal.ui.popup import AgendaPopup
 from smartcal.ui.settings_dialog import SettingsDialog
@@ -46,6 +47,8 @@ def main() -> int:
     cache = Cache(data_dir() / "cache.db")
     cache.purge_orphans(list_accounts())
     settings = Settings()
+    motion.set_user_preference(settings.animations)   # before any window exists
+    logging.getLogger(__name__).info(motion.describe_mode())
     settings.prune_hidden_accounts(list_accounts())   # no token left: not hidden either
     autostart.apply_at_startup(settings)  # on by default, first run only
     try:

@@ -427,8 +427,10 @@ def test_animations_disabled_by_env_and_system_setting_are_instant(qtbot, tmp_pa
     assert not motion.animations_enabled() and motion.duration(160) == 0
     monkeypatch.delenv(motion.ENV_OFF)
     monkeypatch.setattr(motion, "system_animations_enabled", lambda: False)
+    assert motion.animations_enabled()                  # v0.8.3: "on" overrides Windows
+    motion.set_user_preference("auto")                  # "Follow Windows setting"
     assert not motion.animations_enabled()
-    # Off (here: the system setting): everything is instant, same final state.
+    # Off (here: the system setting, followed): everything is instant, same final state.
     p = popup_on(qtbot, tmp_path, MANY, tray=BOTTOM_RIGHT)
     assert not p.showing_animated() and p.windowOpacity() == 1.0
     assert p.geometry() == p.docked_geometry()

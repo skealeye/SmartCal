@@ -30,6 +30,7 @@ MAX_MEETING_TITLE = 100
 _COLOR = re.compile(r"#[0-9a-fA-F]{6}")
 HIDE_SCOPES = ("event", "series")
 TILE_STYLES = ("stripe", "fill")
+ANIMATION_MODES = ("on", "auto", "off")     # see smartcal.ui.motion
 
 
 def occurrence_key(event) -> str:
@@ -98,6 +99,9 @@ class Settings:
         # How a meeting's color shows in the popup list: "stripe" (a bar on the left) or
         # "fill" (the whole row in that color).
         self.tile_style: str = "stripe"
+        # "on" (default: animate even when Windows Animation effects are off), "auto"
+        # (follow Windows), "off".
+        self.animations: str = "on"
         self.first_run_done: bool = False
         self.claude_model: str = DEFAULT_CLAUDE_MODEL
         # SmartCal-local only (never sent to Google). Keys: occurrence_key / series_key.
@@ -127,6 +131,8 @@ class Settings:
                              if isinstance(leads, dict) else {})
         self.muted = self._str_set(data.get("muted"))
         self.hidden_accounts = self._str_set(data.get("hidden_accounts"))
+        anim = data.get("animations")
+        self.animations = anim if isinstance(anim, str) and anim in ANIMATION_MODES else "on"
         style = data.get("tile_style")
         self.tile_style = style if isinstance(style, str) and style in TILE_STYLES \
             else "stripe"
@@ -194,6 +200,7 @@ class Settings:
                 "hidden_accounts": sorted(self.hidden_accounts),
                 "autostart": self.autostart,
                 "tile_style": self.tile_style,
+                "animations": self.animations,
                 "first_run_done": self.first_run_done,
                 "claude_model": self.claude_model,
                 "hidden_events": self.hidden_events,
@@ -287,6 +294,19 @@ class Settings:
             self.save()
         except OSError:
             self.tile_style = before
+            raise
+
+    def set_animations(self, mode: str) -> None:
+        """"on", "auto" or "off"; saved at once (rolled back and re-raised on OSError)."""
+        if mode not in ANIMATION_MODES:
+            raise ValueError(f"unknown animation mode {mode!r}")
+        if mode == self.animations:
+            return
+        before, self.animations = self.animations, mode
+        try:
+            self.save()
+        except OSError:
+            self.animations = before
             raise
 
     def set_autostart(self, enabled: bool) -> None:

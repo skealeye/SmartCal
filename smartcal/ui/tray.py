@@ -8,12 +8,12 @@ import time
 from datetime import date, datetime
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
+from PyQt6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from .. import agenda, google_auth
 from ..textutil import plain_line
-from . import meeting_menus, placement
+from . import meeting_menus, motion, placement
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +26,8 @@ RESTORE_TEXT = "Restore hidden"
 NOTHING_HIDDEN_TEXT = "Nothing hidden"
 RESTORE_ALL_TEXT = "Restore all hidden"
 RESTORE_TITLE_MAX = 40
+ANIMATIONS_TEXT = "Animations"
+ANIMATION_CHOICES = (("on", "On"), ("auto", "Follow Windows"), ("off", "Off"))
 
 
 def menu_text(text: str) -> str:
@@ -144,11 +146,23 @@ class TrayController(QSystemTrayIcon):
         self.accounts_menu = QMenu(ACCOUNTS_TEXT, menu)
         self.restore_menu = QMenu(RESTORE_TEXT, menu)
         self.restore_menu.aboutToShow.connect(self._build_restore_menu)
+        # Animations ▸ On / Follow Windows / Off (radio marks, one click).
+        self.animations_menu = QMenu(ANIMATIONS_TEXT, menu)
+        self._animations_group = QActionGroup(self.animations_menu)
+        self._animations_group.setExclusive(True)
+        for mode, name in ANIMATION_CHOICES:
+            act = QAction(name, self.animations_menu)
+            act.setCheckable(True)
+            act.setData(mode)
+            act.triggered.connect(lambda _c=False, m=mode: self.set_animations(m))
+            self._animations_group.addAction(act)
+            self.animations_menu.addAction(act)
         menu.addAction(self._add_action)
         menu.addAction(self._sync_action)
         menu.addSeparator()
         menu.addMenu(self.accounts_menu)
         menu.addMenu(self.restore_menu)
+        menu.addMenu(self.animations_menu)
         menu.addSeparator()
         menu.addAction(self._reminders_action)
         menu.addAction(self._settings_action)
@@ -219,6 +233,29 @@ class TrayController(QSystemTrayIcon):
         """Rebuild the Accounts and Restore hidden submenus from the current state."""
         self._build_accounts_menu()
         self._build_restore_menu()
+        self._update_animations_menu()
+
+    def _update_animations_menu(self) -> None:
+        mode = getattr(self.settings, "animations", "on")
+        for act in self.animations_menu.actions():
+            act.setChecked(act.data() == mode)
+
+    def set_animations(self, mode: str) -> None:
+        """Animations ▸ in the tray menu: saved and in effect at once."""
+        try:
+            self.settings.set_animations(mode)
+        except OSError:
+            self._save_failed()
+            self._update_animations_menu()
+            return
+        motion.set_user_preference(mode)
+        log.info(motion.describe_mode())
+        self._update_animations_menu()
+        if self._on_visibility_changed:
+            try:
+                self._on_visibility_changed()   # e.g. an open Settings dialog follows
+            except Exception:  # noqa: BLE001
+                log.exception("refresh after the animations setting failed")
 
     def _visibility_changed(self) -> None:
         """Something the tray menu changed is shown/hidden now: every view follows."""

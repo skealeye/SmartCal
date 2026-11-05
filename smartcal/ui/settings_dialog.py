@@ -16,7 +16,10 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QF
 
 from .. import agenda
 from ..textutil import plain_tip
+from . import motion
 from .meeting_menus import STYLE_NAMES
+
+ANIMATION_NAMES = (("on", "On"), ("auto", "Follow Windows setting"), ("off", "Off"))
 from . import theme
 
 log = logging.getLogger(__name__)
@@ -175,6 +178,16 @@ class SettingsDialog(QDialog):
         self.tile_style_box.setCurrentIndex(
             max(0, self.tile_style_box.findData(self._tile_style_orig)))
         form.addRow("Meeting color", self.tile_style_box)
+        # On (default) animates even when Windows "Animation effects" are off.
+        self.animations_box = QComboBox()
+        for key, name in ANIMATION_NAMES:
+            self.animations_box.addItem(name, key)
+        self._animations_orig = getattr(self.settings, "animations", "on")
+        self.animations_box.setCurrentIndex(
+            max(0, self.animations_box.findData(self._animations_orig)))
+        self.animations_box.setToolTip("On: always animate. Follow Windows setting: only "
+                                       "when Windows Animation effects are on.")
+        form.addRow("Animations", self.animations_box)
         return w
 
     # -- meetings tab (hidden meetings, meeting colors; local to SmartCal) ---
@@ -385,6 +398,11 @@ class SettingsDialog(QDialog):
         if untouched and style != self._tile_style_orig:
             self._tile_style_orig = style
             self.tile_style_box.setCurrentIndex(max(0, self.tile_style_box.findData(style)))
+        mode = getattr(self.settings, "animations", "on")
+        untouched = self.animations_box.currentData() == self._animations_orig
+        if untouched and mode != self._animations_orig:
+            self._animations_orig = mode
+            self.animations_box.setCurrentIndex(max(0, self.animations_box.findData(mode)))
 
     def sync_account_boxes(self) -> None:
         """Boxes the owner did not touch follow changes made elsewhere (the tray)."""
@@ -427,7 +445,7 @@ class SettingsDialog(QDialog):
     # -- apply -------------------------------------------------------------
     _FIELDS = ("hidden_calendars", "shown_calendars", "lead_minutes", "default_lead_minutes",
                "muted", "autostart", "claude_model", "hidden_events", "event_colors",
-               "event_color_titles", "hidden_accounts", "tile_style")
+               "event_color_titles", "hidden_accounts", "tile_style", "animations")
 
     def accept(self) -> None:
         s = self.settings
@@ -440,6 +458,9 @@ class SettingsDialog(QDialog):
             if spin.value() != orig:
                 s.lead_minutes[cid] = spin.value()
         s.autostart = self.autostart_box.isChecked()
+        mode = self.animations_box.currentData()
+        if mode != self._animations_orig:    # only if changed here (the tray menu may
+            s.animations = mode              # have changed it meanwhile)
         style = self.tile_style_box.currentData()
         if style != self._tile_style_orig:   # only if changed here (the right-click
             s.tile_style = style             # menu may have changed it meanwhile)
@@ -461,5 +482,6 @@ class SettingsDialog(QDialog):
             log.exception("could not save settings")
             self._warn("Settings", f"Could not save settings: {exc}")
             return
+        motion.set_user_preference(s.animations)   # takes effect at once
         self.applied.emit()
         super().accept()

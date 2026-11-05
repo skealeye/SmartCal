@@ -25,7 +25,8 @@ SmartCal is a Windows tray calendar app. It merges your personal and work Google
 
 - **Meeting color: Side stripe or Whole tile.** Right-click any meeting > **Color style ▸** (one click), or **Settings > General > Meeting color**. **Side stripe** (the default) is a colored bar on the left of each popup row. **Whole tile** fills the row with the meeting's exact color, with black or white text, whichever contrasts more (at least 4.5:1, so any of the 10 colors or a calendar color stays readable). The compact Join button turns into the text color with the fill color as its label. The selected meeting gets a ring and the next-up meeting a thin outline. The Day/Week/Month window's blocks are always filled.
 - **Animations:** the popup slides in from the taskbar side and fades in; the details pop-out slides out from behind the popup and back. Smaller touches: the popup grows and shrinks smoothly (keeping its edge next to the tray in place) when meetings appear or disappear, the notice line appears or the chat opens; rows fade their background on hover, selection and press; a hidden row shrinks away and a restored one fades in; the notice slides in and out; the pop-out cross-fades its content and resizes when you pick another meeting; buttons fade on hover. Nothing animates when a refresh changed nothing.
-- **Turning animations off:** switch off Windows **Animation effects** (Settings > Accessibility > Visual effects), or set the environment variable `SMARTCAL_NO_ANIMATIONS=1`; everything then appears instantly, in the same final state. To keep only the popup slide-in and the pop-out slide and turn off the smaller touches, set `SMARTCAL_ANIMATIONS=basic`. If the sliding pop-out flickers on your display, set `SMARTCAL_SLIDE_MODE=fade`: the pop-out then stays beside the popup and only fades in and out.
+- **Animations setting:** **Settings > General > Animations** (**On** / **Follow Windows setting** / **Off**), or right-click the tray icon > **Animations ▸** for a one-click switch. Both take effect at once. The default is **On**: SmartCal animates even when Windows **Animation effects** (Settings > Accessibility > Visual effects) are off, so turning those off for Windows does not turn SmartCal's animations off. **Follow Windows setting** animates only when Windows Animation effects are on; **Off** never animates. The environment variable `SMARTCAL_NO_ANIMATIONS=1` still forces animations off whatever the setting. The log (`smartcal.log`) says at startup which mode is in effect and why.
+- **Turning animations off:** choose **Off** above, or set `SMARTCAL_NO_ANIMATIONS=1`; everything then appears instantly, in the same final state. To keep only the popup slide-in and the pop-out slide and turn off the smaller touches, set `SMARTCAL_ANIMATIONS=basic`. If the sliding pop-out flickers on your display, set `SMARTCAL_SLIDE_MODE=fade`: the pop-out then stays beside the popup and only fades in and out.
 
 ## One-time setup
 
@@ -96,6 +97,8 @@ Autostart from source runs `pythonw.exe run.py`. If the repo is on the Z: networ
 ## Settings
 
 Open from the tray icon menu: accounts (add/remove), reminder lead time, start with Windows, and the other options shown in the dialog.
+
+**General** tab: start with Windows, the Claude model, **Meeting color** (Side stripe / Whole tile) and **Animations** (On / Follow Windows setting / Off; see **Appearance**). Stored in `settings.json` as `tile_style` and `animations`.
 
 **Meetings** tab: lists hidden meetings (title, "this meeting" or "whole series", date) with an **Unhide** button each, and colored meetings with a **Reset** button each. Changes apply when you click **OK**.
 

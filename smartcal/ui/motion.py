@@ -1,9 +1,11 @@
 """Short UI animations (the tray popup sliding in, the details panel sliding out and
 back) and whether to play them.
 
-Animations are off when Windows "Animation effects" are off (Settings > Accessibility >
-Visual effects) or when SMARTCAL_NO_ANIMATIONS=1 is set; everything then appears and
-docks instantly, through the same code path with a duration of 0."""
+Whether they play is the owner's setting (Settings > General > Animations, or the tray
+menu): "on" (the default; plays even when Windows "Animation effects" are off), "auto"
+(follows that Windows setting) or "off". SMARTCAL_NO_ANIMATIONS=1 forces them off. Off:
+everything appears and docks instantly, through the same code path with a duration of
+0."""
 from __future__ import annotations
 
 import os
@@ -37,12 +39,56 @@ def system_animations_enabled() -> bool:
         return True
 
 
+# The owner's choice (Settings > General > Animations, or the tray menu): "on" plays
+# animations even when Windows "Animation effects" are off; "auto" follows that Windows
+# setting; "off" never animates. SMARTCAL_NO_ANIMATIONS=1 forces off whatever is chosen.
+ANIMATION_MODES = ("on", "auto", "off")
+DEFAULT_MODE = "on"
+_user_preference = DEFAULT_MODE
+
+
+def set_user_preference(value) -> None:
+    """Set at startup (run.py) and whenever the setting changes; anything invalid is
+    the default ("on")."""
+    global _user_preference
+    _user_preference = value if value in ANIMATION_MODES else DEFAULT_MODE
+
+
+def user_preference() -> str:
+    return _user_preference
+
+
+def env_forces_off() -> bool:
+    return os.environ.get(ENV_OFF, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def animations_enabled() -> bool:
-    """Play animations? Injectable: the popup and the details panel both ask this
+    """Play animations? The env var forces off; else the owner's setting ("auto": the
+    Windows setting). Injectable: the popup and the details panel both ask this
     (module attribute, so tests can replace it)."""
-    if os.environ.get(ENV_OFF, "").strip().lower() in ("1", "true", "yes", "on"):
+    if env_forces_off():
         return False
+    if _user_preference == "off":
+        return False
+    if _user_preference == "on":
+        return True
     return system_animations_enabled()
+
+
+def describe_mode() -> str:
+    """One line for the log: the effective mode and why (no titles, no personal data)."""
+    system = "on" if system_animations_enabled() else "off"
+    if env_forces_off():
+        text = f"animations: off ({ENV_OFF}=1 is set)"
+    elif _user_preference == "on":
+        text = f"animations: on (user setting; Windows animation effects are {system})"
+    elif _user_preference == "off":
+        text = f"animations: off (user setting; Windows animation effects are {system})"
+    else:
+        text = f"animations: {system} (user setting: follow Windows animation effects)"
+    if os.environ.get(ENV_LEVEL, "").strip().lower() == "basic" and animations_enabled():
+        text += f"; micro-animations off ({ENV_LEVEL}=basic)"
+    return text
 
 
 def duration(ms: int) -> int:
