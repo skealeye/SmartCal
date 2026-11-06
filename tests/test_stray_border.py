@@ -130,7 +130,7 @@ def test_never_raises(monkeypatch, qtbot):
 
 
 # -- the real Windows display (opt in: it opens real windows) ---------------------------
-# grab_dx.py x y w h seconds out.npz allowed: every frame DWM composes (DXGI desktop
+# grab_dx.py x y w h seconds out.npz allowed [output]: every frame DWM composes (DXGI desktop
 # duplication, dxcam) of one rect of the primary screen: per frame, the theme.ACCENT
 # pixels that were not so in the first frame, outside `allowed`: their count, the most in
 # one row and one column (as test_window_flash.GRAB). The stray edge lasted one composed
@@ -149,7 +149,8 @@ GRAB_DX = textwrap.dedent(r"""
     keep = np.ones((h, w), bool)
     for ax, ay, aw, ah in json.loads(sys.argv[7]):
         keep[max(0, ay - y):max(0, ay + ah - y), max(0, ax - x):max(0, ax + aw - x)] = False
-    cam = dxcam.create(output_color="BGR")
+    idx = int(sys.argv[8]) if len(sys.argv) > 8 else None    # (None: the primary)
+    cam = dxcam.create(output_idx=idx, output_color="BGR")
     base = None
     times, stats = [], []
     print("ready", flush=True)

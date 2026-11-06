@@ -22,7 +22,7 @@ from smartcal.settings import Settings
 from smartcal.single_instance import SingleInstance
 from smartcal.undo import UndoStore
 from smartcal.toast import ToastSender, register_app_id
-from smartcal.ui import motion
+from smartcal.ui import motion, wintrace
 from smartcal.ui.placement import show_near_tray
 from smartcal.ui.popup import AgendaPopup
 from smartcal.ui.settings_dialog import SettingsDialog
@@ -44,6 +44,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("SmartCal")
+    wintrace.install(app)   # SMARTCAL_DEBUG_UI=1 only: every window of ours, in the log
 
     instance = SingleInstance(data_dir())
     if not instance.acquire():
