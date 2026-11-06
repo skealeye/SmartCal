@@ -1134,6 +1134,13 @@ class EventDetails(QDialog):
         self.event = event
         self.settings = settings
         self._build: cards.CardBuild | None = None
+        self._framed = False
+        self._reveal_pending = False
+        self._reveal_anim = None
+        self._reveal_timer = QTimer(self)
+        self._reveal_timer.setSingleShot(True)
+        self._reveal_timer.setInterval(motion.SHOW_START_FALLBACK_MS)
+        self._reveal_timer.timeout.connect(self._reveal)
         self.setWindowTitle(event.title or "Event")
         self.setMinimumWidth(340)
         self.setStyleSheet(f"QDialog{{background:{theme.BG};}}"
@@ -1154,7 +1161,11 @@ class EventDetails(QDialog):
         self.time_label.setTextFormat(Qt.TextFormat.PlainText)
         self.time_label.setWordWrap(True)
         self.time_label.setStyleSheet(f"color:{theme.MUTED};")
-        self.calendar_label = QLabel()
+        # v0.11.1: a child from the start. Made parentless (v0.11.0), update_color's
+        # setVisible(True) showed it as a window of its own for one frame, before the
+        # layout adopted it: a small titled window with a white body and Windows'
+        # border flashed at the primary screen's center on every details open.
+        self.calendar_label = QLabel(self)
         self.calendar_label.setTextFormat(Qt.TextFormat.RichText)
         self.update_color()
         lay.addWidget(self.title_label)
@@ -1223,6 +1234,52 @@ class EventDetails(QDialog):
             b.finish()
             b.deleteLater()
 
+    def prepare_show(self) -> None:
+        """v0.11.1: before the first show(), after placing it. On the real display its
+        native window is made now, hidden, and gets the rounded accent edge, so its
+        first frame on screen is already the final one; with animations it starts fully
+        transparent and fades in as a unit once its first frame is painted (as the big
+        window does), its lines building in meanwhile."""
+        self._stop_reveal()
+        if not winframe.native_windows():
+            return
+        try:
+            self.winId()                        # the native window, still hidden
+            self._framed = winframe.apply_dwm_frame(self)
+        except Exception:  # noqa: BLE001 - a frame must never break the dialog
+            self._framed = False
+        if motion.animations_enabled():
+            self._reveal_pending = True
+            self.setWindowOpacity(0.0)
+            self._reveal_timer.start()          # (no paint seen: shown anyway)
+
+    def revealing(self) -> bool:
+        return self._reveal_pending or motion.alive(self._reveal_anim)
+
+    def _reveal(self) -> None:
+        if not self._reveal_pending or _gone(self):
+            return
+        self._reveal_pending = False
+        self._reveal_timer.stop()
+        motion.stop(self._reveal_anim)
+        self._reveal_anim = motion.tween(
+            self, 0.0, 1.0, motion.duration(motion.WIN_REVEAL_MS),
+            lambda v: None if _gone(self) else self.setWindowOpacity(float(v)),
+            kind=motion.FADE)
+
+    def _stop_reveal(self) -> None:
+        self._reveal_pending = False
+        self._reveal_timer.stop()
+        motion.stop(self._reveal_anim)
+        self._reveal_anim = None
+        if self.windowOpacity() != 1.0:
+            self.setWindowOpacity(1.0)
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if self._reveal_pending:
+            QTimer.singleShot(0, self._reveal)  # right after this frame is on screen
+
     def nativeEvent(self, event_type, message):
         # v0.11.0: Windows' erase is answered with the dark background (no white frame
         # when the window is shown or uncovered). Never the base class's nativeEvent:
@@ -1231,12 +1288,14 @@ class EventDetails(QDialog):
 
     def showEvent(self, e):
         super().showEvent(e)
-        winframe.apply_dwm_frame(self)
+        if not self._framed:
+            self._framed = winframe.apply_dwm_frame(self)
         if self._build is not None:
             QTimer.singleShot(0, lambda: None if self._build is None else self._build.start())
 
     def hideEvent(self, e):
         self.finish_build()
+        self._stop_reveal()
         super().hideEvent(e)
 
     def update_color(self) -> None:
@@ -1751,6 +1810,7 @@ class CalendarWindow(QMainWindow):
         self.details = EventDetails(event, self.now(), self, settings=self.settings)
         placement.center_over(self.details, self)   # opened from the window: over it
         self.details.prepare_build()
+        self.details.prepare_show()     # placed, framed, transparent: then shown
         self.details.show()
         self.details.raise_()
 
