@@ -297,7 +297,8 @@ def test_dialog_refresh_drops_fired_row(qtbot, tmp_path):
     dlg = RemindersDialog(r)
     qtbot.addWidget(dlg)
     assert len(dlg.rows()) == 2
-    assert dlg.rows()[0].label.text().startswith("2026-11-04 8:")
+    assert dlg.rows()[0].label.text() == "one"          # v0.12.0: the time on its own
+    assert "8:59 AM" in dlg.rows()[0].time_label.text()
     r.claim_due(T0)
     dlg.refresh()
     assert len(dlg.rows()) == 1 and "two" in dlg.rows()[0].label.text()

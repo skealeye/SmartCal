@@ -70,9 +70,22 @@ def area_for(tray: QRect | None) -> QRect:
 def _frame_extra(widget) -> QSize:
     if widget.windowFlags() & Qt.WindowType.FramelessWindowHint:
         return QSize(0, 0)
-    if widget.isVisible():
-        return widget.frameGeometry().size() - widget.size()
+    if widget.isVisible() or _native_created(widget):
+        extra = widget.frameGeometry().size() - widget.size()
+        if extra.width() >= 0 and extra.height() > 0:
+            return extra
     return QSize(DEFAULT_FRAME)
+
+
+def _native_created(widget) -> bool:
+    """v0.12.0: its native window exists, still hidden (winId() before the first show):
+    Windows already knows its real frame, so it is placed right the first time."""
+    try:
+        from . import winframe
+        return winframe.native_windows() and \
+            widget.testAttribute(Qt.WidgetAttribute.WA_WState_Created)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _fit(widget, area: QRect, extra: QSize, want: QSize | None = None) -> QSize:

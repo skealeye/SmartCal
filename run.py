@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+from datetime import datetime
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QApplication
@@ -16,14 +17,13 @@ from smartcal.google_client import GoogleClient
 from smartcal.live_sync import LiveSyncWorker
 from smartcal.logsetup import (enable_crash_log, guarded, install_excepthooks,
                                install_qt_message_handler, setup_logging)
-from smartcal.notifier import Notifier
+from smartcal.notifier import Notifier, next_wake_ms
 from smartcal.reminders import ReminderFirer, Reminders
 from smartcal.settings import Settings
 from smartcal.single_instance import SingleInstance
 from smartcal.undo import UndoStore
 from smartcal.toast import ToastSender, register_app_id
-from smartcal.ui import motion, wintrace
-from smartcal.ui.placement import show_near_tray
+from smartcal.ui import motion, theme, wintrace
 from smartcal.ui.popup import AgendaPopup
 from smartcal.ui.settings_dialog import SettingsDialog
 from smartcal.ui.tray import TrayController, dialog_visible, track_dialog
@@ -44,6 +44,9 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("SmartCal")
+    # v0.12.0: dark controls everywhere, even with Windows set to Light (no white
+    # dialogs, dropdowns or title bars).
+    theme.force_dark_scheme(app)
     wintrace.install(app)   # SMARTCAL_DEBUG_UI=1 only: every window of ours, in the log
 
     instance = SingleInstance(data_dir())
@@ -124,6 +127,7 @@ def main() -> int:
         notifier.mark_in_progress()   # unhidden in Settings: no late "Started" toast
         refresh_views()
         notifier.check()
+        arm_wake()                      # a new lead time counts from now
 
     @guarded
     def remove_account_and_refresh(account: str) -> None:
@@ -146,7 +150,7 @@ def main() -> int:
         dlg.applied.connect(on_settings_applied)
         tray.signin_changed.connect(dlg.refresh_signin)
         track_dialog(dialog_ref, dlg)
-        show_near_tray(dlg, tray.tray_geometry())   # opened from the tray menu
+        dlg.open_near_tray(tray.tray_geometry())   # v0.12.0: no white frame
 
     assistant_ref: list[Assistant] = []
 
@@ -160,6 +164,8 @@ def main() -> int:
     @guarded
     def on_chat_changed() -> None:
         refresh_views()
+        tray.refresh_reminders()    # a reminder Claude just set shows in an open list
+        arm_wake()
         worker.sync_now()
 
     popup.attach_chat(assistant_factory)
@@ -216,13 +222,28 @@ def main() -> int:
     timer.timeout.connect(tick)
     timer.start()
 
+    # Meeting toasts and reminders: checked every 30 s, and (v0.12.0) also right when
+    # the next one is due if that comes sooner, so a toast is on time to the second
+    # instead of up to 30 s late.
+    wake_timer = QTimer()
+    wake_timer.setSingleShot(True)
+
+    @guarded
+    def arm_wake() -> None:
+        now = datetime.now().astimezone()
+        ms = next_wake_ms(now, [reminders.next_fire_at(), notifier.next_fire_at(now)])
+        if ms is None:
+            wake_timer.stop()
+        else:
+            wake_timer.start(ms)
+
     notify_timer = QTimer()
     notify_timer.setInterval(30_000)
-    notify_timer.timeout.connect(guarded(notifier.check))
+    for check in (guarded(notifier.check), guarded(reminder_firer.check), arm_wake):
+        notify_timer.timeout.connect(check)
+        wake_timer.timeout.connect(check)
+        QTimer.singleShot(2000, check)
     notify_timer.start()
-    notify_timer.timeout.connect(guarded(reminder_firer.check))
-    QTimer.singleShot(2000, guarded(notifier.check))
-    QTimer.singleShot(2000, guarded(reminder_firer.check))
 
     # v0.9.1: quitting (any way, e.g. Windows ending the session) never plays the outro.
     app.aboutToQuit.connect(popup.shutdown)

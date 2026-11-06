@@ -2,26 +2,35 @@
 
 Calendar and general edits apply on OK (one atomic save). Adding/removing an
 account takes effect immediately, since it touches tokens and the cache.
+
+v0.12.0: a TrayDialog (opened from the tray menu with no white frame, see dialogs.py);
+every dropdown in the dark rounded style; a calendar's Mute and lead time are grayed out
+while it is not shown (no toasts then anyway), its lead time while it is muted; rows
+that use the default lead time follow the default as it is edited; 0 min reads "At
+start"; hidden meetings show friendly dates; Remove... needs a selected account.
 """
 from __future__ import annotations
 
 import copy
 import logging
 
+from datetime import date
+
 from PyQt6.QtCore import QEvent, Qt, pyqtSignal
-from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
-                             QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialogButtonBox, QFormLayout,
+                             QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
                              QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
                              QTabWidget, QVBoxLayout, QWidget)
 
 from .. import agenda
 from ..settings import DEFAULT_CLAUDE_MODEL, claude_model_choices
 from ..textutil import plain_tip
-from . import motion
+from . import motion, theme
+from .dialogs import TrayDialog, add_press_scale
 from .meeting_menus import STYLE_NAMES
 
 ANIMATION_NAMES = (("on", "On"), ("auto", "Follow Windows setting"), ("off", "Off"))
-from . import theme
+LEAD_AT_START = "At start"
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +66,29 @@ class ElidedLabel(QLabel):
 MODEL_ID_ROLE = Qt.ItemDataRole.UserRole
 
 
-class ModelCombo(QComboBox):
+class DarkCombo(QComboBox):
+    """v0.12.0: every dropdown of the dialog (Claude model, Meeting color, Animations):
+    the dark rounded box, and its popup list dark and rounded by Windows 11 where
+    available (no translucent window)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setEditable(False)
+        self.setStyleSheet(theme.combo_style())
+
+    def showPopup(self):
+        super().showPopup()
+        try:
+            from . import winframe
+            box = self.view().window()
+            if box is not None and box is not self.window():
+                box.setStyleSheet(f"background:{theme.BG};border:none;")
+                winframe.apply_dwm_frame(box)
+        except Exception:  # noqa: BLE001 - a look never breaks the dropdown
+            pass
+
+
+class ModelCombo(DarkCombo):
     """v0.10.0: Settings > General > Claude model. A non-editable dropdown of the known
     models (settings.CLAUDE_MODELS): friendly labels, the id as each item's tooltip, and
     a saved id that is not in the list kept as "Custom: <id>". Dark, popup list included
@@ -65,9 +96,7 @@ class ModelCombo(QComboBox):
 
     def __init__(self, current: str, parent=None):
         super().__init__(parent)
-        self.setEditable(False)
         self.setObjectName("model")
-        self.setStyleSheet(theme.combo_style())
         for mid, label in claude_model_choices(current):
             self.addItem(label, mid)
             self.setItemData(self.count() - 1, mid, Qt.ItemDataRole.ToolTipRole)
@@ -89,28 +118,33 @@ class ModelCombo(QComboBox):
     def _sync_tip(self) -> None:
         self.setToolTip(self.model_id())
 
-    def showPopup(self):
-        super().showPopup()
-        try:
-            from . import winframe
-            box = self.view().window()
-            if box is not None and box is not self.window():
-                box.setStyleSheet(f"background:{theme.BG};border:none;")
-                winframe.apply_dwm_frame(box)
-        except Exception:  # noqa: BLE001 - a look never breaks the dropdown
-            pass
-
 
 def _spin(value: int) -> QSpinBox:
+    """Minutes before a meeting, 0-1440 (as settings.clamp_lead); 0 reads "At start"."""
     spin = QSpinBox()
     spin.setRange(0, 1440)
     spin.setSuffix(" min")
+    spin.setSpecialValueText(LEAD_AT_START)
+    spin.setAccelerated(True)
     spin.setValue(value)
     return spin
 
 
-class SettingsDialog(QDialog):
+def friendly_date(iso: str, today: date | None = None) -> str:
+    """'2026-11-09' as 'Mon, Nov 9' (with the year when it is not this year); anything
+    unreadable unchanged."""
+    try:
+        d = date.fromisoformat(str(iso))
+    except ValueError:
+        return str(iso or "")
+    today = today or date.today()
+    text = f"{d:%a}, {d:%b} {d.day}"
+    return text if d.year == today.year else f"{text}, {d.year}"
+
+
+class SettingsDialog(TrayDialog):
     applied = pyqtSignal()
+    OBJECT_NAME = "settingsDialog"
 
     def __init__(self, settings, cache, accounts_provider, on_add_account, on_remove_account,
                  parent=None, signin_pending=None, on_cancel_signin=None):
@@ -125,8 +159,13 @@ class SettingsDialog(QDialog):
         self.resize(520, 560)
         # calendar id -> (show checkbox, mute checkbox, lead spinbox, lead when opened, primary)
         self._rows: dict[str, tuple[QCheckBox, QCheckBox, QSpinBox, int, bool]] = {}
+        # Lead times changed in the dialog (by the owner): only these are saved as the
+        # calendar's own; the others follow the default (also as it is edited here).
+        self._lead_touched: set[str] = set()
+        self._filling = False
 
         tabs = QTabWidget()
+        self.tabs = tabs
         self._cal_tab = QWidget()
         self._cal_layout = QVBoxLayout(self._cal_tab)
         tabs.addTab(self._cal_tab, "Calendars")
@@ -139,9 +178,19 @@ class SettingsDialog(QDialog):
                                    | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        self.button_box = buttons
         outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 12, 12, 12)
         outer.addWidget(tabs)
         outer.addWidget(buttons)
+        self.add_press_scale_all()
+
+    def build_lines(self) -> list:
+        return [self.tabs, self.button_box]
+
+    def add_press_scale_all(self) -> None:
+        for b in self.findChildren(QPushButton):
+            add_press_scale(b)
 
     # -- calendars tab -----------------------------------------------------
     def _build_calendars(self) -> None:
@@ -158,10 +207,18 @@ class SettingsDialog(QDialog):
 
         top = QFormLayout()
         self.default_lead = _spin(default)
-        top.addRow("Default reminder lead time", self.default_lead)
+        self.default_lead.setToolTip("How long before a meeting its reminder pops up, "
+                                     "for every calendar without a time of its own")
+        self.default_lead.valueChanged.connect(lambda _v: self._follow_default())
+        top.addRow("Remind me before meetings", self.default_lead)
         top_w = QWidget()
         top_w.setLayout(top)
         self._cal_layout.addWidget(top_w)
+        caption = QLabel("Per calendar: show it in SmartCal, mute its meeting reminders, "
+                         "or give it its own reminder time.")
+        caption.setWordWrap(True)
+        caption.setEnabled(False)
+        self._cal_layout.addWidget(caption)
 
         inner = QWidget()
         inner_layout = QVBoxLayout(inner)
@@ -185,41 +242,76 @@ class SettingsDialog(QDialog):
                     continue
                 row = QHBoxLayout()
                 show = QCheckBox(cal.name.replace("&", "&&"))
-                show.setToolTip("Show this calendar")
+                show.setToolTip("Show this calendar's meetings in SmartCal")
                 show.setChecked(not self.settings.is_hidden(cal.id, cal.primary))
                 mute = QCheckBox("Mute")
-                mute.setToolTip("No reminders for this calendar")
+                mute.setToolTip("No reminder pop-ups for this calendar's meetings")
                 mute.setChecked(self.settings.is_muted(cal.id))
                 lead_now = self.settings.lead_for(cal.id)
                 spin = _spin(lead_now)
-                spin.setToolTip("Remind this long before the event starts")
+                spin.setToolTip("Remind this long before the meeting starts")
                 if cal.id in pending:
                     show.setChecked(pending[cal.id][0])
                     mute.setChecked(pending[cal.id][1])
                     spin.setValue(pending[cal.id][2])
+                spin.valueChanged.connect(lambda _v, c=cal.id: self._lead_edited(c))
+                show.toggled.connect(lambda _on, c=cal.id: self._sync_row(c))
+                mute.toggled.connect(lambda _on, c=cal.id: self._sync_row(c))
                 row.addWidget(show, 1)
                 row.addWidget(mute)
                 row.addWidget(spin)
                 inner_layout.addLayout(row)
                 self._rows[cal.id] = (show, mute, spin, lead_now, cal.primary)
+                self._sync_row(cal.id)
         inner_layout.addStretch(1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidget(inner)
+        # v0.12.0: wide enough for its rows (never a horizontal scroll bar cutting off
+        # the lead times).
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setMinimumWidth(inner.sizeHint().width()
+                               + scroll.verticalScrollBar().sizeHint().width() + 4)
         self._cal_layout.addWidget(scroll, 1)
+
+    def _lead_edited(self, cid: str) -> None:
+        if not self._filling:
+            self._lead_touched.add(cid)
+
+    def _follows_default(self, cid: str) -> bool:
+        return cid not in self._lead_touched and cid not in self.settings.lead_minutes
+
+    def _follow_default(self) -> None:
+        """The default lead time was edited: rows that use it show the new value."""
+        value = self.default_lead.value()
+        self._filling = True
+        try:
+            for cid, (_show, _mute, spin, _orig, _primary) in self._rows.items():
+                if self._follows_default(cid):
+                    spin.setValue(value)
+        finally:
+            self._filling = False
+
+    def _sync_row(self, cid: str) -> None:
+        """Mute and the lead time only matter for a shown calendar; the lead time only
+        for one that is not muted."""
+        show, mute, spin, _orig, _primary = self._rows[cid]
+        shown = show.isChecked()
+        mute.setEnabled(shown)
+        spin.setEnabled(shown and not mute.isChecked())
 
     # -- general tab -------------------------------------------------------
     def _build_general(self) -> QWidget:
         w = QWidget()
         form = QFormLayout(w)
-        self.autostart_box = QCheckBox("Start with Windows")
+        self.autostart_box = QCheckBox("Start SmartCal when I sign in to Windows")
         self.autostart_box.setChecked(self.settings.autostart)
         self.model_box = ModelCombo(self.settings.claude_model)
         form.addRow(self.autostart_box)
         form.addRow("Claude model", self.model_box)
         # Also one click away: right-click a meeting > Color style.
-        self.tile_style_box = QComboBox()
+        self.tile_style_box = DarkCombo()
         for key, name in STYLE_NAMES:
             self.tile_style_box.addItem(name, key)
         self._tile_style_orig = getattr(self.settings, "tile_style", "stripe")
@@ -227,7 +319,7 @@ class SettingsDialog(QDialog):
             max(0, self.tile_style_box.findData(self._tile_style_orig)))
         form.addRow("Meeting color", self.tile_style_box)
         # On (default) animates even when Windows "Animation effects" are off.
-        self.animations_box = QComboBox()
+        self.animations_box = DarkCombo()
         for key, name in ANIMATION_NAMES:
             self.animations_box.addItem(name, key)
         self._animations_orig = getattr(self.settings, "animations", "on")
@@ -309,7 +401,8 @@ class SettingsDialog(QDialog):
         for key, info in reversed(list(self.settings.hidden_events.items())):
             scope = "whole series" if info.get("scope") == "series" else "this meeting"
             label, button = add_row(info.get("title") or "(no title)",
-                                    f"{scope} · {info.get('when', '')}", "Unhide",
+                                    f"{scope} · {friendly_date(info.get('when', ''))}",
+                                    "Unhide",
                                     lambda k=key: self._mark(k, self._unhide, self.hidden_rows))
             self.hidden_rows[key] = (label, button)
 
@@ -334,6 +427,8 @@ class SettingsDialog(QDialog):
         for key in self._reset_colors & set(self.color_rows):
             self._show_mark(key, self._reset_colors, self.color_rows)
         self._meetings_scroll.setWidget(inner)      # the old list widget is deleted
+        for b in inner.findChildren(QPushButton):
+            add_press_scale(b)
 
     def _mark(self, key: str, pending: set, rows: dict) -> None:
         """Toggle a pending Unhide/Reset; nothing is saved until OK."""
@@ -370,6 +465,8 @@ class SettingsDialog(QDialog):
         self.cancel_signin_button = QPushButton("Cancel")
         self.cancel_signin_button.clicked.connect(lambda _c=False: self._cancel_signin())
         self.remove_button.clicked.connect(lambda _c=False: self.remove_selected())
+        self.remove_button.setToolTip("Select an account above, then Remove")
+        self.account_list.currentItemChanged.connect(lambda *_a: self._sync_remove())
         row.addWidget(self.add_button)
         row.addWidget(self.signin_label)
         row.addWidget(self.cancel_signin_button)
@@ -434,6 +531,10 @@ class SettingsDialog(QDialog):
             item.setSizeHint(row.sizeHint())
             self.account_list.setItemWidget(item, row)
             self.account_shown[account] = box
+        self._sync_remove()
+
+    def _sync_remove(self) -> None:
+        self.remove_button.setEnabled(self.account_list.currentItem() is not None)
 
     def sync_from_settings(self) -> None:
         """Changes made elsewhere while the dialog is open (the tray's Accounts menu, a
@@ -503,7 +604,7 @@ class SettingsDialog(QDialog):
             if show.isChecked() == s.is_hidden(cid, primary):  # visibility changed
                 s.set_hidden_nosave(cid, not show.isChecked())
             (s.muted.add if mute.isChecked() else s.muted.discard)(cid)
-            if spin.value() != orig:
+            if cid in self._lead_touched and spin.value() != orig:
                 s.lead_minutes[cid] = spin.value()
         s.autostart = self.autostart_box.isChecked()
         mode = self.animations_box.currentData()

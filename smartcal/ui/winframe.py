@@ -196,6 +196,37 @@ def border_color_when_shown(widget) -> None:
         pass
 
 
+DWMWA_CLOAK = 13
+# Uncloaked this long after its first paint: past the first composition after the show.
+UNCLOAK_AFTER_PAINT_MS = 40
+
+
+def set_cloak(widget, cloaked: bool) -> bool:
+    """v0.12.0: cloak (or uncloak) `widget`'s native window: a cloaked window is shown
+    (WS_VISIBLE, it paints) but DWM does not compose it. Recorded 2026-11-06 on Windows
+    11 (build 26300, any toolkit: Qt and Tk alike): when a window with a title bar is
+    shown, DWM draws its frame outline once at the primary screen's top-left, one
+    composed frame, on most opens; shown cloaked and uncloaked once painted, it never
+    does. False on any failure or off the real Windows platform."""
+    if not native_windows():
+        return False
+    try:
+        import ctypes
+        _user32, dwmapi = _win32()
+        hwnd = _hwnd(widget)
+        if not hwnd:
+            return False
+        value = ctypes.c_int(1 if cloaked else 0)
+        ok = dwmapi.DwmSetWindowAttribute(ctypes.c_void_p(hwnd), DWMWA_CLOAK,
+                                          ctypes.byref(value), ctypes.sizeof(value)) == S_OK
+        from . import uitrace
+        if uitrace.enabled():
+            uitrace.trace("frame.cloak", on=bool(cloaked), ok=ok)
+        return ok
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def stack_below(widget, above) -> bool:
     """Put `widget`'s window directly below `above`'s in the z-order, without moving,
     sizing or activating it. False on any failure or off the real Windows platform."""

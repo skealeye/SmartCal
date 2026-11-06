@@ -205,7 +205,8 @@ def test_zero_lead_does_not_say_started_early(tmp_path):
     r.notifier.check(T0 - timedelta(seconds=30))
     assert r.toasts == []
     r.notifier.check(T0)
-    assert len(r.toasts) == 1 and r.toasts[0][1].startswith("Started 9:00 AM")
+    # v0.12.0: at the start itself (lead time 0) it says "Starts now"
+    assert len(r.toasts) == 1 and r.toasts[0][1].startswith("Starts now · 9:00 AM")
 
 
 def test_corrupt_notified_json_loads_empty(tmp_path):

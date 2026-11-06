@@ -1250,9 +1250,13 @@ class EventDetails(QDialog):
             self._framed = winframe.apply_dwm_frame(self)
         except Exception:  # noqa: BLE001 - a frame must never break the dialog
             self._framed = False
+        # v0.12.0: shown cloaked, uncloaked once painted: no stray frame outline at the
+        # primary screen's top-left (see winframe.set_cloak).
+        self._cloaked = winframe.set_cloak(self, True)
         if motion.animations_enabled():
-            self._reveal_pending = True
             self.setWindowOpacity(0.0)
+        if motion.animations_enabled() or self._cloaked:
+            self._reveal_pending = True
             self._reveal_timer.start()          # (no paint seen: shown anyway)
 
     def revealing(self) -> bool:
@@ -1263,15 +1267,22 @@ class EventDetails(QDialog):
             return
         self._reveal_pending = False
         self._reveal_timer.stop()
+        self._uncloak()
         motion.stop(self._reveal_anim)
         self._reveal_anim = motion.tween(
             self, 0.0, 1.0, motion.duration(motion.WIN_REVEAL_MS),
             lambda v: None if _gone(self) else self.setWindowOpacity(float(v)),
             kind=motion.FADE)
 
+    def _uncloak(self) -> None:
+        if getattr(self, "_cloaked", False):
+            self._cloaked = False
+            winframe.set_cloak(self, False)
+
     def _stop_reveal(self) -> None:
         self._reveal_pending = False
         self._reveal_timer.stop()
+        self._uncloak()
         motion.stop(self._reveal_anim)
         self._reveal_anim = None
         if self.windowOpacity() != 1.0:
@@ -1280,7 +1291,9 @@ class EventDetails(QDialog):
     def paintEvent(self, e):
         super().paintEvent(e)
         if self._reveal_pending:
-            QTimer.singleShot(0, self._reveal)  # right after this frame is on screen
+            # right after this frame is on screen (cloaked: a moment later, see dialogs)
+            QTimer.singleShot(winframe.UNCLOAK_AFTER_PAINT_MS if getattr(self, "_cloaked", False)
+                              else 0, self._reveal)
 
     def nativeEvent(self, event_type, message):
         # v0.11.0: Windows' erase is answered with the dark background (no white frame
@@ -1515,6 +1528,10 @@ class CalendarWindow(QMainWindow):
             self._stop_reveal()
             self._reveal_pending = True
             self.setWindowOpacity(0.0)
+            # v0.12.0: shown cloaked, uncloaked once painted: DWM drew the frame's
+            # outline once at the primary screen's top-left on a first open (gray since
+            # v0.11.2, the "blue square outline" before; see winframe.set_cloak).
+            self._cloaked = winframe.set_cloak(self, True)
             self._reveal_timer.start()      # (no paint seen: shown anyway)
         if self.isMinimized():
             self.showNormal()
@@ -1762,7 +1779,9 @@ class CalendarWindow(QMainWindow):
     def eventFilter(self, obj, e) -> bool:
         if self._reveal_pending and e.type() == QEvent.Type.Paint and \
                 obj is self.centralWidget():
-            QTimer.singleShot(0, self._reveal)  # right after this frame is on screen
+            # right after this frame is on screen (cloaked: a moment later, see dialogs)
+            QTimer.singleShot(winframe.UNCLOAK_AFTER_PAINT_MS if getattr(self, "_cloaked", False)
+                              else 0, self._reveal)
         return False
 
     def revealing(self) -> bool:
@@ -1775,15 +1794,22 @@ class CalendarWindow(QMainWindow):
             return
         self._reveal_pending = False
         self._reveal_timer.stop()
+        self._uncloak()
         motion.stop(self._reveal_anim)
         self._reveal_anim = motion.tween(
             self, 0.0, 1.0, motion.duration(motion.WIN_REVEAL_MS),
             lambda v: None if _gone(self) else self.setWindowOpacity(float(v)),
             kind=motion.FADE)
 
+    def _uncloak(self) -> None:
+        if getattr(self, "_cloaked", False):
+            self._cloaked = False
+            winframe.set_cloak(self, False)
+
     def _stop_reveal(self) -> None:
         self._reveal_pending = False
         self._reveal_timer.stop()
+        self._uncloak()
         motion.stop(self._reveal_anim)
         self._reveal_anim = None
         if self.windowOpacity() != 1.0:

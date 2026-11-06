@@ -47,6 +47,45 @@ def combo_style() -> str:
             f"QComboBox QAbstractItemView::item:selected{{background:{BG_NEXT};}}")
 
 
+BUTTON = BORDER
+BUTTON_HOVER = "#4a4d51"
+BUTTON_PRESSED = "#2f3236"
+
+
+def dialog_style(name: str) -> str:
+    """v0.12.0: Settings and Reminders (the dialogs opened from the tray menu): the
+    popup's dark background, light text and the details dialog's rounded buttons, with
+    a visible keyboard-focus ring; every dropdown in combo_style. Checkboxes, tabs, spin
+    boxes, lists and scroll bars keep the Windows 11 look, dark (the app runs in the dark
+    color scheme, see force_dark_scheme)."""
+    return (f"#{name}{{background:{BG};}}"
+            f"#{name} QLabel{{color:{TEXT};}}"
+            f"#{name} QLabel:disabled{{color:{MUTED};}}"
+            f"#{name} QPushButton{{background:{BUTTON};color:{TEXT};border:1px solid {BUTTON};"
+            f"padding:5px 14px;border-radius:{RADIUS_SMALL}px;min-width:64px;}}"
+            f"#{name} QPushButton:hover{{background:{BUTTON_HOVER};border-color:{BUTTON_HOVER};}}"
+            f"#{name} QPushButton:pressed{{background:{BUTTON_PRESSED};}}"
+            f"#{name} QPushButton:focus{{border-color:{LINK};}}"
+            f"#{name} QPushButton:default{{border-color:{ACCENT};}}"
+            f"#{name} QPushButton:disabled{{color:{MUTED};background:{BG};"
+            f"border-color:{BORDER};}}"
+            + combo_style()
+            + f"QToolTip{{background:{BG};color:{TEXT};border:1px solid {BORDER};}}")
+
+
+def force_dark_scheme(app) -> bool:
+    """v0.12.0: SmartCal is a dark app: Qt's Windows 11 style draws every standard
+    control (and the native title bars) dark even when Windows itself is set to Light,
+    so no dialog ever shows the system's white controls. False where Qt cannot (older
+    than 6.8)."""
+    try:
+        from PyQt6.QtCore import Qt
+        app.styleHints().setColorScheme(Qt.ColorScheme.Dark)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 _HEX = re.compile(r"#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})")
 
 

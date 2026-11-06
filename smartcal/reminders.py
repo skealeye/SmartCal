@@ -19,6 +19,10 @@ MAX_TEXT = 200
 PRUNE_AFTER = timedelta(days=2)
 LATE_AFTER = timedelta(minutes=5)
 MAX_UNFIRED = 500
+# v0.12.0: at most this many reminder toasts at once (e.g. SmartCal starts after a week
+# off with many reminders overdue): the earliest ones each get their own toast, the rest
+# one summary toast. Every toast starts a PowerShell, so a flood is never sent.
+MAX_TOASTS_PER_CHECK = 3
 
 
 @dataclass
@@ -166,6 +170,12 @@ class Reminders:
                 self._save()
             return [replace(r) for r in claimed]
 
+    def next_fire_at(self) -> datetime | None:
+        """v0.12.0: when the earliest reminder not yet fired is due (None: none)."""
+        with self._lock:
+            pending = [r.fire_at for r in self._items.values() if not r.fired]
+            return min(pending) if pending else None
+
     def list(self) -> list[Reminder]:
         with self._lock:
             return [replace(r) for r in sorted(
@@ -195,16 +205,38 @@ class ReminderFirer:
     def check(self, now: datetime | None = None) -> None:
         now = _aware(now or self.clock())
         claimed = self.reminders.claim_due(now)  # marked fired before any sending
-        for r in claimed:
+        if len(claimed) > MAX_TOASTS_PER_CHECK:
+            shown, rest = claimed[:MAX_TOASTS_PER_CHECK - 1], claimed[MAX_TOASTS_PER_CHECK - 1:]
+        else:
+            shown, rest = claimed, []
+        for r in shown:
             body = r.text
             if now - r.fire_at > LATE_AFTER:
-                body = f"(was due {clock_text(r.fire_at.astimezone())}) {r.text}"
-            try:
-                self.send_toast("Reminder", body, None)
-            except Exception:  # noqa: BLE001
-                log.exception("toast for reminder %s failed", r.id)
+                body = f"(was due {due_text(r.fire_at, now)}) {r.text}"
+            self._send("Reminder", body, r.id)
+        if rest:
+            texts = "; ".join(r.text for r in rest[:3]) + ("; …" if len(rest) > 3 else "")
+            self._send("Reminders", f"{len(rest)} more were due: {texts}", None)
         if claimed and self.on_fired:
             try:
                 self.on_fired()
             except Exception:  # noqa: BLE001
                 log.exception("on_fired callback failed")
+
+    def _send(self, title: str, body: str, rid) -> None:
+        try:
+            self.send_toast(title, body, None)
+        except Exception:  # noqa: BLE001
+            log.exception("toast for reminder %s failed", rid)
+
+
+def due_text(fire_at: datetime, now: datetime) -> str:
+    """When an overdue reminder was due: '3:45 PM' today, else 'Wed 3:45 PM' within the
+    week, else 'Nov 4, 3:45 PM' (local time)."""
+    when, here = fire_at.astimezone(), now.astimezone()
+    days = (here.date() - when.date()).days
+    if days == 0:
+        return clock_text(when)
+    if 0 < days < 7:
+        return f"{when:%a} {clock_text(when)}"
+    return f"{when:%b} {when.day}, {clock_text(when)}"

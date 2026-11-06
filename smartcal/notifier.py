@@ -17,6 +17,23 @@ log = logging.getLogger(__name__)
 PRUNE_AFTER = timedelta(days=2)
 MAX_LEAD_MINUTES = 1440
 CATCH_UP_WINDOW = timedelta(hours=24)
+STARTS_NOW = timedelta(minutes=1)   # a toast within this after the start says "Starts now"
+WAKE_CAP_MS = 30_000                # the 30 s check timer covers anything later
+WAKE_MIN_MS = 1_000
+
+
+def next_wake_ms(now: datetime, moments, cap_ms: int = WAKE_CAP_MS) -> int | None:
+    """v0.12.0: milliseconds until the earliest of `moments` (None entries ignored), a
+    little after it so the check finds it due; None when that is past `cap_ms` (the
+    regular 30 s check comes first). Never less than WAKE_MIN_MS (no busy loop on
+    something that stays due)."""
+    times = [m for m in moments if m is not None]
+    if not times:
+        return None
+    ms = math.ceil((min(times) - now).total_seconds() * 1000) + 50
+    if ms > cap_ms:
+        return None
+    return max(WAKE_MIN_MS, ms)
 
 
 class Notifier:
@@ -90,6 +107,9 @@ class Notifier:
                 mins = max(1, math.ceil((ev.start - now).total_seconds() / 60))
                 lead_text = f"Starts in {mins} min"
                 body = f"{lead_text} · {agenda.clock_text(ev.start.astimezone())}"
+            elif now - ev.start < STARTS_NOW and now < ev.end:
+                # (lead time 0, or a toast that was due just now)
+                body = f"Starts now · {agenda.clock_text(ev.start.astimezone())}"
             elif now < ev.end and now - ev.start <= CATCH_UP_WINDOW:
                 body = f"Started {agenda.clock_text(ev.start.astimezone())}"
             else:
@@ -106,6 +126,32 @@ class Notifier:
                 log.exception("toast for event %s (calendar %s) failed", ev.id, ev.calendar_id)
         if changed:
             self._save()
+
+    def next_fire_at(self, now: datetime | None = None) -> datetime | None:
+        """v0.12.0: when the next meeting toast is due (its start minus its calendar's
+        lead time; `now` for one already due), the same meetings check() would toast;
+        None when nothing is due within the next day."""
+        now = now or self.clock()
+        if now.tzinfo is None:
+            now = now.astimezone()
+        horizon = now + timedelta(minutes=MAX_LEAD_MINUTES + 1)
+        best = None
+        for ev in agenda.visible_events(self.cache, self.settings,
+                                        self.cache.events_between(now, horizon),
+                                        hide_user_hidden=True):
+            if ev.all_day or self.settings.is_muted(ev.calendar_id):
+                continue
+            if self._key(ev) in self.fired:
+                continue
+            if ev.start > now:
+                due = max(now, ev.start - timedelta(
+                    minutes=self.settings.lead_for(ev.calendar_id)))
+            elif now < ev.end and now - ev.start <= CATCH_UP_WINDOW:
+                due = now
+            else:
+                continue
+            best = due if best is None else min(best, due)
+        return best
 
     def mark_in_progress(self, now: datetime | None = None) -> None:
         """Something just became visible (an account shown again, a meeting restored):

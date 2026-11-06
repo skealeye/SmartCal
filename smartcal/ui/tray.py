@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from .. import agenda, google_auth
 from ..textutil import plain_line
-from . import meeting_menus, motion, placement
+from . import meeting_menus, motion
 
 log = logging.getLogger(__name__)
 
@@ -353,7 +353,7 @@ class TrayController(QSystemTrayIcon):
         dlg = RemindersDialog(self.reminders)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         track_dialog(self._reminders_ref, dlg)
-        placement.show_near_tray(dlg, self.tray_geometry())
+        dlg.open_near_tray(self.tray_geometry())     # v0.12.0: no white frame
 
     @property
     def _reminders_dialog(self):
