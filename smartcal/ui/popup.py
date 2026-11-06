@@ -16,11 +16,12 @@ from PyQt6.QtCore import (QAbstractAnimation, QEvent, QParallelAnimationGroup,
                           QUrl, pyqtProperty, pyqtSignal)
 from PyQt6.QtGui import QColor, QCursor, QDesktopServices, QGuiApplication, QPainter, QPen
 from PyQt6.QtWidgets import (QApplication, QFrame, QGraphicsOpacityEffect, QHBoxLayout,
-                             QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget)
+                             QLabel, QLayout, QPushButton, QScrollArea, QVBoxLayout,
+                             QWidget)
 
 from .. import __version__, agenda
 from ..textutil import meeting_label, plain_line, safe_http_url
-from . import meeting_menus, motion, nativebg, placement, theme, winframe
+from . import cards, meeting_menus, motion, nativebg, placement, theme, winframe
 from .widgets import HoverButton
 
 log = logging.getLogger(__name__)
@@ -125,6 +126,11 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         self._tween: dict | None = None     # the running height tween (see _start_tween)
         self._geom_change = False           # inside our own one-call geometry change
         self._fade_anims: list = []
+        # v0.9.0 card build (see cards.py): the header fading in and the rows building
+        # into place, once per opening. Prepared before the first paint, started with
+        # the opening slide, ended (final state) on hide.
+        self._header_build: cards.CardBuild | None = None
+        self._rows_build: cards.CardBuild | None = None
         self._chat_open = False
         self._chat = None
         self._chat_factory = None
@@ -367,6 +373,12 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
             self._refresh(now)
         finally:
             self._refreshing = False
+        build = self._rows_build
+        if build is not None and build.running():
+            # Rebuilt mid-build (e.g. a sync): rows still on their way in carry on, on
+            # their new widgets; nothing builds again, new rows just appear.
+            build.rebind({_row_key(r.event): r for r in self.row_widgets()
+                          if isinstance(r, AgendaRow)})
         if before is not None:
             self._fade_in([r for r in self.row_widgets() if isinstance(r, AgendaRow)
                            and _row_key(r.event) not in before])
@@ -517,6 +529,11 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         if not (self.isVisible() and self._anchored):
             self.resize(size)
             return
+        # v0.9.0: never smaller than the layout's minimum for this width. Windows asks
+        # Qt before every geometry change, and Qt enlarges anything below that minimum
+        # ("Unable to set geometry" in the log, and the edge next to the tray jumped):
+        # e.g. a collapse frame right after a reveal was cut short.
+        size = QLayout.closestAcceptableSize(self, size)
         pos = placement.compute_position(size, self._tray_geom, self._area())
         if self.showing_animated():             # the slide owns the position
             self.resize(size)
@@ -574,7 +591,9 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         # The overshoot never takes the window past the screen's room (its tray-side
         # edge stays put, the far edge must stay on screen) nor below 1 px.
         room = max(h0, h1, min(MAX_HEIGHT, self._area().height() - 24))
-        h = int(motion.clamp(h, 1, room))
+        # v0.9.0: nor outside the window's own min/max height (Windows refuses those).
+        room = min(room, self.maximumHeight())
+        h = int(motion.clamp(h, max(1, self.minimumHeight()), room))
         if h1 != h0:
             e = (h - h0) / (h1 - h0)        # the list follows the clamped height exactly
         if tw["frame"] is not None:
@@ -702,6 +721,7 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         the list and window shrinking with them; then `on_done` rebuilds the list. At
         once without the micro-animations."""
         self._stop_tween()
+        self._finish_build()            # mid-build: every row in place first
         if not rows or not self._can_tween():
             on_done()
             return
@@ -785,7 +805,55 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         """Any of the popup's own animations (opening slide, height, reveal, collapse,
         fade-in, row and button fades) still running."""
         return (self.showing_animated() or self.height_animating() or self.revealing()
-                or self.collapsing() or self.fading_in() or self.row_fades_running())
+                or self.collapsing() or self.fading_in() or self.row_fades_running()
+                or self.building())
+
+    # -- v0.9.0: the card build (see cards.py) ------------------------------------------
+    def building(self) -> bool:
+        """The header or rows are still building in (or prepared, waiting to start)."""
+        return any(b is not None and b.running()
+                   for b in (self._header_build, self._rows_build))
+
+    def rows_build(self) -> "cards.CardBuild | None":
+        return self._rows_build
+
+    def header_build(self) -> "cards.CardBuild | None":
+        return self._header_build
+
+    def _prepare_build(self) -> None:
+        """Before the popup's first frame: the header and next line transparent, every
+        row transparent, lower and smaller (cards.CardBuild). Micro-animations only."""
+        self._finish_build()
+        if not motion.micro_enabled():
+            return
+        heads = [w for w in (self._header, self._next) if not w.isHidden()]
+        self._header_build = cards.CardBuild(
+            self, 0, 1.0, motion.HEADER_FADE_DELAY_MS, 0, motion.HEADER_FADE_MS)
+        self._header_build.prepare(heads)
+        rows = [r for r in self.row_widgets() if isinstance(r, AgendaRow)]
+        if rows:
+            self._rows_build = cards.CardBuild(
+                self, motion.BUILD_OFFSET_PX, motion.BUILD_SCALE_START,
+                motion.BUILD_START_MS, motion.BUILD_STAGGER_MS, motion.BUILD_ROW_MS)
+            self._rows_build.prepare(rows, [_row_key(r.event) for r in rows])
+
+    def _start_build(self) -> None:
+        for b in (self._header_build, self._rows_build):
+            if b is not None:
+                b.start()
+
+    def _finish_build(self) -> None:
+        """Every widget of the build in its final state now (safe to repeat)."""
+        for b in (self._header_build, self._rows_build):
+            if b is not None:
+                b.finish()
+                b.deleteLater()
+        self._header_build = self._rows_build = None
+
+    def _row_touched(self, row) -> None:
+        """A row (or its Join button) is pressed mid-build: it lands now."""
+        if self._rows_build is not None and not cards._gone(row):
+            self._rows_build.finish_widget(row)
 
     def tile_style(self) -> str:
         style = getattr(self.settings, "tile_style", "stripe")
@@ -809,7 +877,8 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
                 colors, pressed = (theme.LINK, "#a9c8ff", "#0b0d10"), None
             join = HoverButton("Join", *colors, pressed=pressed, radius=3,
                                extra="font-size:11px;font-weight:bold;padding:2px 8px;",
-                               parent=row)
+                               parent=row, press_scale=True)
+            join.pressed.connect(lambda r=row: self._row_touched(r))
             join.setObjectName("join")
             join.setToolTip(meeting_label(url))
             join.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -819,6 +888,7 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
             row.join_button = join
         row.toggle_requested.connect(self.toggle_row)
         row.menu_requested.connect(self.show_row_menu)
+        row.touched.connect(self._row_touched)
         return row
 
     def _join(self, url: str) -> None:
@@ -871,6 +941,9 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
             # be opaque by then (else the tucked panel would show through it).
             self._stop_show_animation()
             self._place_flyout(force=True)
+        if opening and fly.isHidden():
+            # v0.9.0: its lines start out of place and build in with the slide.
+            fly.prepare_build(motion.PANEL_BUILD_START_MS)
         if opening:
             # WA_ShowWithoutActivating: the popup keeps focus. Over the popup (narrow
             # screen) there is nothing to slide out from behind: it appears at once.
@@ -1206,9 +1279,16 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
     def _set_show_pos(self, pos: QPoint) -> None:
         # The settle overshoot never takes the popup past the work area (over the
         # taskbar or onto another screen); the last frame is exactly the docked spot.
+        # v0.9.0: nor past the docked spot itself (Windows refused some of those
+        # frames, "Unable to set geometry" in the log): every frame lies between where
+        # the slide started and the dock.
         if self._anchored:
+            if self.showing_animated():
+                pos = motion.clamp_between(pos, self._show_slide.startValue(),
+                                           self._show_slide.endValue())
             pos = motion.clamp_to_area(pos, self.size(), self._area())
-        self.move(pos)
+        if pos != self.pos():
+            self.move(pos)
 
     show_pos = pyqtProperty(QPoint, fget=_get_show_pos, fset=_set_show_pos)
 
@@ -1241,6 +1321,9 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
             self._show_fade.setStartValue(0.0)
             self._show_fade.setEndValue(1.0)
             self._show_pending = True
+            # v0.9.0: the header and the rows start out of place (before the first
+            # frame is painted) and build in once the slide starts.
+            self._prepare_build()
         self.show()
         self.raise_()
         self.activateWindow()
@@ -1266,10 +1349,12 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
             return
         self._show_slide.setStartValue(self.pos())   # where the first frame showed it
         self._show_anim.start()
+        self._start_build()
 
     def _stop_show_animation(self) -> None:
         """Hidden (or shown again) mid-animation: no animation left running, fully
-        opaque, and docked if still shown."""
+        opaque, and docked if still shown (a card build waiting for the slide then
+        starts: shown, the rows never stay out of place)."""
         if self.showing_animated():
             self._show_pending = False
             self.show_start_fallback.stop()
@@ -1278,6 +1363,10 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
                 self.move(self._show_slide.endValue())
         if self.windowOpacity() != 1.0:
             self.setWindowOpacity(1.0)
+        if self.isVisible():
+            self._start_build()
+        else:
+            self._finish_build()
 
     def event(self, e):
         if e.type() == QEvent.Type.WindowDeactivate and self.isVisible():
@@ -1454,6 +1543,7 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         # Every animation stops; everything jumps to its final state (no handler runs
         # after the hide, nothing keeps a timer going).
         self._stop_tween()              # a collapse's follow-up (the hide) still runs
+        self._finish_build()            # v0.9.0: rows and header in place, no timeline
         for a in self._fade_anims:
             motion.stop(a)
         self._fade_anims = []
@@ -1496,12 +1586,15 @@ class AgendaRow(QFrame):
 
     toggle_requested = pyqtSignal(object, bool)   # row, by keyboard
     menu_requested = pyqtSignal(object, QPoint)   # row, global position (right-click)
+    touched = pyqtSignal(object)    # pressed (v0.9.0: a row still building in lands)
 
     def __init__(self, ev, time_text: str, is_next: bool, color: str, parent=None,
                  style: str = "stripe", selected: bool = False, hovered: bool = False):
         super().__init__(parent)
         self.event = ev
         self.join_button: QPushButton | None = None
+        # v0.9.0: shrinks a little while held, springs back on release.
+        self.press_feedback = cards.PressFeedback(self)
         self.is_next = is_next
         self.color = color
         self.style = style if style in theme.TILE_STYLES else "stripe"
@@ -1692,6 +1785,7 @@ class AgendaRow(QFrame):
     def leaveEvent(self, e):
         self._hovered = self._pressed = False
         self._restyle()
+        self.press_feedback.release()
         super().leaveEvent(e)
 
     def focusInEvent(self, e):
@@ -1707,18 +1801,22 @@ class AgendaRow(QFrame):
         self._bg_anim = None
         self._hovered = self._pressed = False
         self._bg = self._target_qcolor()
+        self.press_feedback.cancel()
         super().hideEvent(e)
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
+            self.touched.emit(self)     # still building in: lands now
             self._pressed = True        # subtle press feedback
             self._restyle()
+            self.press_feedback.press()
         e.accept()
 
     def mouseReleaseEvent(self, e):
         if self._pressed:
             self._pressed = False
             self._restyle()
+        self.press_feedback.release()
         if e.button() == Qt.MouseButton.LeftButton and self.rect().contains(
                 e.position().toPoint()):
             self.toggle_requested.emit(self, False)

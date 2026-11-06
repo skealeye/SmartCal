@@ -167,6 +167,7 @@ class DetailsFlyout(winframe.FramedWindow, QWidget):
         outer.addWidget(self._color_bar)
         self._ghost = None              # the old content fading out during a swap
         self._ghost_anim = self._fade_in_anim = self._height_anim = None
+        self._lines_build = None        # v0.9.0: the content's lines building in
         self._height_target: int | None = None
         self._content_h = None          # (content key, measured height)
         self._scroll = QScrollArea()
@@ -230,8 +231,12 @@ class DetailsFlyout(winframe.FramedWindow, QWidget):
         # fades out on top), with the micro-animations on.
         crossfade = (old is not None and self.isVisible() and not self.closing()
                      and motion.micro_enabled())
-        # A swap during a swap: the previous fade ends first, so the snapshot is of
-        # the fully shown content, never a half-transparent frame.
+        # v0.9.0: another meeting's details build in line by line (the old content
+        # still fades out); the same meeting's changed details just cross-fade.
+        switch = crossfade and not same_meeting
+        # A swap during a swap: the previous fade (and build) ends first, so the
+        # snapshot is of the fully shown content, never a half-transparent frame.
+        self.finish_build()
         self._end_crossfade()
         ghost = self._grab(old) if crossfade else None
         ghost_rect = QRect(old.pos(), old.size()) if crossfade else None
@@ -249,7 +254,10 @@ class DetailsFlyout(winframe.FramedWindow, QWidget):
         self._scroll.setWidget(self._build(ev))
         self._fix_tab_order()
         if ghost is not None:
-            self._crossfade(ghost, ghost_rect)
+            self._crossfade(ghost, ghost_rect, fade_body=not switch)
+        if switch:
+            self.prepare_build(motion.PANEL_SWITCH_START_MS)
+            self.start_build()
         if refocus:
             w = self.body().findChild(QWidget, refocus)
             (w or self.first_control()).setFocus()
@@ -324,7 +332,8 @@ class DetailsFlyout(winframe.FramedWindow, QWidget):
             join = HoverButton(meeting_label(url), theme.LINK, "#a9c8ff", "#0b0d10",
                                extra="font-weight:bold;padding:5px 10px;"
                                      f"border-radius:{theme.RADIUS_SMALL}px;",
-                               focus="border:2px solid #f1f3f4;")
+                               focus="border:2px solid #f1f3f4;", press_scale=True)
+            join.pressed.connect(lambda: self.finish_build())
             join.setObjectName("bigjoin")
             join.setCursor(Qt.CursorShape.PointingHandCursor)
             join.setToolTip(plain_tip(url))
@@ -456,10 +465,11 @@ class DetailsFlyout(winframe.FramedWindow, QWidget):
         """The snapshot for a cross-fade (a seam for tests: e.g. a 1.5x pixmap)."""
         return widget.grab()
 
-    def _crossfade(self, ghost, rect: QRect) -> None:
-        """The old content (a snapshot) fades out over the new one, which fades in. The
-        snapshot sits exactly where the old content was (`rect`, logical pixels; the
-        pixmap may be 1.25x/1.5x in device pixels), top-left aligned."""
+    def _crossfade(self, ghost, rect: QRect, fade_body: bool = True) -> None:
+        """The old content (a snapshot) fades out over the new one, which fades in
+        (`fade_body`; else its lines build in, see prepare_build). The snapshot sits
+        exactly where the old content was (`rect`, logical pixels; the pixmap may be
+        1.25x/1.5x in device pixels), top-left aligned."""
         from PyQt6.QtWidgets import QGraphicsOpacityEffect
         self._end_crossfade()
         view = self._scroll.viewport()
@@ -475,11 +485,16 @@ class DetailsFlyout(winframe.FramedWindow, QWidget):
         label.show()
         label.raise_()
         self._ghost = label
+        ms = motion.micro_duration(motion.CROSSFADE_MS)
+        if not fade_body:
+            self._ghost_anim = motion.tween(self, 1.0, 0.0, ms,
+                                            lambda v, fx=out_fx: _set_opacity_fx(fx, v),
+                                            self._end_crossfade, kind=motion.FADE)
+            return
         body = self.body()
         in_fx = QGraphicsOpacityEffect(body)
         in_fx.setOpacity(0.0)
         body.setGraphicsEffect(in_fx)
-        ms = motion.micro_duration(motion.CROSSFADE_MS)
         self._ghost_anim = motion.tween(self, 1.0, 0.0, ms,
                                         lambda v, fx=out_fx: _set_opacity_fx(fx, v),
                                         kind=motion.FADE)
@@ -489,6 +504,48 @@ class DetailsFlyout(winframe.FramedWindow, QWidget):
 
     def crossfading(self) -> bool:
         return self._ghost is not None
+
+    # -- v0.9.0: the content building in (cards.CardBuild) -----------------------------
+    def build_lines(self) -> list[QWidget]:
+        """The content's lines, top to bottom (title, time, calendar, location,
+        description, Join: whichever the meeting has)."""
+        body = self.body()
+        lay = body.layout() if body is not None else None
+        if lay is None:
+            return []
+        found = (lay.itemAt(i).widget() for i in range(lay.count()))
+        return [w for w in found if w is not None and not w.isHidden()]
+
+    def prepare_build(self, start_ms: int = motion.PANEL_BUILD_START_MS) -> None:
+        """Every line transparent and PANEL_BUILD_OFFSET_PX lower, to spring up once
+        start_build() runs (micro-animations only)."""
+        self.finish_build()
+        if not motion.micro_enabled():
+            return
+        from .cards import CardBuild
+        lines = self.build_lines()
+        if not lines:
+            return
+        self._lines_build = CardBuild(self, motion.PANEL_BUILD_OFFSET_PX, 1.0, start_ms,
+                                motion.PANEL_BUILD_STAGGER_MS, motion.PANEL_BUILD_MS)
+        self._lines_build.prepare(lines)
+
+    def start_build(self) -> None:
+        if self._lines_build is not None:
+            self._lines_build.start()
+
+    def finish_build(self) -> None:
+        """Every line in its final state now (safe to repeat)."""
+        build, self._lines_build = self._lines_build, None
+        if build is not None:
+            build.finish()
+            build.deleteLater()
+
+    def building(self) -> bool:
+        return self._lines_build is not None and self._lines_build.running()
+
+    def content_build(self):
+        return self._lines_build
 
     def _end_crossfade(self) -> None:
         motion.stop(self._ghost_anim)
@@ -627,6 +684,7 @@ class DetailsFlyout(winframe.FramedWindow, QWidget):
                 self.show()             # WA_ShowWithoutActivating: the popup keeps focus
         if self.slide_pending():
             return                      # starts after the first paint
+        self.start_build()              # (with the slide: its lines come in with it)
         if self._mode == "stack":
             self.restack()              # turning around: under the popup again
         if not self._run(opening=True, ms=ms):
@@ -687,6 +745,7 @@ class DetailsFlyout(winframe.FramedWindow, QWidget):
         self._paint_wait.stop()
         if ms <= 0 or self.isHidden() or self._closing:
             return
+        self.start_build()
         self.restack()
         if not self._run(opening=True, ms=ms):
             self._move_to(self._docked)
@@ -878,6 +937,7 @@ class DetailsFlyout(winframe.FramedWindow, QWidget):
         if self._height_target is not None and self.height() != self._height_target:
             self.setFixedSize(self.width(), self._height_target)
         self._end_crossfade()
+        self.finish_build()             # v0.9.0: every line in place, no timeline
         self._closing = False
         super().hideEvent(e)
 

@@ -1,5 +1,6 @@
 """Short UI animations (the tray popup sliding in, the details panel sliding out and
-back) and whether to play them.
+back, v0.9.0's card build and press feedback, see cards.py) and whether to play them.
+Every timing, offset, scale and curve lives here.
 
 Whether they play is the owner's setting (Settings > General > Animations, or the tray
 menu): "on" (the default; plays even when Windows "Animation effects" are off), "auto"
@@ -17,7 +18,7 @@ ENV_OFF = "SMARTCAL_NO_ANIMATIONS"
 SPI_GETCLIENTAREAANIMATION = 0x1042
 
 POPUP_MS = 160              # the popup sliding in from the tray side while fading in
-POPUP_SLIDE_PX = 24
+POPUP_SLIDE_PX = 18         # v0.9.0 ("card build"): a short rise; the cards do the rest
 # v0.8.4: the popup's opening animation starts once its first frame is painted (the
 # very first open after start paints slowly: started before, the slide was over before
 # anything was on screen). If no paint is seen within this time, it starts anyway.
@@ -165,22 +166,29 @@ OVERSHOOT = 0.8
 # (0.2, 1) (0.3, 1), whose values never leave 0..1.
 GLIDE_BEZIER = ((0.2, 1.0), (0.3, 1.0))
 
+# v0.9.0 ("card build"): the springy curve of the cards building into the popup and the
+# panel's lines, and of a press springing back: cubic Bezier (0.34, 1.45) (0.5, 1), the
+# owner's chosen mockup (option B). It passes its end by about 8% and settles back.
+SPRING_BEZIER = ((0.34, 1.45), (0.5, 1.0))
+
 SETTLE = "settle"           # positions and sizes: OutBack(OVERSHOOT)
 GLIDE = "glide"             # bounded positions (the panel slide): no overshoot
+SPRING = "spring"           # the card build and press release: SPRING_BEZIER
 FADE = "fade"               # opacity and colors: OutCubic, never past the end
 LINEAR = "linear"           # raw progress (callers apply curves themselves, see ease())
 
 
 def curve(kind: str = FADE):
-    """The easing curve for `kind`: SETTLE, GLIDE, LINEAR, or anything else (FADE)."""
+    """The easing curve for `kind`: SETTLE, GLIDE, SPRING, LINEAR, or anything else
+    (FADE)."""
     from PyQt6.QtCore import QEasingCurve, QPointF
     if kind == SETTLE:
         c = QEasingCurve(QEasingCurve.Type.OutBack)
         c.setOvershoot(OVERSHOOT)
         return c
-    if kind == GLIDE:
+    if kind in (GLIDE, SPRING):
         c = QEasingCurve(QEasingCurve.Type.BezierSpline)
-        (x1, y1), (x2, y2) = GLIDE_BEZIER
+        (x1, y1), (x2, y2) = GLIDE_BEZIER if kind == GLIDE else SPRING_BEZIER
         c.addCubicBezierSegment(QPointF(x1, y1), QPointF(x2, y2), QPointF(1.0, 1.0))
         return c
     if kind == LINEAR:
@@ -237,6 +245,63 @@ def stop(anim) -> None:
         anim.stop()
     except RuntimeError:
         pass
+
+
+# -- v0.9.0: the "card build" ------------------------------------------------------------
+# Opening the popup: the header fades in, then every agenda row (a card) builds into
+# place: from BUILD_OFFSET_PX lower, scaled to BUILD_SCALE_START and transparent, it
+# springs (SPRING) to its place, BUILD_STAGGER_MS after the one above. Opening the
+# details panel (or switching it to another meeting): its lines rise PANEL_BUILD_OFFSET_PX
+# the same way. Both are micro-animations (micro_enabled(): off with animations off and
+# with SMARTCAL_ANIMATIONS=basic). Opacity follows the same curve clamped to 0..1, so it
+# never passes 1.
+HEADER_FADE_DELAY_MS = 40   # after the popup's slide starts
+HEADER_FADE_MS = 200
+BUILD_START_MS = 50         # the first row, after the popup's slide starts
+BUILD_STAGGER_MS = 45       # between rows
+BUILD_ROW_MS = 420          # each row's own build
+BUILD_OFFSET_PX = 26
+BUILD_SCALE_START = 0.94
+BUILD_MAX_STAGGER = 8       # rows past this many start together with the 8th
+PANEL_BUILD_START_MS = 140  # the first line, after the panel's slide starts
+PANEL_SWITCH_START_MS = 40  # ...or after another meeting's content swapped in
+PANEL_BUILD_STAGGER_MS = 50
+PANEL_BUILD_MS = 380
+PANEL_BUILD_OFFSET_PX = 14
+# Press feedback (a meeting row, a Join button): shrinks to PRESS_SCALE while held, then
+# springs back (SPRING) on release.
+PRESS_SCALE = 0.97
+PRESS_IN_MS = 90
+PRESS_OUT_MS = 260
+
+
+def build_delays(count: int, start: int = BUILD_START_MS, stagger: int = BUILD_STAGGER_MS,
+                 cap: int = BUILD_MAX_STAGGER) -> list[int]:
+    """When each of `count` items starts building (ms after the build starts): `start`,
+    then `stagger` apart; items past `cap` start together with the last staggered one."""
+    cap = max(1, cap)
+    return [start + min(i, cap - 1) * stagger for i in range(max(0, count))]
+
+
+def build_total_ms(count: int, start: int = BUILD_START_MS, stagger: int = BUILD_STAGGER_MS,
+                   item_ms: int = BUILD_ROW_MS, cap: int = BUILD_MAX_STAGGER) -> int:
+    """How long a build of `count` items runs (0 for none)."""
+    delays = build_delays(count, start, stagger, cap)
+    return (delays[-1] + item_ms) if delays else 0
+
+
+def card_state(elapsed_ms: float, delay: int, item_ms: int, offset_px: float,
+               scale_start: float = 1.0) -> tuple[float, float, float, bool]:
+    """One item of a build at `elapsed_ms`: (opacity, y offset in px, scale, done).
+    Before its delay: transparent, `offset_px` lower, at `scale_start`. Then SPRING
+    eases it into place (the offset and the scale may pass their end slightly and settle
+    back; the opacity is clamped to 0..1). Done (exactly 1.0, 0.0, 1.0) at the end."""
+    p = (elapsed_ms - delay) / item_ms if item_ms > 0 else 1.0
+    if p >= 1.0:
+        return 1.0, 0.0, 1.0, True
+    e = ease(SPRING, p)
+    return (clamp(e, 0.0, 1.0), offset_px * (1.0 - e),
+            scale_start + (1.0 - scale_start) * e, False)
 
 
 def tween(parent, start, end, ms: int, on_value, on_done=None, kind: str = FADE):

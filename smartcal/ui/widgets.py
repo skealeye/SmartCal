@@ -17,11 +17,17 @@ class HoverButton(QPushButton):
 
     def __init__(self, text: str, base: str, hover: str, fg: str, extra: str = "",
                  focus: str = "", pressed: str | None = None, radius: int = 4,
-                 parent=None):
+                 parent=None, press_scale: bool = False):
         super().__init__(text, parent)
         self._radius = radius
         self._anim = None
         self._hovered = False
+        # v0.9.0: `press_scale` (the Join buttons): shrinks a little while held and
+        # springs back on release (cards.PressFeedback; micro-animations only).
+        self.press_feedback = None
+        if press_scale:
+            from .cards import PressFeedback
+            self.press_feedback = PressFeedback(self)
         self.setStyleSheet(f"QPushButton{{background:transparent;color:{fg};border:none;"
                            f"{extra}}}"
                            + (f"QPushButton:focus{{{focus}}}" if focus else ""))
@@ -74,7 +80,21 @@ class HoverButton(QPushButton):
         self._fade_to(self._base)
         super().leaveEvent(e)
 
+    def mousePressEvent(self, e):
+        super().mousePressEvent(e)
+        if self.press_feedback is not None and e.button() == Qt.MouseButton.LeftButton:
+            self.press_feedback.press()
+
+    def mouseReleaseEvent(self, e):
+        super().mouseReleaseEvent(e)        # (a click may hide or delete the window)
+        if self.press_feedback is not None and e.button() == Qt.MouseButton.LeftButton:
+            from .cards import _gone
+            if not _gone(self):
+                self.press_feedback.release()
+
     def hideEvent(self, e):
+        if self.press_feedback is not None:
+            self.press_feedback.cancel()
         motion.stop(self._anim)
         self._hovered = False
         self._bg = QColor(self._base).name()
