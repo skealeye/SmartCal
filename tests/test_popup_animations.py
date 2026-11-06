@@ -32,6 +32,20 @@ def deactivate(w):
     QApplication.sendEvent(w, QEvent(QEvent.Type.WindowDeactivate))
 
 
+def move_focus_away(qtbot) -> None:
+    """Offscreen Qt keeps a hidden window as its focus window (real Windows activates
+    another one): showing that window again then never reports it active. v0.9.1: the
+    outro hides the popup after it took focus back, so tests that reopen it hand focus
+    to a scratch window first."""
+    scratch = QWidget()
+    qtbot.addWidget(scratch)
+    scratch.show()
+    scratch.activateWindow()
+    qtbot.waitUntil(lambda: QApplication.activeWindow() is scratch)
+    scratch.hide()
+    settle_qt()
+
+
 def docked_pos(p) -> QPoint:
     g = p.docked_geometry()
     return QPoint(g.left() - placement.GAP - WIDTH, g.top())
@@ -222,6 +236,7 @@ def test_popup_hide_hides_flyout_immediately_even_mid_animation(qtbot, tmp_path,
     assert not fly.isVisible() and not fly.sliding() and not fly.closing()
     for close in ("slide-back", "focus"):
         settle_qt()
+        move_focus_away(qtbot)
         p.active_window = QApplication.activeWindow
         p.show_near_tray(TOP_TRAY)
         wait_active(qtbot, p)
@@ -237,8 +252,11 @@ def test_popup_hide_hides_flyout_immediately_even_mid_animation(qtbot, tmp_path,
             click(qtbot, rows(p)[1])
             p.active_window = lambda: None               # focus left the group
             deactivate(p)
-            qtbot.waitUntil(lambda: not p.isVisible())
-        assert not p.isVisible()
+        # v0.9.1: both play the outro (closed for everyone right away; the focus loss
+        # after one settle pass), then hide.
+        qtbot.waitUntil(lambda: p.dismissing())
+        assert not p.is_open()
+        qtbot.waitUntil(lambda: not p.isVisible())
         assert not fly.isVisible() and not fly.sliding() and not fly.closing()
     settle_qt()
     assert not fly.isVisible()                           # no orphan comes back
@@ -314,7 +332,8 @@ def test_escape_closes_flyout_with_slide_back(qtbot, tmp_path, animated):
     assert p.isVisible()
     qtbot.waitUntil(lambda: QApplication.focusWidget() is row)
     qtbot.keyClick(row, Qt.Key.Key_Escape)               # then Esc closes the popup
-    assert not p.isVisible()
+    assert not p.is_open() and p.dismissing()            # v0.9.1: with the outro
+    qtbot.waitUntil(lambda: not p.isVisible())
 
 
 def test_overlay_on_narrow_screen_appears_without_sliding(qtbot, tmp_path, animated):

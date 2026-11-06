@@ -48,6 +48,14 @@ class CardEffect(QGraphicsEffect):
     def state(self) -> tuple[float, float, float]:
         return self._opacity, self._dy, self._scale
 
+    def ensure_pad_below(self, px: int) -> None:
+        """May paint at least `px` below the widget (v0.9.1: the outro takes over an
+        effect made for a smaller offset)."""
+        pad = max(0, int(px)) + 4
+        if pad > self._pad_below:
+            self._pad_below = pad
+            self.updateBoundingRect()
+
     def set_state(self, opacity: float, dy: float, scale: float) -> None:
         opacity = motion.clamp(float(opacity), 0.0, 1.0)
         if (opacity, dy, scale) == (self._opacity, self._dy, self._scale):
@@ -233,6 +241,20 @@ class CardBuild(QObject):
         for item in self._items:
             self._release(item)
 
+    def freeze(self, keep=()) -> None:
+        """v0.9.1 (the outro starts mid-build): the timeline stops where it is. Widgets
+        in `keep` keep their effect and their current look (the outro takes them over
+        from there, no jump); every other one lands in its final state."""
+        keep_ids = {id(w) for w in keep}
+        self._over = True
+        anim, self._anim = self._anim, None
+        motion.stop(anim)
+        for item in self._items:
+            if id(item["w"]) in keep_ids and not item["done"]:
+                item["done"], item["fx"] = True, None      # handed over, untouched
+            else:
+                self._release(item)
+
     def rebind(self, widgets_by_key: dict) -> None:
         """The widgets were rebuilt (a refresh mid-build): the ones still on their way
         in carry on, at the same point of the timeline, on their new widgets. New
@@ -254,6 +276,136 @@ class CardBuild(QObject):
             item["done"] = False
             self._install(item)
         self._apply(self._elapsed)
+
+
+class CardOutro(QObject):
+    """v0.9.1: the card build in reverse. `widgets` (in the order they leave: the bottom
+    row first) fade out and drop `offset` px, `stagger` ms apart, each over `item_ms`
+    (motion.ACCEL: a quick ease-in, no overshoot). The outro has no timeline of its own:
+    the popup drives it (apply(elapsed)) together with the window's fade, so the two
+    never drift apart. A widget still building in (a CardEffect left by a frozen
+    CardBuild) leaves from where it is; a widget with any other effect is left alone.
+    restore() brings everything back into place (reopened mid-outro); release() removes
+    every effect at once (the popup hid)."""
+
+    def __init__(self, owner: QObject, offset: int, start_ms: int, stagger_ms: int,
+                 item_ms: int, cap: int = motion.OUTRO_MAX_STAGGER):
+        super().__init__(owner)
+        self.offset, self.start_ms, self.stagger_ms = offset, start_ms, stagger_ms
+        self.item_ms, self.cap = item_ms, cap
+        self._items: list[dict] = []
+        self._restore_anim = None
+        self._elapsed = 0.0
+
+    def prepare(self, widgets) -> None:
+        widgets = [w for w in widgets if not _gone(w)]
+        delays = motion.build_delays(len(widgets), self.start_ms, self.stagger_ms, self.cap)
+        for w, delay in zip(widgets, delays):
+            try:
+                fx = w.graphicsEffect()
+                if fx is None:
+                    fx = CardEffect(w, pad_below=self.offset)
+                    w.setGraphicsEffect(fx)
+                elif isinstance(fx, CardEffect):
+                    fx.ensure_pad_below(self.offset + max(0.0, fx.state()[1]))
+                else:
+                    continue                # something else animates it: leave it alone
+            except RuntimeError:
+                continue
+            self._items.append({"w": w, "fx": fx, "delay": delay, "from": fx.state()})
+
+    def widgets(self) -> list:
+        return [i["w"] for i in self._items]
+
+    def delays(self) -> list[int]:
+        return [i["delay"] for i in self._items]
+
+    def total_ms(self) -> int:
+        return motion.build_total_ms(len(self._items), self.start_ms, self.stagger_ms,
+                                     self.item_ms, self.cap)
+
+    def elapsed(self) -> float:
+        return self._elapsed
+
+    def _live(self, item) -> bool:
+        w, fx = item["w"], item["fx"]
+        if fx is None or _gone(w) or _gone(fx):
+            return False
+        try:
+            return w.graphicsEffect() is fx
+        except RuntimeError:
+            return False
+
+    def live_widgets(self) -> list:
+        return [i["w"] for i in self._items if self._live(i)]
+
+    def apply(self, elapsed: float) -> None:
+        self._elapsed = float(elapsed)
+        for item in self._items:
+            if not self._live(item):
+                continue
+            p = (elapsed - item["delay"]) / self.item_ms if self.item_ms > 0 else 1.0
+            e = motion.ease(motion.ACCEL, p)
+            op0, dy0, s0 = item["from"]
+            try:
+                item["fx"].set_state(op0 * (1.0 - e), dy0 + self.offset * e, s0)
+            except RuntimeError:
+                item["fx"] = None
+
+    def restoring(self) -> bool:
+        return motion.alive(self._restore_anim)
+
+    def restore(self, ms: int, on_done=None) -> None:
+        """Every widget from where it is back to its place (opacity 1, no offset, no
+        scale) over `ms` (FADE), then the effects go; `ms` 0: at once."""
+        motion.stop(self._restore_anim)
+        self._restore_anim = None
+        starts = [(i, i["fx"].state()) for i in self._items if self._live(i)]
+
+        def frame(t, starts=starts) -> None:
+            e = motion.ease(motion.FADE, t)
+            for item, (op, dy, s) in starts:
+                if not self._live(item):
+                    continue
+                try:
+                    item["fx"].set_state(op + (1.0 - op) * e, dy * (1.0 - e),
+                                         s + (1.0 - s) * e)
+                except RuntimeError:
+                    item["fx"] = None
+
+        def done() -> None:
+            self._restore_anim = None
+            self.release()
+            if on_done is not None:
+                on_done()
+        if not starts:
+            ms = 0
+        self._restore_anim = motion.tween(self, 0.0, 1.0, ms, frame, done,
+                                          kind=motion.LINEAR)
+
+    def freeze(self) -> list:
+        """Stop where it is (a restore interrupted by a new outro): the effects stay,
+        returned for the next outro to take over."""
+        motion.stop(self._restore_anim)
+        self._restore_anim = None
+        kept = [i["w"] for i in self._items if self._live(i)]
+        self._items = []
+        return kept
+
+    def release(self) -> None:
+        """Every widget as it is laid out, no effect (safe to repeat)."""
+        motion.stop(self._restore_anim)
+        self._restore_anim = None
+        items, self._items = self._items, []
+        for item in items:
+            w, fx = item["w"], item["fx"]
+            if fx is None or _gone(w) or _gone(fx):
+                continue
+            try:
+                if w.graphicsEffect() is fx:
+                    w.setGraphicsEffect(None)
+            except RuntimeError:
+                pass
 
 
 class PressFeedback(QObject):

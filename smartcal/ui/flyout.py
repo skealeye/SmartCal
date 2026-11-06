@@ -323,7 +323,7 @@ class DetailsFlyout(winframe.FramedWindow, QWidget):
             desc.setMinimumHeight(min(desc.fit_height(width),
                                       desc.fit_height(width, DESCRIPTION_MIN_LINES)))
             desc.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
-            desc.link_opened.connect(lambda _u: popup.hide())
+            desc.link_opened.connect(lambda _u: popup.dismiss())
             # Out of the Tab chain (Join is the only stop); links still click.
             desc.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
             lay.addWidget(desc, 1)

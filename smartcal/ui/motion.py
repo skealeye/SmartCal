@@ -179,8 +179,8 @@ LINEAR = "linear"           # raw progress (callers apply curves themselves, see
 
 
 def curve(kind: str = FADE):
-    """The easing curve for `kind`: SETTLE, GLIDE, SPRING, LINEAR, or anything else
-    (FADE)."""
+    """The easing curve for `kind`: SETTLE, GLIDE, SPRING, LINEAR, ACCEL, or anything
+    else (FADE)."""
     from PyQt6.QtCore import QEasingCurve, QPointF
     if kind == SETTLE:
         c = QEasingCurve(QEasingCurve.Type.OutBack)
@@ -193,6 +193,8 @@ def curve(kind: str = FADE):
         return c
     if kind == LINEAR:
         return QEasingCurve(QEasingCurve.Type.Linear)
+    if kind == ACCEL:
+        return QEasingCurve(QEasingCurve.Type.InQuad)
     return QEasingCurve(QEasingCurve.Type.OutCubic)
 
 
@@ -273,6 +275,43 @@ PANEL_BUILD_OFFSET_PX = 14
 PRESS_SCALE = 0.97
 PRESS_IN_MS = 90
 PRESS_OUT_MS = 260
+
+
+# -- v0.9.1: the outro (the card build in reverse) ------------------------------------
+# Dismissing the popup (focus lost, the tray icon clicked again, Esc, Join...): the rows,
+# then the next line and the header, fade out and drop OUTRO_DROP_PX (bottom row first,
+# OUTRO_STAGGER_MS apart, each OUTRO_ITEM_MS, ACCEL), while the window itself fades and
+# sinks OUTRO_SINK_PX toward the tray edge (ACCEL; clamped to the work area like the
+# opening slide) from OUTRO_WINDOW_START_MS to OUTRO_MS; then it really hides. An open
+# details panel first slides back under the popup in OUTRO_FLYOUT_MS (the window's fade
+# waits for it, so nothing ever shows through the fading popup) and hides with it.
+# SMARTCAL_ANIMATIONS=basic: only the window's fade and sink (OUTRO_BASIC_MS). Animations
+# off: the popup hides at once. Reopened (or activated again) mid-outro: everything goes
+# back into place in OUTRO_RESTORE_MS. OUTRO_SAFETY_MS: the popup is hidden by then
+# whatever happens to the animation.
+OUTRO_MS = 180
+OUTRO_BASIC_MS = 130
+OUTRO_WINDOW_START_MS = 50
+OUTRO_WINDOW_MIN_MS = 95    # the window's own fade, at least (after a panel slid back)
+OUTRO_SINK_PX = 14
+OUTRO_DROP_PX = 8
+OUTRO_STAGGER_MS = 15
+OUTRO_ITEM_MS = 100
+OUTRO_MAX_STAGGER = 6       # items past this many leave together with the 6th
+OUTRO_FLYOUT_MS = 100
+OUTRO_RESTORE_MS = 120
+OUTRO_SAFETY_MS = 400
+ACCEL = "accel"             # the outro: ease-in (InQuad), never past its end
+
+
+def outro_window_span(micro: bool, flyout_ms: int = 0) -> tuple[int, int]:
+    """When the window's fade and sink run (ms after the outro starts): (start, end).
+    It starts after an open details panel slid back (`flyout_ms`), and never runs
+    shorter than OUTRO_WINDOW_MIN_MS."""
+    start = OUTRO_WINDOW_START_MS if micro else 0
+    start = max(start, int(flyout_ms))
+    end = max(OUTRO_MS if micro else OUTRO_BASIC_MS, start + OUTRO_WINDOW_MIN_MS)
+    return start, end
 
 
 def build_delays(count: int, start: int = BUILD_START_MS, stagger: int = BUILD_STAGGER_MS,

@@ -98,6 +98,28 @@ def handle_erase(event_type, message, hex_color: str):
     return None
 
 
+WM_QUERYENDSESSION = 0x0011
+WM_ENDSESSION = 0x0016
+WM_POWERBROADCAST = 0x0218
+PBT_APMSUSPEND = 0x0004
+
+
+def message_info(event_type, message) -> tuple[int, int] | None:
+    """(message id, wParam) of a native Windows message; None for anything else or on
+    any failure. Read-only: never changes what nativeEvent answers (v0.9.1: the popup
+    notes suspend and end-of-session messages, so it hides at once then)."""
+    if sys.platform != "win32":
+        return None
+    try:
+        if bytes(event_type) != b"windows_generic_MSG" or not message:
+            return None
+        from ctypes import wintypes
+        msg = wintypes.MSG.from_address(int(message))
+        return int(msg.message), int(msg.wParam or 0)
+    except BaseException:  # noqa: BLE001
+        return None
+
+
 def native_event(event_type, message, hex_color: str) -> tuple[bool, int]:
     """The whole body of a QWidget.nativeEvent override: always a (bool, int) pair,
     never None inside it, never an exception (see the module docstring)."""

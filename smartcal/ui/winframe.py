@@ -144,6 +144,37 @@ def has_native_owner(widget) -> bool | None:
         return None
 
 
+DESKTOP_SWITCHDESKTOP = 0x0100
+
+
+def input_desktop_locked() -> bool:
+    """v0.9.1: is the input desktop out of reach (the workstation is locked, or a secure
+    desktop such as a UAC prompt is up)? False off the real Windows platform or when the
+    check itself fails (then nothing changes)."""
+    if not native_windows():
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL("user32")
+        user32.OpenInputDesktop.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        user32.OpenInputDesktop.restype = ctypes.c_void_p
+        user32.CloseDesktop.argtypes = (ctypes.c_void_p,)
+        user32.CloseDesktop.restype = wintypes.BOOL
+        user32.SwitchDesktop.argtypes = (ctypes.c_void_p,)
+        user32.SwitchDesktop.restype = wintypes.BOOL
+        desk = user32.OpenInputDesktop(0, False, DESKTOP_SWITCHDESKTOP)
+        if not desk:
+            return True
+        try:
+            # Locked: the input desktop opens, but switching to it is refused.
+            return not user32.SwitchDesktop(desk)
+        finally:
+            user32.CloseDesktop(desk)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def drop_native_owner(widget) -> None:
     """Keep the Qt parent (lifetime, focus group) but give the window no native owner:
     Qt applies a cleared transient parent when the window is next shown."""

@@ -189,8 +189,8 @@ class TrayController(QSystemTrayIcon):
 
     def toggle_popup(self) -> None:
         rect = self._tray_rect()
-        if self.popup.isVisible():
-            self.popup.hide()
+        if self.popup.is_open():
+            self.popup.dismiss()        # v0.9.1: with the outro (animations on)
         elif self.popup.recently_dismissed_by_tray_click(rect):
             # The click that deactivated (hid) the popup also reached the tray icon.
             return
@@ -201,8 +201,9 @@ class TrayController(QSystemTrayIcon):
             self.popup.show_near_tray(rect)
 
     def show_popup(self) -> None:
-        """Show the popup (never hides it); used when a second launch was refused."""
-        if self.popup.isVisible():
+        """Show the popup (never hides it); used when a second launch was refused.
+        Mid-outro it comes back (show_near_tray restores it)."""
+        if self.popup.is_open():
             self.popup.raise_()
             self.popup.activateWindow()
             return
@@ -446,6 +447,10 @@ class TrayController(QSystemTrayIcon):
 
         The single-instance lock and server are released first: a relaunch during the
         wait below must start a new copy, not hand over to this exiting one."""
+        try:
+            self.popup.shutdown()       # v0.9.1: hidden at once, never an outro now
+        except Exception:  # noqa: BLE001
+            log.exception("hiding the popup failed")
         if self._instance is not None:
             try:
                 self._instance.release()

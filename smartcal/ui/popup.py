@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 
+from PyQt6 import sip
 from PyQt6.QtCore import (QAbstractAnimation, QEvent, QParallelAnimationGroup,
                           QPoint, QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer,
                           QUrl, pyqtProperty, pyqtSignal)
@@ -111,6 +112,21 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         self.show_start_fallback.setSingleShot(True)
         self.show_start_fallback.setInterval(motion.SHOW_START_FALLBACK_MS)
         self.show_start_fallback.timeout.connect(self._start_show_animation)
+        # v0.9.1: the outro (see dismiss()). While it runs the popup is still on screen
+        # but logically closed (is_open() False, dismissing() True).
+        self._outro: dict | None = None
+        self._restore_cards: cards.CardOutro | None = None   # coming back into place
+        self._finishing_outro = False
+        self._restore_window = False        # the opening slide/fade is a restore's
+        self._refresh_deferred = False     # a refresh during the outro runs after it
+        self._quitting = False
+        self._interrupt_seen_at = -1e9      # suspend / end of session seen (clock())
+        # Injectable: is Windows locking, suspending or ending the session right now?
+        self.session_interrupted = self._os_session_interrupted
+        self.outro_safety = QTimer(self)
+        self.outro_safety.setSingleShot(True)
+        self.outro_safety.setInterval(motion.OUTRO_SAFETY_MS)
+        self.outro_safety.timeout.connect(self._finish_outro)
         self.last_hidden_at = -1e9
         self.last_hidden_cursor = QPoint()
         self._anchored = False
@@ -258,6 +274,8 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
     def handle_escape(self) -> None:
         """The one place Esc is decided (rows, the flyout, the chat and the popup all end
         up here): close the details flyout, else collapse the chat, else close the popup."""
+        if self.dismissing():
+            return                      # already on its way out
         if self.flyout_open():
             in_chat = self._chat is not None and self._chat.isAncestorOf(
                 QApplication.focusWidget())
@@ -265,7 +283,7 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         elif self.chat_expanded():
             self._collapse_chat()
         else:
-            self.hide()
+            self.dismiss()
 
     def toggle_chat(self) -> None:
         if self._chat_factory is None:
@@ -364,7 +382,13 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
     def refresh(self, now: datetime | None = None, fade_in_new: bool = False) -> None:
         """Rebuild the list from the cache. `fade_in_new` (user actions only: Undo, a
         restore or an account shown again from the tray): rows that were not there
-        before fade in. The 30 s tick and syncs never pass it."""
+        before fade in. The 30 s tick and syncs never pass it.
+        v0.9.1: during the outro (or while coming back from it) the rows are leaving
+        (or returning) through their effects: the refresh runs right after that."""
+        if self.dismissing() or self._restore_cards is not None:
+            self._refresh_deferred = True
+            return
+        self._refresh_deferred = False
         self._finish_collapse()        # a hide collapsing its rows: done now
         before = {_row_key(r.event) for r in self.row_widgets()
                   if isinstance(r, AgendaRow)} if fade_in_new else None
@@ -495,7 +519,7 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
 
     def _can_tween(self) -> bool:
         return (self.isVisible() and self._anchored and not self.showing_animated()
-                and motion.micro_enabled())
+                and not self.dismissing() and motion.micro_enabled())
 
     def _resize(self, animate: bool = True) -> None:
         """Cap the list height (header/footer stay visible), then re-anchor if shown.
@@ -526,8 +550,8 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         edge bounce); newly exposed pixels are painted in the same frame. The details
         panel follows once."""
         size = QSize(WIDTH, int(h))
-        if not (self.isVisible() and self._anchored):
-            self.resize(size)
+        if not (self.isVisible() and self._anchored) or self.dismissing():
+            self.resize(size)           # (the outro owns the position)
             return
         # v0.9.0: never smaller than the layout's minimum for this width. Windows asks
         # Qt before every geometry change, and Qt enlarges anything below that minimum
@@ -894,7 +918,7 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
     def _join(self, url: str) -> None:
         if safe_http_url(url) is not None:
             QDesktopServices.openUrl(QUrl(url))
-            self.hide()
+            self.dismiss()
 
     # -- selection + details flyout ----------------------------------------------
     def flyout(self):
@@ -925,7 +949,7 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         self.select_row(row, keyboard)
 
     def select_row(self, row: "AgendaRow", keyboard: bool = False) -> None:
-        if not self.isVisible():
+        if not self.is_open():
             return                      # the flyout never outlives (or precedes) the popup
         self._selected_key = _row_key(row.event)
         for r in self.row_widgets():
@@ -959,14 +983,17 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
             fly.restack()               # activation put it on top: back under the popup
             fly.focus_first()
 
-    def close_flyout(self, restore_focus: bool = True, animate: bool = True) -> None:
+    def close_flyout(self, restore_focus: bool = True, animate: bool = True,
+                     ms: int | None = None) -> None:
         """Close the details and clear the selection. If the flyout had focus, the popup
         takes it back right after (so activation never stays with some other app's
         window), and the formerly selected row gets keyboard focus.
         The panel slides back behind the popup and hides when that finishes (at once
         when animations are off, the popup is hidden, or `animate` is False). Hidden at
         once: the flyout's own deactivation then no longer counts for the group; sliding
-        back: the reclaim grace starts first, so its deactivation is not a focus loss."""
+        back: the reclaim grace starts first, so its deactivation is not a focus loss.
+        `ms`: the slide's length (default motion.FLYOUT_CLOSE_MS). v0.9.1: during the
+        outro (the group is closing) focus is never taken back."""
         row = self.selected_row()
         self._selected_key = None
         for r in self.row_widgets():
@@ -975,24 +1002,26 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         fly = self._flyout
         if fly is None or fly.isHidden():
             return
-        ms = motion.duration(motion.FLYOUT_CLOSE_MS) \
+        length = motion.FLYOUT_CLOSE_MS if ms is None else ms
+        ms = motion.duration(length) \
             if animate and self.isVisible() and self.flyout_side != "over" else 0
         if fly.closing():
             if not ms:
                 fly.hide_now()          # already sliding back: the popup went away
             return
         active = self.active_window()
-        reclaim = active is fly or (restore_focus and active is not self)
-        if ms and reclaim and self.isVisible():
+        is_open = self.is_open()
+        reclaim = is_open and (active is fly or (restore_focus and active is not self))
+        if ms and reclaim:
             self.reclaim_check.start()
         fly.slide_close(ms)             # ms 0: hidden now
-        if reclaim and self.isVisible():
+        if reclaim and self.is_open():
             self.raise_()
             self.activateWindow()
             # If Windows refuses the activation (foreground lock), the popup would stay
             # up inactive with no WindowDeactivate ever to come: check shortly.
             self.reclaim_check.start()
-        if restore_focus and self.isVisible():
+        if restore_focus and self.is_open():
             (row or self).setFocus()
 
     def _flyout_slid_back(self, was_active: bool) -> None:
@@ -1001,7 +1030,7 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         the reclaim check starts over, even if one was already running: that one may
         have been started before the panel took focus again (RECLAIM_CHECK_MS is longer
         than the slide), and nothing else would ask for the popup's activation."""
-        if was_active and self.isVisible():
+        if was_active and self.is_open():
             self.raise_()
             self.activateWindow()
             self.reclaim_check.start()
@@ -1107,7 +1136,7 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
     def show_row_menu(self, row: "AgendaRow", global_pos: QPoint) -> None:
         """Right-click on a row: Hide / Hide series / Color ▸ / Color style ▸. Never
         selects the row."""
-        if not self.isVisible():
+        if not self.is_open():
             return
         ev = row.event
         self._open_menu(meeting_menus.context_menu(
@@ -1142,8 +1171,8 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
 
     def _settle(self) -> None:
         self._settle_pending = False
-        if not self.isVisible():
-            return
+        if not self.is_open():
+            return                      # hidden, or already on its way out (outro)
         if self.reclaim_check.isActive():
             # Focus is on its way back from the flyout (Esc, a hide): for a moment no
             # window is reported active. The reclaim check settles when the grace ends.
@@ -1159,7 +1188,7 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
             self.activateWindow()
             return
         if active is None or not self.app_active() or not self._is_group_window(active):
-            self.hide()                 # hides the flyout too
+            self.dismiss()              # hides the flyout too
             return
         if self._foreground_state() is False and self._seen_foreground:
             return                      # another app has the foreground: don't push in;
@@ -1295,6 +1324,12 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
     def show_near_tray(self, tray_geometry) -> None:
         self._tray_geom = QRect(tray_geometry)
         self._anchored = True
+        if self.dismissing():
+            # v0.9.1: reopened mid-outro: everything goes back into place from where it
+            # is (no replayed opening, no jump).
+            self._restore_outro()
+            return
+        self._restore_window = False
         was_visible = self.isVisible()
         # Styled before measuring: the very first open measures (and places) exactly
         # like every later one.
@@ -1373,13 +1408,31 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
             self._group_deactivated(self)
         elif e.type() == QEvent.Type.WindowActivate:
             self.note_foreground()
+            if self.dismissing() and not self._outro["was_active"]:
+                # Clicked (activated) again mid-outro, after focus had left: it stays.
+                self._restore_outro()
         elif e.type() == QEvent.Type.Paint and self._show_pending:
             self._first_frame_painted()
         return super().event(e)
 
     def nativeEvent(self, event_type, message):
         # Never the base class's nativeEvent: its (False, None) crashes Qt (see nativebg).
+        # v0.9.1: suspend / end-of-session messages are noted (no outro then); nothing
+        # in that note can change what is returned.
+        try:
+            self._note_native_message(event_type, message)
+        except BaseException:  # noqa: BLE001 - nothing may escape into the window procedure
+            pass
         return nativebg.native_event(event_type, message, theme.BG)
+
+    def _note_native_message(self, event_type, message) -> None:
+        info = nativebg.message_info(event_type, message)
+        if info is None:
+            return
+        msg, wparam = info
+        if ((msg == nativebg.WM_POWERBROADCAST and wparam == nativebg.PBT_APMSUSPEND)
+                or msg in (nativebg.WM_QUERYENDSESSION, nativebg.WM_ENDSESSION)):
+            self._interrupt_seen_at = self.clock()
 
     def paintEvent(self, e):
         super().paintEvent(e)
@@ -1395,8 +1448,8 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         """`source` (the popup or the flyout) lost activation. The group stays open if
         the other group window took it, or a menu/modal box of the group is up;
         otherwise it closes (popup and flyout)."""
-        if not self.isVisible():
-            return
+        if not self.is_open():
+            return                      # hidden, or already on its way out (outro)
         if self.reclaim_check.isActive():
             return                      # focus is being reclaimed from the flyout: the
                                         # reclaim check decides when the grace ends
@@ -1420,7 +1473,7 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
             # the group closes only if neither of its windows is active then.
             self._settle_after_close()
         else:
-            self.hide()
+            self.dismiss()
 
     def _is_group_window(self, w) -> bool:
         return w is self or (w is not None and w is self._flyout and self._flyout_shown())
@@ -1471,6 +1524,8 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         if not self.isVisible():
             self.watchdog.stop()
             return
+        if self.dismissing():
+            return                      # the outro hides it (its safety timer at worst)
         if self.reclaim_check.isActive():
             return                      # the next tick looks again
         if self._group_menu_or_modal_open():
@@ -1493,7 +1548,7 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
             if not self._logged_foreground_close:
                 self._logged_foreground_close = True
                 log.info("foreground check closed the popup")
-            self.hide()                 # hides the flyout too
+            self.dismiss()              # hides the flyout too
 
     def _group_menu_or_modal_open(self) -> bool:
         return self.active_modal() is not None or meeting_menus.is_open(self._menu) \
@@ -1535,9 +1590,11 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         self._seen_foreground = False
         self.watchdog.stop()
         self.reclaim_check.stop()
-        self._stop_show_animation()
-        self.last_hidden_at = self.clock()
-        self.last_hidden_cursor = self.cursor_pos()
+        outro = self._finishing_outro
+        self._end_outro()               # v0.9.1: no outro timeline, timer or effect left
+        self._stop_show_animation()     # (opaque again for the next opening)
+        if not outro:                   # the outro noted when it was dismissed
+            self._note_dismissed()
         # Never outlives the popup: hidden at once, even mid-slide.
         self.close_flyout(restore_focus=False, animate=False)
         # Every animation stops; everything jumps to its final state (no handler runs
@@ -1556,6 +1613,283 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         self._end_all_reveals()
         self._notice_box.hide()
         super().hideEvent(e)
+        if self._refresh_deferred:      # a refresh asked for during the outro
+            self.refresh()
+
+    # -- v0.9.1: the outro ----------------------------------------------------------------
+    def is_open(self) -> bool:
+        """Shown and not on its way out: what the tray toggle, the single-instance path,
+        the 30 s tick and the focus-group logic ask. False during the outro (the popup
+        is still on screen, but closed for everyone)."""
+        return self.isVisible() and self._outro is None
+
+    def dismissing(self) -> bool:
+        """The outro is running (the popup is closing; reopening it brings it back)."""
+        return self._outro is not None
+
+    def outro(self) -> dict | None:
+        """The running outro (tests): its timeline ("anim"), "cards" (CardOutro or
+        None), "span" (the window's fade: start, end ms), "total" ms."""
+        return self._outro
+
+    def restoring(self) -> bool:
+        """Coming back into place after being reopened mid-outro."""
+        return self._restore_cards is not None or (
+            self._restore_window and self._outro is None
+            and self._show_anim.state() == QAbstractAnimation.State.Running)
+
+    def shutdown(self) -> None:
+        """The app quits: never an outro again; a running one ends and the popup hides
+        at once."""
+        self._quitting = True
+        if self.isVisible():
+            self.hide()
+
+    def _note_dismissed(self) -> None:
+        self.last_hidden_at = self.clock()
+        self.last_hidden_cursor = self.cursor_pos()
+
+    def _outro_allowed(self) -> bool:
+        if self._quitting or not motion.animations_enabled():
+            return False
+        app = QApplication.instance()
+        if app is None or app.closingDown():
+            return False
+        try:
+            return not self.session_interrupted()
+        except Exception:  # noqa: BLE001 - unknown: no outro, hide as before
+            return False
+
+    def _os_session_interrupted(self) -> bool:
+        """Windows is suspending or ending the session (seen in the last few seconds),
+        or the workstation is locked (the input desktop is not ours). Offscreen and on
+        other systems: only the noted messages count."""
+        if self.clock() - self._interrupt_seen_at < 10.0:
+            return True
+        if not winframe.native_windows():
+            return False
+        return winframe.input_desktop_locked()
+
+    def dismiss(self) -> None:
+        """Close the popup the way the owner closes it (focus lost, the tray icon, Esc,
+        Join, a link): with the animations on, the outro (the card build in reverse,
+        motion.OUTRO_*), then the real hide; else at once, exactly like hide(). Never
+        on quit, while Windows locks, suspends or ends the session, or twice. hide()
+        itself always hides at once (tests, the app's own code paths)."""
+        if not self.isVisible() or self.dismissing():
+            return
+        if not self._outro_allowed():
+            self.hide()
+            return
+        self._start_outro()
+
+    def _outro_widgets(self) -> list:
+        """What leaves, in order: the rows in view from the bottom up, then the next
+        line and the header."""
+        view = self._scroll.viewport()
+        rows = []
+        if not self._scroll.isHidden():
+            for r in self.row_widgets():
+                if not isinstance(r, AgendaRow) or r.isHidden():
+                    continue
+                try:
+                    top_left = r.mapTo(view, QPoint(0, 0))
+                except RuntimeError:
+                    continue
+                if QRect(top_left, r.size()).intersects(view.rect()):
+                    rows.append(r)
+        heads = [w for w in (self._header, self._next) if not w.isHidden()]
+        return list(reversed(rows)) + list(reversed(heads))
+
+    def _start_outro(self) -> None:
+        active = self.active_window()
+        was_active = active is self or (active is not None and active is self._flyout)
+        self._note_dismissed()          # the tray click that caused it is not a reopen
+        self.watchdog.stop()
+        self.reclaim_check.stop()
+        self._stop_tween()              # (a collapse's follow-up refresh runs now)
+        for a in self._fade_anims:
+            motion.stop(a)
+        self._fade_anims = []
+        micro = motion.micro_enabled()
+        for r in self.row_widgets():
+            if isinstance(r, AgendaRow):
+                r.press_feedback.cancel()
+                if isinstance(r.graphicsEffect(), QGraphicsOpacityEffect):
+                    r.setGraphicsEffect(None)       # a fade-in: in place now
+        # A restore still running (reopened, then dismissed again): it stops where it
+        # is; so does an opening (closed mid-intro): the window's slide and fade and the
+        # card build. Everything leaves from where it is.
+        returning = self._restore_cards.freeze() if self._restore_cards is not None else []
+        if self._restore_cards is not None:
+            self._restore_cards.deleteLater()
+            self._restore_cards = None
+        self._show_pending = False
+        self.show_start_fallback.stop()
+        self._show_anim.stop()
+        leaving = self._outro_widgets() if micro else []
+        for b in (self._header_build, self._rows_build):
+            if b is not None:
+                b.freeze(keep=leaving)
+                b.deleteLater()
+        self._header_build = self._rows_build = None
+        if not micro:
+            for w in returning:                     # (basic mode never has any)
+                try:
+                    w.setGraphicsEffect(None)
+                except RuntimeError:
+                    pass
+        cards_out = None
+        if leaving:
+            cards_out = cards.CardOutro(self, motion.OUTRO_DROP_PX, 0,
+                                        motion.OUTRO_STAGGER_MS, motion.OUTRO_ITEM_MS)
+            cards_out.prepare(leaving)
+        # Widgets that came back partway but are not leaving (scrolled out of view):
+        # in place.
+        kept = {id(w) for w in (cards_out.live_widgets() if cards_out else [])}
+        for w in returning:
+            if id(w) not in kept and not cards._gone(w):
+                if isinstance(w.graphicsEffect(), cards.CardEffect):
+                    w.setGraphicsEffect(None)
+        # An open details panel slides back under the (still opaque) popup first.
+        fly = self._flyout
+        fly_shown = self._flyout_shown()
+        fly_ms = motion.OUTRO_FLYOUT_MS if fly_shown and self.flyout_side != "over" else 0
+        span = motion.outro_window_span(micro, fly_ms)
+        total = max(span[1], cards_out.total_ms() if cards_out else 0)
+        docked = self.docked_geometry().topLeft() if self._anchored else self.pos()
+        area = self._area()
+        edge = motion.tray_edge(self._tray_geom, area)
+        target = docked + motion.slide_in_offset(edge, motion.OUTRO_SINK_PX)
+        if self._anchored:
+            target = motion.clamp_to_area(target, self.size(), area)
+        self._outro = {"anim": None, "cards": cards_out, "span": span, "total": total,
+                       "from_pos": self.pos(), "to_pos": target,
+                       "from_opacity": self.windowOpacity(), "was_active": was_active,
+                       "flyout_ms": fly_ms}
+        # (Closing for everyone from here on: the panel never hands focus back.)
+        if fly_shown and not fly_ms:
+            self.close_flyout(restore_focus=False, animate=False)  # over the popup
+        elif fly_ms:
+            if fly.closing():
+                fly.slide_close(fly_ms)     # already sliding back: in the outro's time
+            else:
+                self.close_flyout(restore_focus=False, ms=fly_ms)
+        self.outro_safety.start()
+        o = self._outro
+        self._outro_frame(o, 0.0)
+        if self._outro is not o:
+            return
+        o["anim"] = motion.tween(self, 0.0, float(total), total,
+                                 lambda v, x=o: self._outro_frame(x, v),
+                                 lambda x=o: self._outro_done(x), kind=motion.LINEAR)
+
+    def _outro_frame(self, o, elapsed) -> None:
+        if self._outro is not o or sip.isdeleted(self):
+            return
+        elapsed = float(elapsed)
+        if o["cards"] is not None:
+            o["cards"].apply(elapsed)
+        start, end = o["span"]
+        if elapsed < start:
+            return
+        fly = self._flyout
+        if fly is not None and not fly.isHidden():
+            fly.hide_now()              # (tucked under the opaque popup by now)
+        q = (elapsed - start) / (end - start) if end > start else 1.0
+        e = motion.ease(motion.ACCEL, q)
+        op = motion.clamp(o["from_opacity"] * (1.0 - e), 0.0, 1.0)
+        if abs(self.windowOpacity() - op) > 1e-4:
+            self.setWindowOpacity(op)
+        a, b = o["from_pos"], o["to_pos"]
+        pos = QPoint(round(a.x() + (b.x() - a.x()) * e), round(a.y() + (b.y() - a.y()) * e))
+        if pos != self.pos():
+            self.move(pos)
+
+    def _outro_done(self, o) -> None:
+        if self._outro is o:
+            self._finish_outro()
+
+    def _finish_outro(self) -> None:
+        """The outro is over (or its safety timer fired): the real hide."""
+        if self._outro is None or sip.isdeleted(self):
+            return
+        self._finishing_outro = True
+        try:
+            self.hide()                 # hideEvent ends the outro (_end_outro)
+        finally:
+            self._finishing_outro = False
+        if self._outro is not None:     # (hide() did nothing: never hidden)
+            self._end_outro()
+
+    def _end_outro(self) -> None:
+        """No outro or restore left: no timeline, no timer, no effect (safe to repeat).
+        The window's opacity is restored by _stop_show_animation (hidden by then)."""
+        self.outro_safety.stop()
+        o, self._outro = self._outro, None
+        if o is not None:
+            motion.stop(o["anim"])
+            if o["cards"] is not None:
+                o["cards"].release()
+                o["cards"].deleteLater()
+        rc, self._restore_cards = self._restore_cards, None
+        if rc is not None:
+            rc.release()
+            rc.deleteLater()
+        for w in [self._header, self._next] + self.row_widgets():
+            try:
+                if isinstance(w.graphicsEffect(), cards.CardEffect):
+                    w.setGraphicsEffect(None)
+            except RuntimeError:
+                pass
+
+    def _restore_outro(self) -> None:
+        """Reopened (the tray icon, a second launch) or activated again mid-outro: it
+        stays. The rows and the window go back into place from where they are
+        (motion.OUTRO_RESTORE_MS), the popup is open again at once."""
+        o = self._outro
+        if o is None:
+            return
+        self._outro = None
+        self.outro_safety.stop()
+        motion.stop(o["anim"])
+        self._restore_window = False
+        # The panel: still sliding back, it carries on and hides (the selection goes).
+        self.close_flyout(restore_focus=False)
+        ms = motion.duration(motion.OUTRO_RESTORE_MS)
+        docked = self.docked_geometry().topLeft() if self._anchored else self.pos()
+        if ms and (self.pos() != docked or self.windowOpacity() < 1.0):
+            self._show_slide.setDuration(ms)
+            self._show_slide.setStartValue(self.pos())
+            self._show_slide.setEndValue(docked)
+            self._show_fade.setDuration(ms)
+            self._show_fade.setStartValue(self.windowOpacity())
+            self._show_fade.setEndValue(1.0)
+            self._restore_window = True
+            self._show_anim.start()
+        else:
+            self.move(docked)
+            if self.windowOpacity() != 1.0:
+                self.setWindowOpacity(1.0)
+        cards_out = o["cards"]
+        if cards_out is not None:
+            self._restore_cards = cards_out
+            cards_out.restore(motion.micro_duration(motion.OUTRO_RESTORE_MS),
+                              lambda c=cards_out: self._restored(c))
+        else:
+            self._restored(None)
+        self.watchdog.start()
+        self.raise_()
+        self.activateWindow()
+
+    def _restored(self, c) -> None:
+        if c is not None:
+            if self._restore_cards is not c:
+                return
+            self._restore_cards = None
+            c.deleteLater()
+        if self._refresh_deferred and self.is_open():
+            self.refresh()
 
     def recently_dismissed_by_tray_click(self, tray: QRect | None, within: float = 0.6) -> bool:
         """True if the popup just hid because this very click deactivated it."""

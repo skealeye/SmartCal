@@ -79,7 +79,7 @@ def main() -> int:
 
     @guarded
     def open_window(view: str) -> None:
-        popup.hide()
+        popup.dismiss()
         window.show_view(view)
 
     popup.view_requested.connect(open_window)
@@ -209,7 +209,7 @@ def main() -> int:
     def tick() -> None:
         tray.update_tooltip()
         popup.prune_accounts(list_accounts())
-        if popup.isVisible():
+        if popup.is_open():
             popup.refresh()
 
     timer.timeout.connect(tick)
@@ -223,6 +223,8 @@ def main() -> int:
     QTimer.singleShot(2000, guarded(notifier.check))
     QTimer.singleShot(2000, guarded(reminder_firer.check))
 
+    # v0.9.1: quitting (any way, e.g. Windows ending the session) never plays the outro.
+    app.aboutToQuit.connect(popup.shutdown)
     worker.start()
     code = app.exec()
     instance.release()
