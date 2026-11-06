@@ -325,6 +325,56 @@ DRAWER_BUILD_OFFSET_PX = 14
 DRAWER_BUILD_SCALE = 0.96
 
 
+# -- v0.11.0: the Day / Week / Month window ------------------------------------------------
+# Everything moves CHILD widgets inside the (normal, framed, opaque) window; the window
+# itself opens and closes the Windows way. Opening it (shown from hidden): the toolbar
+# fades in and rises WIN_TOOLBAR_OFFSET_PX, then the day headers, then the meeting tiles
+# build in like the popup's cards (from WIN_TILE_OFFSET_PX lower at WIN_TILE_SCALE,
+# springing up) in order of start time, WIN_TILE_STAGGER_MS apart; a long build squeezes
+# its stagger so the last tile starts at most WIN_TILE_SPAN_MS after the first.
+# Switching Day / Week / Month or going to the previous / next period: the old content
+# (a snapshot) slides WIN_SWITCH_SLIDE_PX / WIN_NAV_SLIDE_PX away and fades out over
+# WIN_SWITCH_MS / WIN_NAV_MS while the new tiles (month: day cells) come in from the
+# other side with a quick stagger. The slide-and-fade follows animations_enabled()
+# (SMARTCAL_ANIMATIONS=basic keeps it); the builds, hover and press are micro-animations.
+# The current-time line glides to its new place (WIN_NOW_MS) on the minute tick.
+WIN_TOOLBAR_MS = 260
+WIN_TOOLBAR_OFFSET_PX = 8
+WIN_HEADER_START_MS = 50
+WIN_HEADER_STAGGER_MS = 15
+WIN_HEADER_MS = 260
+WIN_HEADER_OFFSET_PX = 6
+WIN_TILE_START_MS = 110
+WIN_TILE_STAGGER_MS = 25
+WIN_TILE_SPAN_MS = 300
+WIN_TILE_MS = 340
+WIN_TILE_OFFSET_PX = 12
+WIN_TILE_SCALE = 0.96
+WIN_NAV_MS = 200
+WIN_NAV_SLIDE_PX = 24
+WIN_SWITCH_MS = 240
+WIN_SWITCH_SLIDE_PX = 24
+WIN_REBUILD_START_MS = 30   # the new tiles after a switch / step
+WIN_REBUILD_STAGGER_MS = 12
+WIN_REBUILD_SPAN_MS = 120
+WIN_REBUILD_MS = 260
+WIN_SWITCH_SCALE = 0.98
+WIN_NOW_MS = 400
+WIN_REVEAL_MS = 120         # the window fading in once its first frame is painted
+WIN_DETAILS_START_MS = 60   # the details dialog's lines (PANEL_BUILD_* otherwise)
+
+
+def spread_delays(count: int, start: int, stagger: int, max_span: int) -> list[int]:
+    """When each of `count` items starts (ms): `start`, then `stagger` apart, but never
+    more than `max_span` from the first to the last (a long list staggers faster)."""
+    if count <= 0:
+        return []
+    step = float(stagger)
+    if count > 1 and step * (count - 1) > max_span:
+        step = max_span / (count - 1)
+    return [start + int(round(i * step)) for i in range(count)]
+
+
 def outro_window_span(micro: bool, flyout_ms: int = 0) -> tuple[int, int]:
     """When the window's fade and sink run (ms after the outro starts): (start, end).
     It starts after an open details panel slid back (`flyout_ms`), and never runs

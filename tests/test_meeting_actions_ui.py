@@ -416,7 +416,8 @@ def test_effective_color_used_in_popup_and_window(qtbot, tmp_path):
     assert "#f6c445" in stripes[0] and "#b36ad6" in stripes[1] and "#4285f4" in stripes[2]
     w = make_window(qtbot, tmp_path, [], cache=cache, settings=settings)
     chips = {c.event.id: c for col in w.time_view.columns for c in col.chips}
-    assert chips["1"].color == "#b36ad6" and "#b36ad6" in chips["1"].styleSheet()
+    # v0.11.0: tiles are painted; the stripe (Side stripe style) is the meeting's color
+    assert chips["1"].color == "#b36ad6" and chips["1"].colors()[3] == "#b36ad6"
     assert chips["2"].color == "#4285f4"
     assert w.time_view.allday_chips[0].color == "#f6c445"
     w.set_view("month")

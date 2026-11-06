@@ -15,7 +15,9 @@ from ..models import Event
 # Python weekday number of the first day of the week (6 = Sunday, US convention).
 WEEK_START = 6
 MAX_CHIPS = 3        # events shown per month cell before "+N more"
-MIN_BLOCK_MIN = 20   # shortest block drawn on a timeline, in minutes
+# Shortest block drawn on a timeline, in minutes (v0.11.0: 24, with the window's 60 px
+# hour a 15-minute meeting is still tall enough for one readable line of title).
+MIN_BLOCK_MIN = 24
 DAY_MIN = 24 * 60
 
 

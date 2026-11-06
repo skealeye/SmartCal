@@ -53,8 +53,12 @@ def test_month_view_more_and_dimmed_and_today(qtbot, tmp_path):
     evs.append(ev("ad", "Holiday", datetime(2026, 11, 4, tzinfo=NY), datetime(2026, 11, 5, tzinfo=NY), True))
     w = make(qtbot, tmp_path, evs, "month")
     cell = w.month_view.cells[date(2026, 11, 4)]
-    assert len(cell.chips) == 3 and cell.chips[0].text() == "Holiday"
-    assert cell.more_label.text() == "+3 more"
+    # v0.11.0: as many as fit, then "+N more" (one row) for the rest.
+    shown = len(cell.chips)
+    assert shown >= 2 and cell.chips[0].text() == "Holiday"
+    assert cell.more_label.text() == f"+{6 - shown} more" and cell.more_label.isVisible()
+    row = window_mod.CHIP_H + window_mod.CHIP_GAP
+    assert window_mod.CELL_NUMBER_H + (shown + 1) * row <= cell.height() + window_mod.CHIP_GAP
     assert w.month_view.cells[date(2026, 12, 1)].dimmed
     assert not cell.dimmed
     assert w.title_label.text() == "Nov 2026"
@@ -107,7 +111,8 @@ def test_day_view_all_day_strip_and_navigation(qtbot, tmp_path):
 
 def test_day_view_scrolls_to_current_hour_on_today(qtbot, tmp_path):
     w = make(qtbot, tmp_path, [], "day")
-    qtbot.waitUntil(lambda: w.time_view.scroll_value() == 8 * 48, timeout=2000)
+    want = 8 * window_mod.HOUR_H - window_mod.SCROLL_HEADROOM
+    qtbot.waitUntil(lambda: w.time_view.scroll_value() == want, timeout=2000)
 
 
 def test_click_event_shows_details(qtbot, tmp_path):
@@ -186,7 +191,8 @@ def test_tooltip_title_is_not_rich_text(qtbot, tmp_path):
     assert "&lt;b&gt;x&lt;/b&gt;" in tip and "<b>" not in tip
     doc = QTextDocument()
     doc.setHtml(tip)
-    assert doc.toPlainText().strip() == "<b>x</b>"
+    # v0.11.0: the title, then the time (and the location, if any), one per line
+    assert doc.toPlainText().strip().splitlines()[0] == "<b>x</b>"
     qtbot.mouseClick(w.time_view.columns[3].chips[0], Qt.MouseButton.LeftButton)
     assert "<i>" not in w.details.link_label.toolTip()
 

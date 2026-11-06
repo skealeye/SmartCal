@@ -35,18 +35,24 @@ def _gone(obj) -> bool:
 
 
 class CardEffect(QGraphicsEffect):
-    """Paints its widget offset by `dy` px, scaled by `scale` around its center and at
-    `opacity`. At (1.0, 0, 1.0) it draws the widget as is."""
+    """Paints its widget offset by `dy` px (and v0.11.0: `dx` px sideways), scaled by
+    `scale` around its center and at `opacity`. At (1.0, 0, 1.0, dx 0) it draws the
+    widget as is."""
 
-    def __init__(self, parent=None, pad_below: int = 0):
+    def __init__(self, parent=None, pad_below: int = 0, pad_x: int = 0):
         super().__init__(parent)
-        self._opacity, self._dy, self._scale = 1.0, 0.0, 1.0
+        self._opacity, self._dy, self._scale, self._dx = 1.0, 0.0, 1.0, 0.0
         # The area it may paint: the widget's rect, plus below it (the offset) and a few
-        # px around it (an overshoot above it, a scale past 1).
+        # px around it (an overshoot above it, a scale past 1; v0.11.0: a sideways
+        # offset of up to pad_x on either side).
         self._pad_below = max(0, int(pad_below)) + 4
+        self._pad_x = max(0, int(pad_x))
 
     def state(self) -> tuple[float, float, float]:
         return self._opacity, self._dy, self._scale
+
+    def dx(self) -> float:
+        return self._dx
 
     def ensure_pad_below(self, px: int) -> None:
         """May paint at least `px` below the widget (v0.9.1: the outro takes over an
@@ -56,23 +62,24 @@ class CardEffect(QGraphicsEffect):
             self._pad_below = pad
             self.updateBoundingRect()
 
-    def set_state(self, opacity: float, dy: float, scale: float) -> None:
+    def set_state(self, opacity: float, dy: float, scale: float, dx: float = 0.0) -> None:
         opacity = motion.clamp(float(opacity), 0.0, 1.0)
-        if (opacity, dy, scale) == (self._opacity, self._dy, self._scale):
+        if (opacity, dy, scale, dx) == (self._opacity, self._dy, self._scale, self._dx):
             return
         self._opacity, self._dy, self._scale = opacity, float(dy), float(scale)
+        self._dx = float(dx)
         self.update()
 
     def boundingRectFor(self, rect: QRectF) -> QRectF:
-        grow = max(4.0, rect.width() * 0.03)
+        grow = max(4.0, rect.width() * 0.03) + self._pad_x
         return rect.adjusted(-grow, -6.0, grow, float(self._pad_below))
 
     def draw(self, painter: QPainter) -> None:
         try:
-            op, dy, s = self._opacity, self._dy, self._scale
+            op, dy, s, dx = self._opacity, self._dy, self._scale, self._dx
             if op <= 0.0:
                 return
-            if op >= 1.0 and dy == 0.0 and s == 1.0:
+            if op >= 1.0 and dy == 0.0 and s == 1.0 and dx == 0.0:
                 self.drawSource(painter)
                 return
             pm, offset = self.sourcePixmap(Qt.CoordinateSystem.LogicalCoordinates,
@@ -82,7 +89,7 @@ class CardEffect(QGraphicsEffect):
             src = self.sourceBoundingRect(Qt.CoordinateSystem.LogicalCoordinates)
             c = src.center()
             t = QTransform()
-            t.translate(c.x(), c.y() + dy)
+            t.translate(c.x() + dx, c.y() + dy)
             t.scale(s, s)
             t.translate(-c.x(), -c.y())
             painter.save()
@@ -105,11 +112,16 @@ class CardBuild(QObject):
     running build over to rebuilt widgets, see rebind)."""
 
     def __init__(self, owner: QObject, offset: int, scale_start: float, start_ms: int,
-                 stagger_ms: int, item_ms: int, cap: int = motion.BUILD_MAX_STAGGER):
+                 stagger_ms: int, item_ms: int, cap: int = motion.BUILD_MAX_STAGGER,
+                 offset_x: int = 0, max_span_ms: int | None = None):
         super().__init__(owner)
         self.offset, self.scale_start = offset, scale_start
         self.start_ms, self.stagger_ms, self.item_ms, self.cap = (start_ms, stagger_ms,
                                                                   item_ms, cap)
+        # v0.11.0 (the calendar window): items may also come in sideways (offset_x px,
+        # to the right when positive), and a long build can squeeze its stagger so the
+        # last item starts at most max_span_ms after the first (motion.spread_delays).
+        self.offset_x, self.max_span_ms = offset_x, max_span_ms
         self._items: list[dict] = []
         self._anim = None
         self._elapsed = 0.0
@@ -120,7 +132,12 @@ class CardBuild(QObject):
     def prepare(self, widgets, keys=None) -> None:
         widgets = list(widgets)
         keys = list(keys) if keys is not None else [None] * len(widgets)
-        delays = motion.build_delays(len(widgets), self.start_ms, self.stagger_ms, self.cap)
+        if self.max_span_ms is not None:
+            delays = motion.spread_delays(len(widgets), self.start_ms, self.stagger_ms,
+                                          self.max_span_ms)
+        else:
+            delays = motion.build_delays(len(widgets), self.start_ms, self.stagger_ms,
+                                         self.cap)
         for w, key, delay in zip(widgets, keys, delays):
             item = {"w": w, "key": key, "delay": delay, "fx": None, "done": False}
             self._items.append(item)
@@ -132,7 +149,7 @@ class CardBuild(QObject):
         if _gone(w) or w.graphicsEffect() is not None:
             item["done"] = True             # something else animates it: leave it alone
             return
-        fx = CardEffect(w, pad_below=self.offset)
+        fx = CardEffect(w, pad_below=self.offset, pad_x=abs(self.offset_x))
         w.setGraphicsEffect(fx)
         item["fx"] = fx
         uitrace.trace("effect.install", kind="build", widget=w.objectName())
@@ -151,8 +168,9 @@ class CardBuild(QObject):
 
     # -- state -----------------------------------------------------------------------
     def total_ms(self) -> int:
-        return motion.build_total_ms(len(self._items), self.start_ms, self.stagger_ms,
-                                     self.item_ms, self.cap)
+        if not self._items:
+            return 0
+        return max(i["delay"] for i in self._items) + self.item_ms
 
     def started(self) -> bool:
         return self._started
@@ -200,13 +218,15 @@ class CardBuild(QObject):
             if not self._alive(item):
                 item["done"] = True
                 continue
-            op, dy, s, done = motion.card_state(elapsed, item["delay"], self.item_ms,
-                                                self.offset, self.scale_start)
+            # left: how much of the way is still to go (1 at the start, 0 in place; the
+            # spring takes it slightly below 0 and back), for both offsets.
+            op, left, s, done = motion.card_state(elapsed, item["delay"], self.item_ms,
+                                                  1.0, self.scale_start)
             if done:
                 self._release(item)
             else:
                 try:
-                    item["fx"].set_state(op, dy, s)
+                    item["fx"].set_state(op, self.offset * left, s, self.offset_x * left)
                 except RuntimeError:
                     item["done"] = True
 

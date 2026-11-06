@@ -185,7 +185,9 @@ def test_window_shows_declined_meeting_dimmed_and_struck_through(qtbot, tmp_path
     chips = {c.event.id: c for c in w.time_view.columns[0].chips}
     assert set(chips) == {"d", "a"}
     assert chips["d"].declined and chips["d"].font().strikeOut()
-    assert chips["d"].graphicsEffect() is not None
+    # v0.11.0: dimmed as it is painted (no opacity effect: the tile can still build in)
+    from smartcal.ui.window import DECLINED_OPACITY
+    assert chips["d"].opacity() == DECLINED_OPACITY and chips["a"].opacity() == 1.0
     assert not chips["a"].declined and not chips["a"].font().strikeOut()
     w.set_view("month")
     cell = w.month_view.cells[date(2026, 11, 4)]
