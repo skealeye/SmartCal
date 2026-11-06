@@ -565,10 +565,20 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
             self._place_flyout()
             return
         grow = size.height() > self.height()
-        if QRect(pos, size) != self.geometry():
+        target = QRect(pos, size)
+        if target != self.geometry():
+            # v0.9.2: the two windows change in the order that keeps the panel inside
+            # the popup's top and bottom between the two native changes: a shrinking
+            # popup has the panel shrink first (to the popup's new rect, which lies
+            # inside its old one); a growing popup grows first, then the panel follows.
+            # (The other order showed the panel's accent edge above or below the popup
+            # for a frame, every frame of a tween.)
+            shrink_first = not size.height() > self.height()
+            if shrink_first:
+                self._place_flyout(anchor=target)
             self._geom_change = True
             try:
-                self.setGeometry(QRect(pos, size))
+                self.setGeometry(target)
             finally:
                 self._geom_change = False
             self._place_flyout()
@@ -1041,20 +1051,23 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
             self._flyout = DetailsFlyout(self)
         return self._flyout
 
-    def _place_flyout(self, force: bool = False) -> None:
+    def _place_flyout(self, force: bool = False, anchor: QRect | None = None) -> None:
         """The popup's width, top aligned with it, as tall as its content (v0.8.0; at
         most the popup's height, the description then scrolls): left of the popup inside
         the work area of its screen (right of it, or over it, when the left has no room).
-        Uses the popup's docked geometry, never a position mid-animation. While sliding,
-        only the slide's end moves (the slide owns the panel's position). Its height
-        tweens to a new content height, but simply follows the popup's own tween."""
+        Uses the popup's docked geometry, never a position mid-animation (`anchor`: the
+        popup's rect about to be applied, see _set_height). While sliding, only the
+        slide's end moves (the slide owns the panel's position). Its height tweens to a
+        new content height, but simply follows the popup's own tween.
+        v0.9.2: never taller than the popup, at any moment (DetailsFlyout.cap_height)."""
         fly = self._flyout
         if fly is None or (fly.isHidden() and not force):
             return
-        anchor = self.docked_geometry()
+        anchor = QRect(anchor) if anchor is not None else self.docked_geometry()
         area = self._area()
         want = fly.target_height() if fly.closing() else fly.content_height()
         size = QSize(WIDTH, max(1, min(anchor.height(), want)))
+        fly.cap_height = anchor.height()
         animate = not (self.height_animating() or self.revealing() or self.collapsing())
         pos, side = placement.beside(size, anchor, anchor.top(), area)
         if fly.closing():

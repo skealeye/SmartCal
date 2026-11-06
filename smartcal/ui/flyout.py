@@ -169,6 +169,10 @@ class DetailsFlyout(winframe.FramedWindow, QWidget):
         self._ghost_anim = self._fade_in_anim = self._height_anim = None
         self._lines_build = None        # v0.9.0: the content's lines building in
         self._height_target: int | None = None
+        self._tween_starting = False
+        # v0.9.2: the popup's height as the popup last placed the panel (its new height
+        # while it shrinks: the panel is placed first); the panel is never taller.
+        self.cap_height: int | None = None
         self._content_h = None          # (content key, measured height)
         self._scroll = QScrollArea()
         self._scroll.setObjectName("flyoutscroll")
@@ -383,31 +387,52 @@ class DetailsFlyout(winframe.FramedWindow, QWidget):
             body_h += max(0, box.fit_height(width) - box.minimumHeight())
         return max(MIN_HEIGHT, h + body_h)
 
+    def height_cap(self) -> int:
+        """v0.9.2: the most the panel may be tall right now: the popup's height (the
+        rect the popup is about to take while it shrinks, see AgendaPopup._set_height)."""
+        cap = self._popup.height()
+        if self.cap_height is not None:
+            cap = min(cap, self.cap_height)
+        return max(1, cap)
+
     def _apply_size(self, size: QSize, animate: bool = True) -> QSize | None:
         """The size the panel takes now (returned; None: unchanged, or its own height
         tween owns the height). A height change of the open, visible panel tweens
         (motion.SETTLE, motion.NORMAL) with the micro-animations on; else it is returned
-        for place() to apply together with the position, in one geometry change."""
-        target_h = size.height()
+        for place() to apply together with the position, in one geometry change.
+        v0.9.2: never taller than the popup, not even for a frame: a panel taller than
+        the popup's (new) height is cut down to it at once, in that same geometry change
+        (a shrink tween started from above the popup's height showed the panel's edge
+        beyond the popup until its first frame)."""
+        target_h = min(size.height(), self.height_cap())
         width = size.width()
+        cap = self.height_cap()
         if self._height_target == target_h and (self.height() == target_h
                                                 or self.height_animating()):
+            if self.height() > cap:     # (a tween in flight, the popup shrank under it)
+                self._stop_height_anim()
+                return QSize(width, target_h)
             return QSize(width, self.height()) if self.width() != width else None
         self._stop_height_anim()
         self._height_target = target_h
         ms = motion.micro_duration(motion.NORMAL) \
             if animate and self.isVisible() and not self._closing else 0
-        if not ms or self.height() == target_h:
+        start_h = min(self.height(), cap)
+        if not ms or start_h == target_h:
             now = QSize(width, target_h)
             return now if now != self.size() else None
-        if self.width() != width:
-            self.setFixedSize(width, self.height())
         if self.body() is not None and self.content_height() <= target_h:
             # The content fits at the end: no scrollbar flashing in between.
             self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._height_anim = motion.tween(self, self.height(), target_h, ms,
-                                         self._resize_height, self._height_anim_done,
-                                         kind=motion.SETTLE)
+        self._tween_starting = True     # its first value is applied by place(), moved
+        try:                            # and sized in one change
+            self._height_anim = motion.tween(self, start_h, target_h, ms,
+                                             self._resize_height, self._height_anim_done,
+                                             kind=motion.SETTLE)
+        finally:
+            self._tween_starting = False
+        if start_h != self.height() or self.width() != width:
+            return QSize(width, start_h)    # cut to the popup's height with the move
         return None
 
     def _set_geometry(self, rect: QRect) -> None:
@@ -454,9 +479,11 @@ class DetailsFlyout(winframe.FramedWindow, QWidget):
 
     def _resize_height(self, h: int) -> None:
         # The settle overshoot never makes it taller than the popup (it would poke out
-        # below it); the last frame is exactly the target.
-        cap = max(self._height_target or 1, self._popup.height())
-        h = int(motion.clamp(int(h), 1, cap))
+        # below it); the last frame is exactly the target. v0.9.2: the popup's height is
+        # the cap, whatever the target (until then a target above it raised the cap).
+        if self._tween_starting:
+            return
+        h = int(motion.clamp(int(h), 1, self.height_cap()))
         if self.height() != h:
             self.setFixedSize(self.width(), h)
             self._update_mask()
@@ -623,14 +650,17 @@ class DetailsFlyout(winframe.FramedWindow, QWidget):
             if now is not None:
                 self.setFixedSize(now)
             return                      # nothing on screen: no move, no window region
+        size = now if now is not None else self.size()
         if self.slide_pending():
-            if now is not None:
-                self.setFixedSize(now)
-            self.move(self._tucked)     # still under the popup, waiting for its paint
+            # Still under the popup, waiting for its paint: sized and moved in one change
+            # (v0.9.2: a resize first left it at the old top for a moment, its edge
+            # showing above the popup).
+            self._set_geometry(QRect(self._tucked, size))
             return
         if self._anim.state() == QPropertyAnimation.State.Running:
-            if now is not None:
-                self.setFixedSize(now)  # the slide owns the position
+            # The slide owns x; y is the popup's top now (v0.9.2: until the slide's next
+            # frame it stayed at the old top, above a popup that had just shrunk).
+            self._set_geometry(QRect(QPoint(self.x(), self._docked.y()), size))
             self._anim.setEndValue(self._tucked if self._closing else self._docked)
         elif self._mode == "fade" or not self._closing:
             # Docked: size and position together, once (e.g. following the popup's
