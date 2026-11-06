@@ -287,29 +287,29 @@ def test_settings_combo_follows_right_click_style_change(qtbot, tmp_path):
     assert dlg2.tile_style_box.currentData() == "stripe"   # the owner's choice stays
 
 
-def test_chat_reversal_continues_from_current_height_and_opacity(qtbot, tmp_path, animated):
+def test_chat_reversal_continues_from_where_the_drawer_is(qtbot, tmp_path, animated):
     p = shown_popup(qtbot, tmp_path, MANY[:2], tray=BOTTOM_RIGHT)
     p.attach_chat(lambda: None)
     p.toggle_chat()
     settled(qtbot, p)
-    chat = p.chat()
-    full = chat.height()
-    p.toggle_chat()                               # collapsing...
-    anim = p.height_animation()
+    d = p.drawer()
+    h_open, y_open = p.height(), d.y()
+    p.toggle_chat()                               # retracting...
+    anim = d._anim
     anim.pause()
-    anim.setCurrentTime(anim.duration() // 6)        # (the settle curve is fast early)
-    mid_h, mid_op = chat.height(), chat.graphicsEffect().opacity()
-    assert 1 < mid_h < full and 0 < mid_op < 1
-    p.toggle_chat()                               # ...and open again, from there
-    again = p.height_animation()
+    anim.setCurrentTime(anim.duration() // 2)
+    mid_y, mid_e = d.y(), d.openness()
+    assert -d.height() < mid_y < y_open and 0 < mid_e < 1
+    p.toggle_chat()                               # ...and down again, from there
+    again = d._anim
     again.pause()
     again.setCurrentTime(1)
     QApplication.processEvents()
-    assert abs(chat.maximumHeight() - mid_h) <= 3
-    assert abs(chat.graphicsEffect().opacity() - mid_op) < 0.05
+    assert abs(d.y() - mid_y) <= 3 and d.state() == "opening"
     again.resume()
     settled(qtbot, p)
-    assert chat.isVisible() and chat.height() == full and p.chat_expanded()
+    assert d.y() == y_open and d.state() == "open" and p.chat_expanded()
+    assert p.height() == h_open                   # never shrank in between
 
 
 def test_panel_content_height_cache_includes_device_pixel_ratio(qtbot, tmp_path,

@@ -32,6 +32,21 @@ def window_style(name: str) -> str:
             f"QLabel{{color:{TEXT};font-size:12px;}}")
 
 
+def combo_style() -> str:
+    """v0.10.0: a dark dropdown (Settings > General > Claude model): the box and its
+    popup list in the popup's colors, rounded, never a white list."""
+    return (f"QComboBox{{background:{BG_NEXT};color:{TEXT};border:1px solid {BORDER};"
+            f"border-radius:{RADIUS_SMALL}px;padding:3px 8px;}}"
+            f"QComboBox:hover{{border-color:{MUTED};}}"
+            f"QComboBox:focus{{border-color:{LINK};}}"
+            f"QComboBox QAbstractItemView{{background:{BG};color:{TEXT};"
+            f"border:1px solid {BORDER};border-radius:{RADIUS_SMALL}px;padding:4px;"
+            f"outline:0;selection-background-color:{BG_NEXT};selection-color:{TEXT};}}"
+            "QComboBox QAbstractItemView::item{min-height:22px;padding:2px 6px;"
+            f"border-radius:4px;}}"
+            f"QComboBox QAbstractItemView::item:selected{{background:{BG_NEXT};}}")
+
+
 _HEX = re.compile(r"#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})")
 
 

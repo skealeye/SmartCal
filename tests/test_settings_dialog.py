@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from smartcal import google_auth
 from smartcal.db import Cache
 from smartcal.models import CalendarInfo, Event
@@ -30,14 +32,63 @@ def test_dialog_changes_persist_on_ok(qtbot, tmp_path):
     spin_w.setValue(25)
     dlg._rows["p"][1].setChecked(True)
     dlg.autostart_box.setChecked(False)
-    dlg.model_edit.setText("claude-x")
+    dlg.model_box.set_model_id("claude-haiku-5-5")
     dlg.default_lead.setValue(12)
     with qtbot.waitSignal(dlg.applied):
         dlg.accept()
     s2 = Settings(tmp_path / "s.json")
     assert not s2.is_hidden("w", False) and s2.is_muted("w") and s2.is_muted("p")
     assert s2.lead_for("w") == 25 and s2.lead_for("p") == 12  # untouched follows default
-    assert s2.autostart is False and s2.claude_model == "claude-x"
+    assert s2.autostart is False and s2.claude_model == "claude-haiku-5-5"
+
+
+# -- v0.10.0: the Claude model dropdown ----------------------------------------------------
+def test_model_dropdown_lists_known_models_with_ids(qtbot, tmp_path):
+    from smartcal.settings import CLAUDE_MODELS
+    dlg, settings, *_ = build(qtbot, tmp_path)
+    box = dlg.model_box
+    assert not box.isEditable()
+    items = [(box.itemData(i), box.itemText(i)) for i in range(box.count())]
+    assert items == list(CLAUDE_MODELS)
+    assert items == [("claude-fable-5-1", "Fable 5.1"), ("claude-opus-5-5", "Opus 5.5"),
+                     ("claude-sonnet-5-5", "Sonnet 5.5"), ("claude-haiku-5-5", "Haiku 5.5")]
+    from PyQt6.QtCore import Qt
+    assert box.itemData(1, Qt.ItemDataRole.ToolTipRole) == "claude-opus-5-5"
+    assert box.model_id() == "claude-sonnet-5-5" == settings.claude_model   # the default
+    assert box.currentText() == "Sonnet 5.5" and box.toolTip() == "claude-sonnet-5-5"
+    assert "QAbstractItemView" in box.styleSheet() and "#ffffff" not in box.styleSheet()
+
+
+def test_model_dropdown_keeps_a_custom_id(qtbot, tmp_path):
+    settings = Settings(tmp_path / "s.json")
+    settings.set_claude_model("claude-old-4")
+    dlg, s, *_ = build(qtbot, tmp_path)
+    box = dlg.model_box
+    assert box.count() == 5 and box.currentText() == "Custom: claude-old-4"
+    assert box.model_id() == "claude-old-4"
+    dlg.accept()                                    # untouched: nothing silently changed
+    assert Settings(tmp_path / "s.json").claude_model == "claude-old-4"
+    dlg2, *_ = build(qtbot, tmp_path)
+    dlg2.model_box.set_model_id("claude-opus-5-5")
+    dlg2.accept()
+    assert Settings(tmp_path / "s.json").claude_model == "claude-opus-5-5"
+
+
+def test_model_choices_helper():
+    from smartcal.settings import CLAUDE_MODELS, claude_model_choices
+    assert claude_model_choices("claude-opus-5-5") == list(CLAUDE_MODELS)
+    assert claude_model_choices("") == list(CLAUDE_MODELS)
+    assert claude_model_choices(" x-1 ")[-1] == ("x-1", "Custom: x-1")
+
+
+@pytest.mark.parametrize("mid", ["claude-fable-5-1", "claude-old-4"])
+def test_assistant_uses_the_selected_model(tmp_path, mid):
+    from test_assistant import FakeClaude, make, text_msg
+    Settings(tmp_path / "s.json").set_claude_model(mid)   # what the dialog saves
+    claude = FakeClaude(text_msg("Hi."))
+    a, *_ = make(tmp_path, claude)
+    a.reply("hello")
+    assert claude.messages.calls[0]["model"] == mid
 
 
 def test_dialog_cancel_changes_nothing(qtbot, tmp_path):

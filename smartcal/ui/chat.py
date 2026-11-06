@@ -10,21 +10,27 @@ import logging
 import threading
 from typing import Callable
 
-from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QPointF, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
                              QScrollArea, QVBoxLayout, QWidget)
 
 from ..assistant import PENDING_HEADER, AssistantError
 from ..google_auth import ReauthRequired
-from . import theme
+from . import cards, motion, theme
 
 log = logging.getLogger(__name__)
 
 MAX_ITEMS = 50
 MAX_INPUT = 2000
 ATTENTION_TEXT = "Claude is waiting for your OK"
-LIST_HEIGHT = 200
-THINKING = "Thinking…"
+LIST_MIN_HEIGHT = 80        # v0.10.0: the message list fills the drawer (at least this)
+THINKING = "Thinking"
+# v0.10.0: a message arriving slides up MSG_OFFSET_PX and fades in over MSG_IN_MS.
+MSG_OFFSET_PX = 14
+MSG_IN_MS = 300
+DOT_PERIOD_MS = 1100        # the thinking dots' pulse (one cycle over the three)
+DOT_TICK_MS = 50
 GENERIC_ERROR = "Something went wrong. Please try again."
 REAUTH_GENERIC = "Sign in again: right-click the tray icon > Add Google account…"
 UNDONE = "Undone"
@@ -99,12 +105,64 @@ def _button(text: str) -> QPushButton:
     return b
 
 
+class ThinkingDots(QWidget):
+    """v0.10.0: three small dots pulsing in turn while Claude works. Animates only while
+    shown and with the micro-animations on (else three still dots); the timer stops
+    whenever the widget is hidden or goes away."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("thinkingdots")
+        self.setFixedSize(26, 12)
+        self._phase = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(DOT_TICK_MS)
+        self._timer.timeout.connect(self._tick)
+
+    def running(self) -> bool:
+        return self._timer.isActive()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if motion.micro_enabled():
+            self._timer.start()
+
+    def hideEvent(self, e):
+        self._timer.stop()
+        super().hideEvent(e)
+
+    def _tick(self) -> None:
+        self._phase = (self._phase + DOT_TICK_MS / DOT_PERIOD_MS) % 1.0
+        self.update()
+
+    def dot_opacity(self, i: int) -> float:
+        if not self._timer.isActive():
+            return 0.6
+        import math
+        x = (self._phase - i / 3.0) % 1.0
+        return 0.3 + 0.7 * max(0.0, math.sin(math.pi * min(1.0, x * 2.0)))
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        try:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            p.setPen(Qt.PenStyle.NoPen)
+            for i in range(3):
+                c = QColor(theme.MUTED)
+                c.setAlphaF(self.dot_opacity(i))
+                p.setBrush(c)
+                p.drawEllipse(QPointF(5 + i * 8, 6), 2.5, 2.5)
+        finally:
+            p.end()
+
+
 class _Item(QFrame):
     """One entry in the message list; keeps handles to its buttons."""
 
     def __init__(self, kind: str):
         super().__init__()
         self.kind = kind          # user | claude | error | note | thinking
+        self.setProperty("kind", kind)     # v0.10.0: the bubble look (ChatWidget style)
         self.undo_btn: QPushButton | None = None
         self.approve_btn: QPushButton | None = None
         self.deny_btn: QPushButton | None = None
@@ -145,45 +203,71 @@ class ChatWidget(QWidget):
         self._gone: list[int] = []
         self.confirm_overwrite = self._ask_overwrite   # replaceable in tests
         self.destroyed.connect(lambda *_a, g=self._gone: g.append(1))
+        # v0.10.0: messages are bubbles (yours on the right, Claude's on the left).
         self.setStyleSheet(
             f"QLabel{{color:{theme.TEXT};font-size:12px;}}"
             f"QLineEdit{{background:{theme.BG_NEXT};color:{theme.TEXT};"
-            f"border:1px solid {theme.BORDER};padding:2px;"
+            f"border:1px solid {theme.BORDER};padding:3px 6px;"
             f"border-radius:{theme.RADIUS_SMALL}px;}}"
-            f"QPushButton{{padding:2px 8px;}}")
+            f"QLineEdit:focus{{border-color:{theme.LINK};}}"
+            f"QPushButton{{background:{theme.BORDER};color:{theme.TEXT};border:none;"
+            f"padding:3px 10px;border-radius:{theme.RADIUS_SMALL}px;}}"
+            "QPushButton:hover{background:#4a4d51;}"
+            f"QPushButton:disabled{{color:{theme.MUTED};}}"
+            f"QPushButton:focus{{border:1px solid {theme.LINK};}}"
+            f"QFrame#chatitem[kind=\"user\"]{{background:{theme.BG_NEXT};border-radius:8px;}}"
+            "QFrame#chatitem[kind=\"claude\"]{background:#2a2c30;border-radius:8px;}")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(4)
+        outer.setSpacing(6)
 
         self._content = QWidget()
-        self._content.setStyleSheet("background:transparent;")
+        self._content.setObjectName("chatcontent")
+        self._content.setStyleSheet("QWidget#chatcontent{background:transparent;}")
         self._box = QVBoxLayout(self._content)
         self._box.setContentsMargins(0, 0, 0, 0)
-        self._box.setSpacing(4)
+        self._box.setSpacing(6)
         self._box.addStretch(1)
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setStyleSheet("QScrollArea{background:transparent;}")
-        self._scroll.setFixedHeight(LIST_HEIGHT)
+        self._scroll.setMinimumHeight(LIST_MIN_HEIGHT)
         self._scroll.setWidget(self._content)
-        outer.addWidget(self._scroll)
+        outer.addWidget(self._scroll, 1)
 
-        row = QHBoxLayout()
+        # The input row is one widget (v0.10.0: it builds in with the drawer).
+        self.input_row = QWidget()
+        self.input_row.setObjectName("inputrow")
+        row = QHBoxLayout(self.input_row)
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
         self._input = QLineEdit()
         self._input.setMaxLength(MAX_INPUT)
         self._input.setPlaceholderText("Ask Claude…")
         self._input.returnPressed.connect(self.send)
         self._send_btn = _button("Send")
+        self._send_btn.setObjectName("send")
         self._send_btn.clicked.connect(lambda _c=False: self.send())
         row.addWidget(self._input, 1)
         row.addWidget(self._send_btn)
-        outer.addLayout(row)
+        outer.addWidget(self.input_row)
         self._new_btn = _button("New chat")
+        self._new_btn.setObjectName("newchat")
         self._new_btn.clicked.connect(lambda _c=False: self.new_chat())
         outer.addWidget(self._new_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        # v0.10.0 motion (micro-animations only): the buttons shrink a little while
+        # pressed; arriving messages slide up and fade in (animate_arrivals, set by the
+        # drawer; a bare ChatWidget never animates).
+        self.press_feedback = {}
+        for b in (self._send_btn, self._new_btn):
+            fb = cards.PressFeedback(b)
+            b.pressed.connect(fb.press)
+            b.released.connect(fb.release)
+            self.press_feedback[b.objectName()] = fb
+        self.animate_arrivals = False
+        self._arrivals: list = []
 
     # -- accessors (tests) ---------------------------------------------------
     def items(self) -> list[_Item]:
@@ -275,7 +359,17 @@ class ChatWidget(QWidget):
         self._input.setEnabled(not busy)
         self._send_btn.setEnabled(not busy)
         if busy:
-            self._thinking = self._add_item("thinking", [THINKING], "color:%s;" % theme.MUTED)
+            item = _Item("thinking")
+            line = QHBoxLayout()
+            line.setContentsMargins(0, 0, 0, 0)
+            line.setSpacing(4)
+            line.addWidget(_label(THINKING, "color:%s;" % theme.MUTED))
+            item.dots = ThinkingDots()
+            line.addWidget(item.dots, 0, Qt.AlignmentFlag.AlignVCenter)
+            line.addStretch(1)
+            item.lay.addLayout(line)
+            self._append(item)
+            self._thinking = item
         else:
             self._input.setFocus()
 
@@ -489,7 +583,42 @@ class ChatWidget(QWidget):
             if old is None:
                 break
             self._drop(old)
+        self._arrive(item)
         self._scroll_bottom()
+
+    def _arrive(self, item: _Item) -> None:
+        """v0.10.0: a new message slides up MSG_OFFSET_PX and fades in (MSG_IN_MS)."""
+        self._arrivals = [b for b in self._arrivals
+                          if not cards._gone(b) and b.running()]
+        if not (self.animate_arrivals and self.isVisible() and motion.micro_enabled()):
+            return
+        b = cards.CardBuild(self, MSG_OFFSET_PX, 1.0, 0, 0, MSG_IN_MS)
+        b.prepare([item])
+        b.start()
+        self._arrivals.append(b)
+
+    def arrivals_running(self) -> bool:
+        return any(not cards._gone(b) and b.running() for b in self._arrivals)
+
+    def finish_arrivals(self) -> None:
+        """Every arriving message in place now (no effect left)."""
+        for b in self._arrivals:
+            if not cards._gone(b):
+                b.finish()
+                b.deleteLater()
+        self._arrivals = []
+
+    def build_widgets(self, last: int = 4) -> list:
+        """What builds in when the drawer opens: the last few messages, the input row
+        and the New chat button."""
+        items = [i for i in self._items if not i.isHidden()][-last:]
+        return items + [self.input_row, self._new_btn]
+
+    def hideEvent(self, e):
+        self.finish_arrivals()
+        for fb in self.press_feedback.values():
+            fb.cancel()
+        super().hideEvent(e)
 
     def _drop(self, item: _Item) -> None:
         if item in self._items:

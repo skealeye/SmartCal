@@ -139,10 +139,13 @@ def test_refresh_mid_build_carries_on_and_adds_nothing(qtbot, tmp_path, animated
     qtbot.waitUntil(build.started, timeout=1000)
     build._frame(100.0)
     old = rows(p)
+    p.refresh()                                               # v0.10.0: nothing changed:
+    assert rows(p) == old and all(card(r) is not None for r in old[1:])   # untouched
+    p.settings.set_event_color(old[0].event, "#e8594f")     # one row changes
     p.refresh()
     new = rows(p)
-    assert new[0] is not old[0]
-    assert build.widgets() == new                             # rebound to the new rows
+    assert new[0] is not old[0] and new[1:] == old[1:]
+    assert build.widgets() == new                             # rebound to the new row
     assert all(card(r) is not None for r in new[1:])          # still on their way in
     assert build.elapsed() == 100.0
     wait_built(qtbot, p)

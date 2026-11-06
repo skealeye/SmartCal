@@ -218,6 +218,18 @@ def paint_frame(widget, by_dwm: bool) -> None:
         return
     p = QPainter(widget)
     try:
+        paint_frame_lines(p, w, h, by_dwm)
+    finally:
+        p.end()
+
+
+def paint_frame_lines(p: QPainter, w: int, h: int, by_dwm: bool) -> None:
+    """paint_frame's lines for a window of w x h, with painter `p` in that window's
+    coordinates (v0.10.0: the chat drawer paints the part of them it covers)."""
+    if w < 4 or h < 4:
+        return
+    p.save()
+    try:
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         p.setBrush(Qt.BrushStyle.NoBrush)
         radius = float(theme.CORNER_RADIUS)
@@ -227,7 +239,7 @@ def paint_frame(widget, by_dwm: bool) -> None:
         p.setPen(QPen(QColor(theme.ACCENT_SOFT), 1.0))
         p.drawPath(rounded_path(w, h, 1.5, radius))
     finally:
-        p.end()
+        p.restore()
 
 
 class FramedWindow:
@@ -244,6 +256,8 @@ class FramedWindow:
             return                      # same native window: already set up
         self._frame_hwnd = hwnd
         self.frame_by_dwm = apply_dwm_frame(self)
+        from . import uitrace
+        uitrace.trace("frame.setup", window=type(self).__name__, dwm=self.frame_by_dwm)
         self.frame_masked = native_windows() and not self.frame_by_dwm
 
     def frame_shape(self) -> QRegion | None:

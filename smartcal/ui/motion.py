@@ -304,6 +304,27 @@ OUTRO_SAFETY_MS = 400
 ACCEL = "accel"             # the outro: ease-in (InQuad), never past its end
 
 
+# -- v0.10.0: the Ask Claude drawer ------------------------------------------------------
+# The chat slides DOWN from the popup's top edge (a child widget inside the opaque popup,
+# covering the agenda down to the "Hide chat" row) in DRAWER_OPEN_MS with the SETTLE
+# curve (its slight overshoot is absorbed by DRAWER_PAD_PX of drawer hidden above the
+# popup's top, so no gap ever opens above it); its header, last messages and input row
+# build in (CardBuild: DRAWER_BUILD_*). Closing retracts it upward in DRAWER_CLOSE_MS
+# (ACCEL, no overshoot). The slide follows animations_enabled() (basic mode keeps it);
+# the build is a micro-animation. A popup too short for DRAWER_MIN_PX of drawer grows
+# (its usual height tween) first.
+DRAWER_OPEN_MS = 420
+DRAWER_CLOSE_MS = 180
+DRAWER_PAD_PX = 16
+DRAWER_MIN_PX = 260
+DRAWER_SHADOW_PX = 6
+DRAWER_BUILD_START_MS = 90
+DRAWER_BUILD_STAGGER_MS = 45
+DRAWER_BUILD_MS = 380
+DRAWER_BUILD_OFFSET_PX = 14
+DRAWER_BUILD_SCALE = 0.96
+
+
 def outro_window_span(micro: bool, flyout_ms: int = 0) -> tuple[int, int]:
     """When the window's fade and sink run (ms after the outro starts): (start, end).
     It starts after an open details panel slid back (`flyout_ms`), and never runs

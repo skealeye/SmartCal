@@ -211,7 +211,8 @@ def test_every_animation_runs_with_on_despite_windows_effects_off(qtbot, tmp_pat
     qtbot.waitUntil(lambda: not p.animations_running())
     p.attach_chat(lambda: None)
     p.toggle_chat()
-    started["chat expand"] = p.revealing(p.chat()) and p.animations_running()
+    started["chat drawer"] = p.drawer().animating() and p.drawer().building() \
+        and p.animations_running()
     qtbot.waitUntil(lambda: not p.animations_running())
     assert started == {k: True for k in started}, started
     assert len(started) == 9

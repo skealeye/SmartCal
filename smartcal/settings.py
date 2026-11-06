@@ -14,6 +14,24 @@ from .config import data_dir
 
 DEFAULT_LEAD_MINUTES = 10
 DEFAULT_CLAUDE_MODEL = "claude-sonnet-5-5"
+# v0.10.0: the known Claude models (id, label), the one list Settings > General offers.
+# Any other saved id (an older or custom one) is kept as is and offered as "Custom: <id>".
+CLAUDE_MODELS = (
+    ("claude-fable-5-1", "Fable 5.1"),
+    ("claude-opus-5-5", "Opus 5.5"),
+    ("claude-sonnet-5-5", "Sonnet 5.5"),
+    ("claude-haiku-5-5", "Haiku 5.5"),
+)
+
+
+def claude_model_choices(current: str | None) -> list[tuple[str, str]]:
+    """(id, label) for the model dropdown: the known models, plus "Custom: <id>" for a
+    saved id that is not one of them (nothing is lost or silently changed)."""
+    choices = list(CLAUDE_MODELS)
+    cur = (current or "").strip()
+    if cur and cur not in {mid for mid, _label in choices}:
+        choices.append((cur, f"Custom: {cur}"))
+    return choices
 
 
 def clamp_lead(value, default: int = DEFAULT_LEAD_MINUTES) -> int:

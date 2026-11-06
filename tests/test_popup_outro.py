@@ -267,7 +267,8 @@ def test_refresh_during_outro_runs_after_it(qtbot, tmp_path, animated):
     assert rows(p) == before                         # the leaving rows stay
     qtbot.waitUntil(lambda: not p.isVisible(), timeout=2000)
     settle_qt()
-    assert rows(p) and all(r not in before for r in rows(p))   # rebuilt, hidden
+    # Ran after the hide (v0.10.0: nothing changed, so the same widgets stay).
+    assert rows(p) == before and not p._refresh_deferred
     assert_clean(p)
 
 

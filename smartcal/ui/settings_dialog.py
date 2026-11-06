@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QF
                              QTabWidget, QVBoxLayout, QWidget)
 
 from .. import agenda
+from ..settings import DEFAULT_CLAUDE_MODEL, claude_model_choices
 from ..textutil import plain_tip
 from . import motion
 from .meeting_menus import STYLE_NAMES
@@ -51,6 +52,53 @@ class ElidedLabel(QLabel):
     def _elide(self) -> None:
         self.setText(self.fontMetrics().elidedText(
             self._full, Qt.TextElideMode.ElideMiddle, max(0, self.width())))
+
+
+MODEL_ID_ROLE = Qt.ItemDataRole.UserRole
+
+
+class ModelCombo(QComboBox):
+    """v0.10.0: Settings > General > Claude model. A non-editable dropdown of the known
+    models (settings.CLAUDE_MODELS): friendly labels, the id as each item's tooltip, and
+    a saved id that is not in the list kept as "Custom: <id>". Dark, popup list included
+    (rounded by Windows 11 where available; no translucent window)."""
+
+    def __init__(self, current: str, parent=None):
+        super().__init__(parent)
+        self.setEditable(False)
+        self.setObjectName("model")
+        self.setStyleSheet(theme.combo_style())
+        for mid, label in claude_model_choices(current):
+            self.addItem(label, mid)
+            self.setItemData(self.count() - 1, mid, Qt.ItemDataRole.ToolTipRole)
+        idx = self.findData((current or "").strip(), MODEL_ID_ROLE)
+        if idx < 0:
+            idx = self.findData(DEFAULT_CLAUDE_MODEL, MODEL_ID_ROLE)
+        self.setCurrentIndex(max(0, idx))
+        self.currentIndexChanged.connect(lambda _i: self._sync_tip())
+        self._sync_tip()
+
+    def model_id(self) -> str:
+        return str(self.currentData(MODEL_ID_ROLE) or "")
+
+    def set_model_id(self, mid: str) -> None:
+        idx = self.findData(mid, MODEL_ID_ROLE)
+        if idx >= 0:
+            self.setCurrentIndex(idx)
+
+    def _sync_tip(self) -> None:
+        self.setToolTip(self.model_id())
+
+    def showPopup(self):
+        super().showPopup()
+        try:
+            from . import winframe
+            box = self.view().window()
+            if box is not None and box is not self.window():
+                box.setStyleSheet(f"background:{theme.BG};border:none;")
+                winframe.apply_dwm_frame(box)
+        except Exception:  # noqa: BLE001 - a look never breaks the dropdown
+            pass
 
 
 def _spin(value: int) -> QSpinBox:
@@ -167,9 +215,9 @@ class SettingsDialog(QDialog):
         form = QFormLayout(w)
         self.autostart_box = QCheckBox("Start with Windows")
         self.autostart_box.setChecked(self.settings.autostart)
-        self.model_edit = QLineEdit(self.settings.claude_model)
+        self.model_box = ModelCombo(self.settings.claude_model)
         form.addRow(self.autostart_box)
-        form.addRow("Claude model", self.model_edit)
+        form.addRow("Claude model", self.model_box)
         # Also one click away: right-click a meeting > Color style.
         self.tile_style_box = QComboBox()
         for key, name in STYLE_NAMES:
@@ -464,7 +512,7 @@ class SettingsDialog(QDialog):
         style = self.tile_style_box.currentData()
         if style != self._tile_style_orig:   # only if changed here (the right-click
             s.tile_style = style             # menu may have changed it meanwhile)
-        s.claude_model = self.model_edit.text().strip() or s.claude_model
+        s.claude_model = self.model_box.model_id() or s.claude_model
         for account, box in self.account_shown.items():
             if self._account_changed(account):   # only what was changed here
                 (s.hidden_accounts.discard if box.isChecked()

@@ -453,18 +453,21 @@ def test_chat_expand_and_collapse_animate_height(qtbot, tmp_path, animated):
     p.attach_chat(lambda: None)
     h0, bottom = p.height(), p.geometry().bottom()
     p.toggle_chat()
-    chat = p.chat()
-    assert p.chat_expanded() and p.revealing(chat)
+    chat, d = p.chat(), p.drawer()
+    # v0.10.0: the drawer slides down while the (short) popup grows to fit it.
+    assert p.chat_expanded() and d.animating() and p.height_animating()
     heights = [p.height() for _ in frames(p.height_animation())]
     p.height_animation().resume()
-    qtbot.waitUntil(lambda: not p.revealing(chat))
-    assert chat.isVisible() and chat.graphicsEffect() is None
+    settled(qtbot, p)
+    assert chat.isVisible() and d.state() == "open" and d.y() == -motion.DRAWER_PAD_PX
+    assert d.height() - motion.DRAWER_PAD_PX - motion.DRAWER_SHADOW_PX >= motion.DRAWER_MIN_PX
+    assert d.geometry().bottom() < p._ask.geometry().top()          # the chat row shows
     assert any(h0 < h < p.height() for h in heights)             # grew step by step
     assert p.geometry().bottom() == bottom and p.height() >= layout_height(p)
     p.toggle_chat()
-    assert not p.chat_expanded() and p.revealing(chat)
+    assert not p.chat_expanded() and d.state() == "closing"
     settled(qtbot, p)
-    assert not chat.isVisible() and p.height() == h0
+    assert not d.isVisible() and p.height() == h0
 
 
 # (f) the details panel's content swap ---------------------------------------------------------------

@@ -95,11 +95,12 @@ def test_flyout_resizes_with_popup_when_chat_expands(qtbot, tmp_path):
     def fitted():
         return fly.width() == WIDTH and fly.height() == min(p.height(), fly.content_height())
     assert fitted()
-    p.toggle_chat()                                   # the popup grows (and moves up)
-    assert p.height() > h0 and fly.isVisible()
-    assert fitted() and fly.pos() == docked_pos(p)    # follows the popup's top
+    p.toggle_chat()                       # v0.10.0: the drawer: the panel closes, the
+    assert p.height() > h0 and not fly.isVisible()   # short popup grows for the drawer
+    assert p.drawer().height() >= motion.DRAWER_MIN_PX
     p.toggle_chat()                                   # and shrinks back
     assert p.height() == h0
+    click(qtbot, rows(p)[0])
     assert fitted() and fly.pos() == docked_pos(p)
     p.show_notice("A notice that makes the popup taller than before")
     assert fitted() and fly.y() == p.y()

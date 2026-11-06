@@ -24,7 +24,7 @@ from PyQt6.QtCore import QObject, QPointF, QRectF, Qt
 from PyQt6.QtGui import QPainter, QTransform
 from PyQt6.QtWidgets import QGraphicsEffect
 
-from . import motion
+from . import motion, uitrace
 
 
 def _gone(obj) -> bool:
@@ -135,6 +135,7 @@ class CardBuild(QObject):
         fx = CardEffect(w, pad_below=self.offset)
         w.setGraphicsEffect(fx)
         item["fx"] = fx
+        uitrace.trace("effect.install", kind="build", widget=w.objectName())
 
     def start(self) -> None:
         """Run the timeline (once; a second call does nothing)."""

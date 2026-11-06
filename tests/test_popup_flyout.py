@@ -350,12 +350,15 @@ def test_esc_order_flyout_chat_popup(qtbot, tmp_path):
     a = rows(p)[0]
     qtbot.keyClick(a, Qt.Key.Key_Return)
     fly = p.flyout()
-    assert fly.isVisible() and p.chat_expanded()
+    # v0.10.0: opening the details closes the chat drawer (never both open).
+    assert fly.isVisible() and not p.chat_expanded()
     qtbot.waitUntil(fly.isActiveWindow)               # keyboard open: focus is in the flyout
     qtbot.keyClick(QApplication.focusWidget(), Qt.Key.Key_Escape)   # Esc inside the flyout
-    assert not fly.isVisible() and p.chat_expanded() and p.isVisible()
+    assert not fly.isVisible() and p.isVisible()
     qtbot.waitUntil(lambda: QApplication.focusWidget() is a)   # back on the row
-    qtbot.keyClick(a, Qt.Key.Key_Escape)
+    p.toggle_chat()                                   # the chat, then Esc: it closes first
+    assert p.chat_expanded() and not fly.isVisible()
+    qtbot.keyClick(QApplication.focusWidget(), Qt.Key.Key_Escape)
     assert not p.chat_expanded() and p.isVisible()
     qtbot.keyClick(p, Qt.Key.Key_Escape)
     assert not p.isVisible()

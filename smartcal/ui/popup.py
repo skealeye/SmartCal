@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (QApplication, QFrame, QGraphicsOpacityEffect, QHBox
 
 from .. import __version__, agenda
 from ..textutil import meeting_label, plain_line, safe_http_url
-from . import cards, meeting_menus, motion, nativebg, placement, theme, winframe
+from . import cards, meeting_menus, motion, nativebg, placement, theme, uitrace, winframe
 from .widgets import HoverButton
 
 log = logging.getLogger(__name__)
@@ -37,6 +37,10 @@ BG_SELECTED = "#3a3f4b"       # the selected meeting (the next-up one stays BG_N
 NOTICE_MS = 8000              # the "Hidden." notice (and its Undo) clears itself after this
 NO_ACCOUNTS_TEXT = "No calendars connected — right-click the tray icon > Add Google account…"
 ALL_HIDDEN_TEXT = "All accounts hidden — right-click the tray icon > Accounts"
+# v0.10.0 debug trace: activation and screen / DPI changes of the popup.
+_TRACED_EVENTS = tuple(getattr(QEvent.Type, n) for n in (
+    "WindowActivate", "WindowDeactivate", "DevicePixelRatioChange", "ScreenChangeInternal")
+    if hasattr(QEvent.Type, n))
 
 
 @dataclass
@@ -83,6 +87,7 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         self.flyout_side = ""           # where it went last: "left", "right" or "over"
         self._watched_modals: list = []
         self._refreshing = False
+        self._in_change: list[str] = []     # v0.10.0 (trace): inside a change of ours
         # Failsafe: if the group is ever left up while the app is not active (e.g. Windows
         # refused to give the popup focus back), nothing would ever deactivate it.
         self.watchdog = QTimer(self)
@@ -134,6 +139,7 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         self._tray_geom: QRect | None = None
         self._statuses: dict[str, str] = {}
         self._rows: list[RowInfo] = []
+        self._empty_shown: str | None = None     # the empty line shown (None: never refreshed)
         self._next_line = ""
         self._no_accounts = False
         self._accounts: list[str] | None = None
@@ -147,8 +153,9 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         # the opening slide, ended (final state) on hide.
         self._header_build: cards.CardBuild | None = None
         self._rows_build: cards.CardBuild | None = None
-        self._chat_open = False
         self._chat = None
+        self._drawer = None             # v0.10.0: the chat drawer (drawer.py)
+        self._drawer_need = False       # the drawer wants its minimum height
         self._chat_factory = None
         self._ask = None
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
@@ -171,6 +178,7 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         self._status.setStyleSheet(f"color:{theme.WARN};font-size:11px;")
         self._status.setWordWrap(True)
         self._status.hide()
+        self._status_text = ""
         # One line under the header after a hide or a failed save: the text and, for a
         # hide, an Undo button. Part of the layout (its height is counted in the list's
         # height budget, see _resize); it clears itself after NOTICE_MS.
@@ -249,6 +257,9 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
             self._ask.setCursor(Qt.CursorShape.PointingHandCursor)
             self._ask.setStyleSheet(f"text-align:left;color:{theme.LINK};padding:2px 0;")
             self._ask.clicked.connect(lambda _c=False: self.toggle_chat())
+            # v0.10.0: spare height (the popup grown for the chat drawer while the list
+            # is not shown) goes here, above the chat row: nothing else stretches.
+            self._outer.insertStretch(self._outer.indexOf(self._footer), 1)
             self._outer.insertWidget(self._outer.indexOf(self._footer), self._ask)
             self._ask.show()            # now, not on Qt's deferred show (see _refresh)
             self._resize(animate=False)
@@ -256,9 +267,13 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
     def chat(self):
         return self._chat
 
+    def drawer(self):
+        """v0.10.0: the chat drawer (None until the chat is first opened)."""
+        return self._drawer
+
     def chat_expanded(self) -> bool:
         """The chat is open (or opening); False while it collapses."""
-        return self._chat is not None and self._chat_open
+        return self._drawer is not None and self._drawer.is_open()
 
     def _collapse_chat(self) -> None:
         if self.chat_expanded():
@@ -290,21 +305,49 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
             return
         if self._chat is None:
             from .chat import ChatWidget
+            from .drawer import ChatDrawer
             self._chat = ChatWidget(self._chat_factory)
             self._chat.changed.connect(self.chat_changed)
             self._chat.attention.connect(self.chat_attention)
             self._chat.collapse_requested.connect(self.handle_escape)   # Esc in the chat
-            self._chat.hide()
-            self._outer.insertWidget(self._outer.indexOf(self._footer), self._chat)
-            expand = True
-        else:
-            expand = not self._chat_open
-        self._chat_open = expand
+            self._drawer = ChatDrawer(self, self._chat)
+            self._drawer.close_requested.connect(self._collapse_chat)
+            self._drawer.closed.connect(self._drawer_closed)
+        expand = not self._drawer.is_open()
         self._ask.setText("Hide chat" if expand else "Ask Claude…")
-        # Slides open (or closed) with the popup growing or shrinking along with it.
-        self._reveal(self._chat, expand)
         if expand:
+            # v0.10.0: the details panel and the chat are never open together.
+            if self._flyout_shown():
+                self.close_flyout(restore_focus=False)
+            # A popup too short for the drawer grows first (its usual height tween).
+            self._drawer_need = True
+            self._resize()
+            self._place_drawer()
+            self._drawer.open_drawer(0 if not self.isVisible() else None)
             self._chat.focus_input()
+        else:
+            self._drawer.close_drawer(0 if not self.isVisible() else None)
+
+    def _drawer_closed(self) -> None:
+        """Fully retracted: the popup goes back to its own height (tweened)."""
+        if self._drawer_need:
+            self._drawer_need = False
+            self._resize(animate=self.is_open())
+
+    def _place_drawer(self) -> None:
+        d = self._drawer
+        if d is None or sip.isdeleted(d):
+            return
+        # From the popup's top down to just above the chat row.
+        bottom = self._ask.geometry().top() - 2 if self._ask is not None else self.height()
+        d.place(bottom - motion.DRAWER_SHADOW_PX)
+
+    def _drawer_min_height(self) -> int:
+        """The popup height the open drawer needs (0: no need)."""
+        if not self._drawer_need or self._ask is None:
+            return 0
+        below = self.height() - self._ask.geometry().top() + 2
+        return motion.DRAWER_MIN_PX + motion.DRAWER_SHADOW_PX + max(0, below)
 
     # -- signals / state ------------------------------------------------
     def request_view(self, name: str) -> None:
@@ -351,9 +394,23 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         notes += [f"Sign in again for {a}" for a, s in self._statuses.items() if s == "reauth"]
         if any(s == "error" for s in self._statuses.values()):
             notes.append("Sync problem")
-        self._status.setText("\n".join(notes))
-        self._status.setVisible(bool(notes))
-        self._resize()
+        text = "\n".join(notes)
+        if text == self._status_text:
+            return                      # v0.10.0: every sync reports "ok": nothing to do
+        uitrace.trace("status", shown=bool(notes), lines=len(notes))
+        was = bool(self._status_text)
+        self._status_text = text
+        if text:
+            self._status.setText(text)
+        if bool(text) != was:
+            # v0.10.0: slides open / closed like the notice (no height jump).
+            self._reveal(self._status, bool(text), on_done=self._clear_status_text)
+        else:
+            self._resize()
+
+    def _clear_status_text(self) -> None:
+        if not self._status_text:
+            self._status.setText("")
 
     # -- accessors (used by tests and tooltip) ---------------------------
     def rows(self) -> list[RowInfo]:
@@ -373,7 +430,7 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         return self._empty.text()
 
     def status_text(self) -> str:
-        return self._status.text()
+        return self._status_text
 
     # -- rendering ---------------------------------------------------------
     def _area(self) -> QRect:
@@ -393,10 +450,16 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         before = {_row_key(r.event) for r in self.row_widgets()
                   if isinstance(r, AgendaRow)} if fade_in_new else None
         self._refreshing = True        # rows are rebuilt: list scrolling means nothing yet
+        self._in_change.append("refresh")
         try:
-            self._refresh(now)
+            changed = self._refresh(now)
         finally:
             self._refreshing = False
+            self._in_change.pop()
+        if not changed:
+            # v0.10.0: nothing on screen changed (the 30 s tick and syncs, mostly): no
+            # relayout, no placement, no hover sync, no effect, no animation.
+            return
         build = self._rows_build
         if build is not None and build.running():
             # Rebuilt mid-build (e.g. a sync): rows still on their way in carry on, on
@@ -422,67 +485,118 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
                     and r.rect().contains(r.mapFromGlobal(pos))
                 r.set_hovered(inside, animate=False)
 
-    def _refresh(self, now: datetime | None) -> None:
+    def _row_signature(self, ev, time_text: str, is_next: bool) -> tuple:
+        """Everything a row shows (v0.10.0): same signature, the row widget stays."""
+        url = getattr(ev, "meeting_url", None)
+        url = url if safe_http_url(url) is not None else None
+        return (ev.title, time_text, is_next, theme.effective_color(ev, self.settings),
+                self.tile_style(), url, meeting_label(url) if url else "")
+
+    def _empty_line(self) -> str:
+        if self._no_accounts:
+            return NO_ACCOUNTS_TEXT
+        if self.all_accounts_hidden():
+            return ALL_HIDDEN_TEXT
+        text = "Nothing scheduled today"
+        n = self.hidden_account_count()
+        if n:
+            text += f" ({n} account{'s' if n != 1 else ''} hidden)"
+        return text
+
+    def _refresh(self, now: datetime | None) -> bool:
+        """v0.10.0: diffed. Rows whose signature (_row_signature) is unchanged keep their
+        widget (focus, hover, press, a running build, scroll position all survive);
+        only new or changed rows are built, only gone ones are deleted. Nothing changed
+        at all: nothing is touched (returns False)."""
         now = now or self.now()
         events = agenda.today(self.cache, self.settings, now)
         nxt = agenda.next_event(self.cache, self.settings, now)
-        self._header.setText(f"Today · {now:%a, %b} {now.day}")
-        self._next_line = f"Next: {agenda.describe_next(nxt, now)}" if nxt else ""
-        self._next.setText(self._next_line)
-        self._next.setVisible(bool(nxt))
-
-        hovered_key = next((_row_key(r.event) for r in self.row_widgets()
-                            if isinstance(r, AgendaRow) and r.is_hovered()), None)
-        while self._rows_box.count():
-            item = self._rows_box.takeAt(0)
-            if item.widget():
-                item.widget().hide()
-                item.widget().deleteLater()
-        self._rows = []
-        selected = None
+        header = f"Today · {now:%a, %b} {now.day}"
+        next_line = f"Next: {agenda.describe_next(nxt, now)}" if nxt else ""
+        empty = "" if events else self._empty_line()
+        specs = []
         for ev in events:
             is_next = nxt is not None and ev.id == nxt.id and ev.account == nxt.account
             time_text = "All day" if ev.all_day else f"{ev.start:%I:%M %p}".lstrip("0")
-            self._rows.append(RowInfo(ev.title, is_next, time_text))
-            key = _row_key(ev)
-            # Built in their final look (selected, under the mouse): a refresh that
-            # changed nothing starts no fade at all.
-            row = self._make_row(ev, time_text, is_next,
-                                 selected=self._selected_key == key,
-                                 hovered=key == hovered_key)
-            self._rows_box.addWidget(row)
-            # Shown now, not on Qt's deferred show: a row added to a visible popup stays
-            # hidden until the next event-loop pass, and a layout skips hidden widgets,
-            # so _resize below would measure an empty list and size it to one row.
-            row.show()
-            if self._selected_key is not None and key == self._selected_key:
-                selected = row
-        # Rows stay at the top; spare list height stays below them (never stretches
-        # rows while the list is taller than its rows, e.g. during a shrink).
-        self._rows_box.addStretch(1)
+            specs.append((_row_key(ev), ev, time_text, is_next,
+                          self._row_signature(ev, time_text, is_next)))
+        old = [r for r in self.row_widgets() if isinstance(r, AgendaRow)]
+        by_key = {_row_key(r.event): r for r in old}
+        keep = {k: by_key[k] for k, _ev, _t, _n, sig in specs
+                if k in by_key and getattr(by_key[k], "signature", None) == sig}
+        for k, ev, *_rest in specs:
+            if k in keep:
+                keep[k].event = ev          # newest data (the details panel reads it)
+        self._rows = [RowInfo(ev.title, n, t) for _k, ev, t, n, _s in specs]
+        same_rows = [_row_key(r.event) for r in old] == [s[0] for s in specs] \
+            and len(keep) == len(specs)
+        unchanged = (same_rows and header == self._header.text()
+                     and next_line == self._next_line and empty == self._empty_shown
+                     and self._scroll.isHidden() == (not events))
+        selected = keep.get(self._selected_key) if self._selected_key is not None else None
+        if unchanged:
+            if selected is not None and self.flyout_open():
+                self._flyout.set_event(selected.event)   # (changes only what changed)
+            uitrace.trace("refresh", result="unchanged", rows=len(specs))
+            return False
+        if header != self._header.text():
+            self._header.setText(header)
+        if next_line != self._next_line:
+            self._next_line = next_line
+            self._next.setText(next_line)
+        self._next.setVisible(bool(nxt))
+        created = deleted = 0
+        if not same_rows:
+            hovered_key = next((_row_key(r.event) for r in old if r.is_hovered()), None)
+            # Out of the layout (the kept widgets stay shown and parented), then back in
+            # the new order; only changed or gone rows are deleted.
+            while self._rows_box.count():
+                self._rows_box.takeAt(0)
+            for k, r in by_key.items():
+                if keep.get(k) is not r:
+                    r.hide()
+                    r.deleteLater()
+                    deleted += 1
+            selected = None
+            for k, ev, time_text, is_next, sig in specs:
+                row = keep.get(k)
+                if row is None:
+                    # Built in their final look (selected, under the mouse): no fade.
+                    row = self._make_row(ev, time_text, is_next,
+                                         selected=self._selected_key == k,
+                                         hovered=k == hovered_key)
+                    row.signature = sig
+                    created += 1
+                self._rows_box.addWidget(row)
+                # Shown now, not on Qt's deferred show: a row added to a visible popup
+                # stays hidden until the next event-loop pass, and a layout skips hidden
+                # widgets, so _resize below would measure an empty list.
+                row.show()
+                if self._selected_key is not None and k == self._selected_key:
+                    selected = row
+            # Rows stay at the top; spare list height stays below them.
+            self._rows_box.addStretch(1)
         if selected is not None:   # a refresh keeps the selected meeting's details open
             if self.flyout_open():
-                # Rebuilt only if what it shows changed (the 30 s tick and syncs mostly
-                # change nothing: scroll position, selection and presses survive).
                 self._flyout.set_event(selected.event)
         elif self._selected_key is not None:
             self.close_flyout(restore_focus=False)   # gone: hidden, deleted, synced away
+        self._empty_shown = empty
         if events:
             self._empty.hide()
         else:
-            if self._no_accounts:
-                text = NO_ACCOUNTS_TEXT
-            elif self.all_accounts_hidden():
-                text = ALL_HIDDEN_TEXT
-            else:
-                text = "Nothing scheduled today"
-                n = self.hidden_account_count()
-                if n:
-                    text += f" ({n} account{'s' if n != 1 else ''} hidden)"
-            self._empty.setText(text)
+            if self._empty.text() != empty:
+                self._empty.setText(empty)
             self._empty.show()
         self._scroll.setVisible(bool(events))
+        uitrace.trace("refresh", result="changed", rows=len(specs), kept=len(keep),
+                      created=created, deleted=deleted)
         self._resize()
+        # The list's own layout now, not on its posted request: a paint before that
+        # showed the list empty (or rows at their old places) for a frame.
+        # (Sent through the scroll area's event filter: the content is sized too.)
+        QApplication.sendEvent(self._content, QEvent(QEvent.Type.LayoutRequest))
+        return True
 
     # -- measuring, and the popup's height tween ---------------------------------------
     def _measure(self) -> tuple[int | None, int | None, int]:
@@ -490,16 +604,29 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         used, window height or None without height-for-width, list content height).
         Leaves the list at its final fixed height; never touches the window geometry
         (the popup's layout has no size constraint: the window size is ours to set)."""
+        self._in_change.append("measure")
+        try:
+            return self._measure_now()
+        finally:
+            self._in_change.pop()
+
+    def _measure_now(self) -> tuple[int | None, int | None, int]:
         lay = self.layout()
         final_list, content_h = None, 0
         if not (self._scroll.isHidden() and not self._rows):
             max_total = min(MAX_HEIGHT, self._area().height() - 24)
-            self._scroll.setFixedHeight(0)
+            sc = self._scroll
+            fixed = sc.minimumHeight() == sc.maximumHeight()
+            if not fixed:
+                sc.setFixedHeight(0)    # (first measure only: the list had no height yet)
             lay.activate()
             # Everything but the list (header, status, notice, next line, chat, footer),
-            # word-wrapped lines measured at the popup's real width.
-            chrome = (lay.totalHeightForWidth(WIDTH) if lay.hasHeightForWidth()
-                      else lay.sizeHint().height())
+            # word-wrapped lines measured at the popup's real width. v0.10.0: measured
+            # around the list's current fixed height, never by setting it to 0 first (a
+            # paint before the layout settled showed the list gone for a frame).
+            total = (lay.totalHeightForWidth(WIDTH) if lay.hasHeightForWidth()
+                     else lay.sizeHint().height())
+            chrome = total - (sc.minimumHeight() if fixed and not sc.isHidden() else 0)
             inner_w = WIDTH - 20
             rows_lay = self._rows_box
             # Measured at the list's real width when the rows wrap (the plain size hint
@@ -507,6 +634,9 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
             content_h = (rows_lay.totalHeightForWidth(inner_w) if rows_lay.hasHeightForWidth()
                          else rows_lay.sizeHint().height())
             final_list = max(40, min(content_h, max_total - chrome))
+            need = self._drawer_min_height()
+            if need:                    # v0.10.0: room for the chat drawer (the list
+                final_list = max(final_list, min(max_total, need) - chrome)   # grows)
             self._scroll.setFixedHeight(final_list)
         lay.activate()
         final_h = None
@@ -515,6 +645,16 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
             # width (wider than the popup's fixed WIDTH), so a wrapped "Next:" line or
             # notice got fewer lines than it needs and the popup came out too short.
             final_h = max(lay.totalHeightForWidth(WIDTH), lay.minimumSize().height())
+        elif self._drawer is not None:
+            # v0.10.0: no wrapped line anywhere: the plain size hint is exact, and the
+            # drawer's growth (and the way back) then tweens like any other change
+            # (not adjustSize's snap).
+            final_h = max(lay.sizeHint().height(), lay.minimumSize().height())
+        if final_h is not None:
+            if final_list is None and self._drawer_need:
+                # No list (nothing today): the spare height goes to the stretch.
+                max_total = min(MAX_HEIGHT, self._area().height() - 24)
+                final_h = max(final_h, min(max_total, self._drawer_min_height()))
         return final_list, final_h, content_h
 
     def _can_tween(self) -> bool:
@@ -532,6 +672,8 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         list_before = not self._scroll.isHidden()
         final_list, final_h, content_h = self._measure()
         self._final_height = final_h
+        if final_h != h0 or (final_list is not None and final_list != l0):
+            uitrace.trace("resize", h0=h0, h1=final_h, l0=l0, l1=final_list)
         if (animate and final_h is not None and final_list is not None and list_before
                 and final_h != h0 and h0 - l0 == final_h - final_list and self._can_tween()):
             self._scroll.setFixedHeight(l0)
@@ -573,6 +715,7 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
             # inside its old one); a growing popup grows first, then the panel follows.
             # (The other order showed the panel's accent edge above or below the popup
             # for a frame, every frame of a tween.)
+            uitrace.trace("geometry", frm=self.geometry().getRect(), to=target.getRect())
             shrink_first = not size.height() > self.height()
             if shrink_first:
                 self._place_flyout(anchor=target)
@@ -738,9 +881,11 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
     def _end_all_reveals(self) -> None:
         """Hidden: every widget jumps to its final state (shown or hidden)."""
         self._stop_tween()
-        if self._chat is not None:
-            self._clear_reveal(self._chat)
-            self._chat.setVisible(self._chat_open)
+        if self._drawer is not None and not sip.isdeleted(self._drawer):
+            self._drawer.snap()         # v0.10.0: open or closed, never half way
+        self._clear_reveal(self._status)
+        self._status.setVisible(bool(self._status_text))
+        self._clear_status_text()
         self._clear_reveal(self._notice_box)
         self._notice_box.setVisible(self._notice_shown)
         if not self._notice_shown:
@@ -775,6 +920,9 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         chrome = h0 - l0
         max_total = min(MAX_HEIGHT, self._area().height() - 24)
         l1 = max(40, min(content_h, max_total - chrome))
+        need = self._drawer_min_height()
+        if need:                        # v0.10.0: the open chat drawer keeps its room
+            l1 = max(l1, min(max_total, need) - chrome)
         h1 = chrome + l1
         self._final_height = h1
         fxs = []
@@ -840,7 +988,15 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         fade-in, row and button fades) still running."""
         return (self.showing_animated() or self.height_animating() or self.revealing()
                 or self.collapsing() or self.fading_in() or self.row_fades_running()
-                or self.building())
+                or self.building() or self.drawer_animating())
+
+    def drawer_animating(self) -> bool:
+        """v0.10.0: the chat drawer sliding, its content building in or a message
+        arriving."""
+        d = self._drawer
+        if d is None or sip.isdeleted(d):
+            return False
+        return d.animating() or d.building() or self._chat.arrivals_running()
 
     # -- v0.9.0: the card build (see cards.py) ------------------------------------------
     def building(self) -> bool:
@@ -961,6 +1117,8 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
     def select_row(self, row: "AgendaRow", keyboard: bool = False) -> None:
         if not self.is_open():
             return                      # the flyout never outlives (or precedes) the popup
+        if self.chat_expanded():
+            self._collapse_chat()       # v0.10.0: details and chat never open together
         self._selected_key = _row_key(row.event)
         for r in self.row_widgets():
             if isinstance(r, AgendaRow):
@@ -1125,6 +1283,8 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
+        if self._drawer is not None and not self._drawer.isHidden():
+            self._place_drawer()        # (the layout already placed the chat row)
         shape = self.frame_shape()
         if shape is not None:           # fallback frame: clipped to the rounded shape
             self.setMask(shape)
@@ -1337,6 +1497,7 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
     def show_near_tray(self, tray_geometry) -> None:
         self._tray_geom = QRect(tray_geometry)
         self._anchored = True
+        uitrace.trace("show_near_tray", visible=self.isVisible(), dismissing=self.dismissing())
         if self.dismissing():
             # v0.9.1: reopened mid-outro: everything goes back into place from where it
             # is (no replayed opening, no jump).
@@ -1417,6 +1578,8 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
             self._finish_build()
 
     def event(self, e):
+        if e.type() in _TRACED_EVENTS:
+            uitrace.trace("popup.event", type=e.type().name)
         if e.type() == QEvent.Type.WindowDeactivate and self.isVisible():
             self._group_deactivated(self)
         elif e.type() == QEvent.Type.WindowActivate:
@@ -1448,6 +1611,12 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
             self._interrupt_seen_at = self.clock()
 
     def paintEvent(self, e):
+        if self._in_change and uitrace.enabled():
+            # A paint in the middle of our own change: whatever is half done shows.
+            import traceback
+            chain = [f.name for f in traceback.extract_stack()[-14:-1]]
+            uitrace.trace("paint.during_change", what=self._in_change[-1],
+                          stack=">".join(chain))
         super().paintEvent(e)
         winframe.paint_frame(self, self.frame_by_dwm)
 
@@ -1691,6 +1860,7 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         itself always hides at once (tests, the app's own code paths)."""
         if not self.isVisible() or self.dismissing():
             return
+        uitrace.trace("dismiss")
         if not self._outro_allowed():
             self.hide()
             return
