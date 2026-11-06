@@ -282,11 +282,12 @@ def test_panel_first_frame_has_no_white_pixels(qtbot, tmp_path, animated):
     white = sum(_whitish(first.pixel(x, y)) for x, y in pts)
     assert white / len(pts) < 0.05, white              # (only the light text)
     bg = QColor(theme.BG).rgb()
-    assert [first.pixel(x, y) for x, y in ((2, h - 3), (w - 3, h - 3), (w // 2, h - 3))] \
+    # (v0.8.6: inside the rounded edge, clear of its corners)
+    assert [first.pixel(x, y) for x, y in ((12, h - 4), (w - 13, h - 4), (w // 2, h - 4))] \
         == [bg] * 3
     qtbot.waitUntil(lambda: fly.x() < p.x() - 20)
     mid = fly.grab().toImage()
-    assert mid.pixel(2, h - 3) == QColor(theme.BG).rgb()
+    assert mid.pixel(12, h - 4) == QColor(theme.BG).rgb()
 
 
 def test_colorref_is_bgr():

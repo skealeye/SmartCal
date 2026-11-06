@@ -6,9 +6,12 @@ popup's size (same width and height, top aligned with it), but the popup treats 
 as one group for focus and lifetime (see AgendaPopup); the popup owns its menus, its
 placement and every decision about closing it.
 
-It slides out from behind the popup's edge and back. On Windows an owned tool window is
-always above its owner, so "behind" is drawn with a window mask: while the panel
-overlaps the popup, the overlapping part is masked away."""
+It slides out from behind the popup's edge and back. v0.8.6 ("stack" mode, the real
+Windows platform): the panel has no native owner and sits right below the popup in the
+z-order, so it really slides out from under the opaque popup, fully painted before it
+moves (the slide starts after its first paint) and with no window mask. Elsewhere, or if
+the stacking fails ("slide" mode, as in v0.8.5): an owned tool window is always above
+its owner, so "behind" is drawn with a window mask that hides the overlapping part."""
 from __future__ import annotations
 
 import math
@@ -22,15 +25,16 @@ from PyQt6.QtWidgets import (QApplication, QBoxLayout, QFrame, QLabel, QPushButt
                              QWidget)
 
 from ..textutil import calendar_label, html_to_text, meeting_label, safe_http_url
-from . import layout, motion, nativebg, theme
+from . import layout, motion, nativebg, theme, winframe
 from .widgets import HoverButton
 from .linktext import LinkText, plain_tip
 from .popup import WIDTH   # one source of truth: the panel is as wide as the popup
 
-# True: the panel slides out from behind the popup, the overlapping part hidden by a
-# window mask. Set it False to fall back to a fade-only open/close (no overlap and no
-# mask: the panel sits docked next to the popup and only fades, same durations) if the
-# mask flickers on some display. SMARTCAL_SLIDE_MODE=fade picks that without a rebuild.
+# True: the panel slides out from behind the popup (stacked below it on the real
+# Windows platform, else with the overlapping part hidden by a window mask). Set it
+# False to fall back to a fade-only open/close (no overlap: the panel sits docked next
+# to the popup and only fades, same durations). SMARTCAL_SLIDE_MODE=fade (or =slide,
+# =stack) picks a mode without a rebuild.
 SLIDE_USES_MASK = True
 SLIDE_MODE_ENV = "SMARTCAL_SLIDE_MODE"
 
@@ -55,14 +59,18 @@ def _scrollbar_w() -> int:
 
 
 def slide_mode() -> str:
-    """"slide": out from behind the popup, the overlap hidden by a window mask.
+    """"stack": out from under the popup, stacked right below it (v0.8.6; the default
+    on the real Windows platform). "slide": out from behind the popup, the overlap
+    hidden by a window mask (the default elsewhere, and the fallback if stacking fails).
     "fade": docked beside the popup from the start, only fading in and out (same
-    durations); no mask. SLIDE_USES_MASK picks the default; SMARTCAL_SLIDE_MODE=fade
-    (or =slide) overrides it without a rebuild."""
+    durations). SLIDE_USES_MASK picks slide/stack or fade; SMARTCAL_SLIDE_MODE=fade,
+    =slide or =stack overrides it without a rebuild."""
     env = os.environ.get(SLIDE_MODE_ENV, "").strip().lower()
-    if env in ("fade", "slide"):
+    if env in ("fade", "slide", "stack"):
         return env
-    return "slide" if SLIDE_USES_MASK else "fade"
+    if not SLIDE_USES_MASK:
+        return "fade"
+    return "stack" if winframe.native_windows() else "slide"
 
 
 def px_before_edge(x: int, edge: int, dpr: float) -> int:
@@ -113,7 +121,7 @@ def _shows_nothing(region: QRegion) -> bool:
 
 
 
-class DetailsFlyout(QWidget):
+class DetailsFlyout(winframe.FramedWindow, QWidget):
     """Frameless tool window with one meeting's details. `popup` is the AgendaPopup:
     it opens the menus, joins, hides the group, places the panel and decides what Esc
     does."""
@@ -178,6 +186,16 @@ class DetailsFlyout(QWidget):
         self._anim.finished.connect(self._slide_finished)
         self._fade = QPropertyAnimation(self, b"windowOpacity", self)
         self._fade.finished.connect(self._slide_finished)
+        # Stack mode: the slide waits for the first paint after show (so nothing
+        # unpainted ever comes out from under the popup); this timer starts it right
+        # after that paint, or after motion.FLYOUT_PAINT_WAIT_MS at the latest.
+        self._pending_ms = 0            # > 0: an opening slide waiting for that paint
+        self._paint_wait = QTimer(self)
+        self._paint_wait.setSingleShot(True)
+        self._paint_wait.timeout.connect(self._start_pending_slide)
+        # Seams for tests (the real ones only work on the real Windows platform).
+        self.stack_below = winframe.stack_below
+        self.has_native_owner = winframe.has_native_owner
 
     # -- content -------------------------------------------------------------
     def body(self) -> QWidget | None:
@@ -289,7 +307,8 @@ class DetailsFlyout(QWidget):
             desc = _NotesBox(description)
             desc.setObjectName("description")
             desc.setStyleSheet(f"QTextBrowser{{background:{theme.BG};color:{theme.TEXT};"
-                               f"border:1px solid {theme.BORDER};font-size:11px;}}")
+                               f"border:1px solid {theme.BORDER};font-size:11px;"
+                               f"border-radius:{theme.RADIUS_SMALL}px;}}")
             # Fills the rest of the panel down to the buttons and scrolls beyond that; no
             # height cap. Measured after the style sheet (font, border) is applied.
             desc.ensurePolished()
@@ -303,7 +322,8 @@ class DetailsFlyout(QWidget):
         url = getattr(ev, "meeting_url", None)
         if safe_http_url(url) is not None:
             join = HoverButton(meeting_label(url), theme.LINK, "#a9c8ff", "#0b0d10",
-                               extra="font-weight:bold;padding:5px 10px;border-radius:4px;",
+                               extra="font-weight:bold;padding:5px 10px;"
+                                     f"border-radius:{theme.RADIUS_SMALL}px;",
                                focus="border:2px solid #f1f3f4;")
             join.setObjectName("bigjoin")
             join.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -546,6 +566,11 @@ class DetailsFlyout(QWidget):
             if now is not None:
                 self.setFixedSize(now)
             return                      # nothing on screen: no move, no window region
+        if self.slide_pending():
+            if now is not None:
+                self.setFixedSize(now)
+            self.move(self._tucked)     # still under the popup, waiting for its paint
+            return
         if self._anim.state() == QPropertyAnimation.State.Running:
             if now is not None:
                 self.setFixedSize(now)  # the slide owns the position
@@ -562,7 +587,12 @@ class DetailsFlyout(QWidget):
     # -- the slide ---------------------------------------------------------------
     def sliding(self) -> bool:
         running = QPropertyAnimation.State.Running
-        return self._anim.state() == running or self._fade.state() == running
+        return (self._anim.state() == running or self._fade.state() == running
+                or self.slide_pending())
+
+    def slide_pending(self) -> bool:
+        """Shown under the popup, the opening slide waiting for the first paint."""
+        return self._pending_ms > 0
 
     def closing(self) -> bool:
         """Sliding back: still visible, already closed for the popup."""
@@ -580,7 +610,11 @@ class DetailsFlyout(QWidget):
         if self.isHidden():
             self._stop_animations()
             self._prepare_first_frame()
-            if self._mode == "fade":
+            if self._mode == "stack" and not self._show_stacked(ms):
+                self._mode = "slide"    # no stacking: v0.8.5's masked slide
+            if self._mode == "stack":
+                pass                    # shown (see _show_stacked)
+            elif self._mode == "fade":
                 self.move(self._docked)
                 self._set_opacity(0.0 if ms > 0 else 1.0)
             else:
@@ -589,7 +623,12 @@ class DetailsFlyout(QWidget):
                 self._set_opacity(1.0)
                 self.move(self._tucked if ms > 0 else self._docked)
                 self._apply_mask(self._visible_region(self.pos()))   # before it shows
-            self.show()                 # WA_ShowWithoutActivating: the popup keeps focus
+            if self.isHidden():
+                self.show()             # WA_ShowWithoutActivating: the popup keeps focus
+        if self.slide_pending():
+            return                      # starts after the first paint
+        if self._mode == "stack":
+            self.restack()              # turning around: under the popup again
         if not self._run(opening=True, ms=ms):
             self._move_to(self._docked)
             self._set_opacity(1.0)
@@ -599,6 +638,11 @@ class DetailsFlyout(QWidget):
         """Slide back behind the popup (fade-only: fade out), then hide. `ms` 0: hide at
         once."""
         self._closing = True
+        if self.slide_pending():        # never came out: nothing to slide back
+            self._finish_close(notify=True)
+            return
+        if self._mode == "stack":
+            self.restack()              # e.g. it was activated (on top) while docked
         if not self._run(opening=False, ms=ms):
             self._finish_close(notify=False)
 
@@ -609,6 +653,53 @@ class DetailsFlyout(QWidget):
         self.hide()                     # hidden first: unmasking never flashes it over
         self._clear_mask()              # the popup
         self._set_opacity(1.0)
+
+    # -- stack mode (v0.8.6) ---------------------------------------------------------
+    def _show_stacked(self, ms: int) -> bool:
+        """Show the hidden panel for stack mode: with no native owner, right below the
+        popup. Shown first with nothing visible (NOTHING_SHOWN mask); only once it is
+        confirmed under the popup is that mask dropped, so a failed stacking never
+        flashes the panel over the popup. Animated: tucked under the popup, the slide
+        waiting for the first paint. False: the stacking failed (hidden again; the
+        caller falls back to the masked slide)."""
+        winframe.drop_native_owner(self)
+        self._set_opacity(1.0)
+        self.move(self._tucked if ms > 0 else self._docked)
+        self.setMask(NOTHING_SHOWN)
+        self._masked = True
+        self.stack_below(self, self._popup)     # before show, and again after it
+        self.show()
+        if ms > 0:
+            ok = self.stack_below(self, self._popup) and self.has_native_owner(self) is False
+            if not ok:
+                self.hide()
+                self._clear_mask()
+                return False
+        self._apply_mask(None)          # all of it: under the popup, or docked
+        if ms > 0:
+            self._pending_ms = ms
+            self._paint_wait.start(motion.FLYOUT_PAINT_WAIT_MS)
+            self.update()
+        return True
+
+    def _start_pending_slide(self) -> None:
+        ms, self._pending_ms = self._pending_ms, 0
+        self._paint_wait.stop()
+        if ms <= 0 or self.isHidden() or self._closing:
+            return
+        self.restack()
+        if not self._run(opening=True, ms=ms):
+            self._move_to(self._docked)
+
+    def restack(self) -> None:
+        """Stack mode: back right below the popup (activating the panel, or raise_(),
+        puts it on top). Over the popup (narrow screens) it stays on top instead."""
+        if self._mode != "stack" or not self.isVisible():
+            return
+        if self._docked == self._tucked:
+            self.raise_()
+        else:
+            self.stack_below(self, self._popup)
 
     def _prepare_first_frame(self) -> None:
         """Before showing: styled and laid out, so its first paint has everything ready;
@@ -626,6 +717,8 @@ class DetailsFlyout(QWidget):
     def _stop_animations(self) -> None:
         self._anim.stop()
         self._fade.stop()
+        self._pending_ms = 0
+        self._paint_wait.stop()
 
     def _run(self, opening: bool, ms: int) -> bool:
         """Animate toward docked (opening) or tucked; the time is `ms` scaled by the
@@ -694,8 +787,9 @@ class DetailsFlyout(QWidget):
     def _visible_region(self, pos: QPoint) -> QRegion | None:
         """The part of the panel at `pos` that is not behind the popup (local coords),
         rounded in device pixels so it never reaches over the popup's edge at 125% or
-        150% scaling; None when nothing is behind it."""
-        if self._behind is None:
+        150% scaling; None when nothing is behind it, or in stack mode (the popup itself
+        covers the part under it)."""
+        if self._behind is None or self._mode != "slide":
             return None
         if not QRect(pos, self.size()).intersects(self._behind):
             return None
@@ -736,12 +830,23 @@ class DetailsFlyout(QWidget):
         self._apply_mask(self._visible_region(self.pos()))
 
     def _apply_mask(self, region: QRegion | None) -> None:
+        """`region` (None: all of it), clipped to the rounded frame shape when that is
+        a mask (the winframe fallback)."""
+        shape = self.frame_shape()
         if region is None:
-            self._clear_mask()
-            return
+            if shape is None:
+                self._clear_mask()
+                return
+            target = shape
+        elif region.isEmpty():
+            target = NOTHING_SHOWN
+        else:
+            target = region.intersected(shape) if shape is not None else region
+            if target.isEmpty():
+                target = NOTHING_SHOWN
         # Fully behind the popup: a mask outside the window (0 px show). The window
         # opacity is never touched here: it stays 1.0 (see NOTHING_SHOWN).
-        self.setMask(NOTHING_SHOWN if region.isEmpty() else region)
+        self.setMask(target)
         self._masked = True
 
     def _clear_mask(self) -> None:
@@ -759,6 +864,14 @@ class DetailsFlyout(QWidget):
         finally:
             self._hiding = False
 
+    def showEvent(self, e):
+        self.setup_frame()              # rounded, accent edge (before it is on screen)
+        super().showEvent(e)
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        winframe.paint_frame(self, self.frame_by_dwm)
+
     def hideEvent(self, e):
         self._stop_animations()         # never keeps moving a hidden window
         self._stop_height_anim()        # ...nor resizing or fading one
@@ -774,6 +887,10 @@ class DetailsFlyout(QWidget):
             self._popup._group_deactivated(self)
         elif e.type() == QEvent.Type.WindowActivate:
             self._popup.note_foreground()
+            if self.sliding():
+                self.restack()          # activated mid-slide: back under the popup
+        elif e.type() == QEvent.Type.Paint and self.slide_pending():
+            self._paint_wait.start(0)   # right after this frame is flushed
         return super().event(e)
 
     def keyPressEvent(self, e):

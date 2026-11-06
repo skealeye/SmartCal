@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (QApplication, QFrame, QGraphicsOpacityEffect, QHBox
 
 from .. import __version__, agenda
 from ..textutil import meeting_label, plain_line, safe_http_url
-from . import meeting_menus, motion, nativebg, placement, theme
+from . import meeting_menus, motion, nativebg, placement, theme, winframe
 from .widgets import HoverButton
 
 log = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ class RowInfo:
     time_text: str
 
 
-class AgendaPopup(QWidget):
+class AgendaPopup(winframe.FramedWindow, QWidget):
     """Frameless tool window. Hides when it loses activation (WindowDeactivate)."""
 
     view_requested = pyqtSignal(str)
@@ -866,15 +866,24 @@ class AgendaPopup(QWidget):
         fly.set_event(row.event)        # one instance; the content swaps in place
         opening = not self.flyout_open()    # hidden, or sliding back (turns around)
         self._place_flyout(force=True)
+        if opening and fly.isHidden() and self.windowOpacity() < 1.0:
+            # Still fading in: the panel slides out from under the popup, which must
+            # be opaque by then (else the tucked panel would show through it).
+            self._stop_show_animation()
+            self._place_flyout(force=True)
         if opening:
             # WA_ShowWithoutActivating: the popup keeps focus. Over the popup (narrow
             # screen) there is nothing to slide out from behind: it appears at once.
             fly.slide_open(0 if self.flyout_side == "over"
                            else motion.duration(motion.FLYOUT_OPEN_MS))
             self._place_flyout(force=True)
-        fly.raise_()
+        if fly.mode() == "stack":
+            fly.restack()               # under the popup (on top only when over it)
+        else:
+            fly.raise_()
         if keyboard:
             fly.activateWindow()
+            fly.restack()               # activation put it on top: back under the popup
             fly.focus_first()
 
     def close_flyout(self, restore_focus: bool = True, animate: bool = True) -> None:
@@ -1001,6 +1010,9 @@ class AgendaPopup(QWidget):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
+        shape = self.frame_shape()
+        if shape is not None:           # fallback frame: clipped to the rounded shape
+            self.setMask(shape)
         if not self._geom_change:
             self._place_flyout()
 
@@ -1280,6 +1292,10 @@ class AgendaPopup(QWidget):
         # Never the base class's nativeEvent: its (False, None) crashes Qt (see nativebg).
         return nativebg.native_event(event_type, message, theme.BG)
 
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        winframe.paint_frame(self, self.frame_by_dwm)
+
     def note_foreground(self) -> None:
         """A group window was activated (or a watchdog tick): remember if the OS really
         put the group in front."""
@@ -1346,6 +1362,10 @@ class AgendaPopup(QWidget):
         finished.connect(done)
 
     def showEvent(self, e):
+        self.setup_frame()              # rounded, accent edge (before it is on screen)
+        shape = self.frame_shape()
+        if shape is not None:
+            self.setMask(shape)
         super().showEvent(e)
         self._foreground_strikes = 0
         self._seen_foreground = False

@@ -100,9 +100,10 @@ def test_flyout_background_fully_painted_no_black_gap(qtbot, tmp_path):
     assert fly.height() < p.height()                   # v0.8.0: fits its content
     img = fly.grab().toImage()
     w, h = img.width(), img.height()
-    bg, border = QColor(theme.BG).rgb(), QColor(theme.BORDER).rgb()
-    assert img.pixel(0, 0) == border and img.pixel(w - 1, h - 1) == border
-    empty = [(2, 2), (w - 3, 2), (2, h - 3), (w - 3, h - 3), (w // 2, h - 3),
+    bg, edge = QColor(theme.BG).rgb(), QColor(theme.ACCENT).rgb()
+    # v0.8.6: a rounded ACCENT edge (painted here: no DWM offscreen)
+    assert img.pixel(w // 2, 0) == edge and img.pixel(w - 1, h // 2) == edge
+    empty = [(12, 3), (w - 13, 3), (12, h - 4), (w - 13, h - 4), (w // 2, h - 4),
              (w - 15, h // 2)]
     assert [img.pixel(x, y) for x, y in empty] == [bg] * len(empty)
     black = QColor("#000000").rgb()
@@ -636,12 +637,17 @@ def test_popup_and_panel_share_one_border_and_background(qtbot, tmp_path):
     assert p.styleSheet() == theme.window_style("popup")
     assert fly.styleSheet() == theme.window_style("flyout")
     a, b = p.grab().toImage(), fly.grab().toImage()
-    border, bg = QColor(theme.BORDER).rgb(), QColor(theme.BG).rgb()
+    edge, soft = QColor(theme.ACCENT).rgb(), QColor(theme.ACCENT_SOFT).rgb()
+    bg = QColor(theme.BG).rgb()
     for img in (a, b):
         w, h = img.width(), img.height()
-        assert [img.pixel(0, 0), img.pixel(w - 1, h // 2), img.pixel(w // 2, h - 1),
-                img.pixel(0, h // 2)] == [border] * 4
-        assert img.pixel(2, h - 3) == bg
+        # v0.8.6: the rounded ACCENT edge (painted offscreen; DWM draws it on Windows
+        # 11) with the soft inner line just inside it
+        assert [img.pixel(w // 2, 0), img.pixel(w - 1, h // 2), img.pixel(w // 2, h - 1),
+                img.pixel(0, h // 2)] == [edge] * 4
+        assert [img.pixel(w // 2, 1), img.pixel(1, h // 2)] == [soft] * 2
+        assert img.pixel(0, 0) == bg              # outside the rounded corner
+        assert img.pixel(12, h - 4) == bg
 
 
 def test_fully_tucked_panel_shows_zero_pixels(qtbot, tmp_path, animated):

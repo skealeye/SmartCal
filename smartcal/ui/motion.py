@@ -24,6 +24,9 @@ POPUP_SLIDE_PX = 24
 SHOW_START_FALLBACK_MS = 150
 FLYOUT_OPEN_MS = 180        # the details panel sliding out from behind the popup
 FLYOUT_CLOSE_MS = 140       # ...and back
+# v0.8.6: the details panel shows under the popup and starts sliding once its first frame
+# is painted (nothing unpainted ever comes out); if no paint is seen by then, it starts.
+FLYOUT_PAINT_WAIT_MS = 80
 
 
 def system_animations_enabled() -> bool:

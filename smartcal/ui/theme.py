@@ -14,12 +14,21 @@ LINK = "#8ab4f8"
 WARN = "#fdd663"
 DEFAULT_STRIPE = "#4285f4"
 BORDER_PX = 1
+# v0.8.6: the popup and the details panel are rounded cards with a colored edge. ACCENT
+# is that edge (the one place to change it); ACCENT_SOFT is the faint inner line that
+# softens it into a halo. CORNER_RADIUS matches Windows 11's own rounded corners
+# (DWMWCP_ROUND, 8 px at 100%), so the painted inner line follows the window's outline.
+ACCENT = "#7b8cf0"
+ACCENT_SOFT = "#444b75"         # mix(ACCENT, BG, 0.6): ACCENT 60% of the way to BG
+CORNER_RADIUS = 8
+RADIUS_SMALL = 6                # boxes inside the cards (description, chat input, Join)
 
 
 def window_style(name: str) -> str:
     """Style sheet of the tray popup and its details panel (one look for both): the
-    dark background, a BORDER_PX border in BORDER, and the label text."""
-    return (f"#{name}{{background:{BG};border:{BORDER_PX}px solid {BORDER};}}"
+    dark background and the label text. No style-sheet border: the colored, rounded
+    edge is drawn by Windows (see winframe) or painted by winframe.paint_frame."""
+    return (f"#{name}{{background:{BG};border:none;}}"
             f"QLabel{{color:{TEXT};font-size:12px;}}")
 
 

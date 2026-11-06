@@ -148,7 +148,8 @@ class ChatWidget(QWidget):
         self.setStyleSheet(
             f"QLabel{{color:{theme.TEXT};font-size:12px;}}"
             f"QLineEdit{{background:{theme.BG_NEXT};color:{theme.TEXT};"
-            f"border:1px solid {theme.BORDER};padding:2px;}}"
+            f"border:1px solid {theme.BORDER};padding:2px;"
+            f"border-radius:{theme.RADIUS_SMALL}px;}}"
             f"QPushButton{{padding:2px 8px;}}")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
