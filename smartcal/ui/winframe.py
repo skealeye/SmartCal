@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import sys
 
-from PyQt6.QtCore import QRectF, Qt
+from PyQt6.QtCore import QEvent, QObject, QRectF, Qt
 from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen, QRegion
 
 from . import theme
@@ -55,6 +55,8 @@ def _win32():
         user32.SetWindowPos.restype = wintypes.BOOL
         user32.GetWindow.argtypes = (ctypes.c_void_p, ctypes.c_uint)
         user32.GetWindow.restype = ctypes.c_void_p
+        user32.IsWindowVisible.argtypes = (ctypes.c_void_p,)
+        user32.IsWindowVisible.restype = wintypes.BOOL
         _api = (user32, dwmapi)
     return _api
 
@@ -88,13 +90,19 @@ def _hwnd(widget) -> int:
 def apply_dwm_frame(widget) -> bool:
     """Ask Windows 11 to round `widget`'s window and draw its edge in theme.ACCENT.
     True only if the corner preference took (the edge color is a bonus: if only that
-    failed, the window is still rounded and the painted inner line still shows)."""
+    failed, the window is still rounded and the painted inner line still shows).
+
+    v0.11.2: the edge color is set only once the native window is visible (at once if
+    it already is, else right after Windows shows it: its first paint, still within
+    show(), before the first composed frame). Set on a window that
+    was still hidden, DWM drew that edge once, as an empty accent-colored outline of
+    the window's size at the top-left of the primary screen, on about half of the
+    opens (recorded 2026-11-06: 1000x731 at (0, 0) ~20 ms after the Day/Week/Month
+    window was shown; window opacity 0 did not hide it)."""
     if not native_windows() or windows_build() < WIN11_BUILD:
         return False
     try:
         import ctypes
-        from ctypes import wintypes
-        from .nativebg import colorref
         _user32, dwmapi = _win32()
         hwnd = _hwnd(widget)
         if not hwnd:
@@ -104,12 +112,88 @@ def apply_dwm_frame(widget) -> bool:
                                           DWMWA_WINDOW_CORNER_PREFERENCE,
                                           ctypes.byref(pref), ctypes.sizeof(pref)) == S_OK
         if ok:
-            color = wintypes.DWORD(colorref(theme.ACCENT))
-            dwmapi.DwmSetWindowAttribute(ctypes.c_void_p(hwnd), DWMWA_BORDER_COLOR,
-                                         ctypes.byref(color), ctypes.sizeof(color))
+            border_color_when_shown(widget)
         return ok
     except Exception:  # noqa: BLE001 - a frame must never break the window
         return False
+
+
+_EDGE_HOOK = "smartcal_edge_when_shown"
+
+
+def native_visible(hwnd: int) -> bool:
+    """Is the native window shown (WS_VISIBLE)? False on any failure."""
+    try:
+        import ctypes
+        user32, _dwmapi = _win32()
+        return bool(user32.IsWindowVisible(ctypes.c_void_p(int(hwnd))))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def set_border_color(hwnd: int) -> bool:
+    """DWMWA_BORDER_COLOR = theme.ACCENT on `hwnd`. Only ever for a visible window
+    (see apply_dwm_frame). False on any failure."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        from .nativebg import colorref
+        _user32, dwmapi = _win32()
+        color = wintypes.DWORD(colorref(theme.ACCENT))
+        ok = dwmapi.DwmSetWindowAttribute(ctypes.c_void_p(int(hwnd)), DWMWA_BORDER_COLOR,
+                                          ctypes.byref(color), ctypes.sizeof(color)) == S_OK
+        from . import uitrace
+        if uitrace.enabled():
+            uitrace.trace("frame.border", ok=ok, visible=native_visible(hwnd))
+        return ok
+    except Exception:  # noqa: BLE001
+        return False
+
+
+class _EdgeWhenShown(QObject):
+    """Sets the pending edge color on the widget's window as soon as the native window
+    is visible: the first paint or ShowToParent after the show, both still inside
+    show() (QWindow.visibleChanged comes before ShowWindow: too early)."""
+
+    _EVENTS = (QEvent.Type.Paint, QEvent.Type.ShowToParent, QEvent.Type.UpdateRequest,
+               QEvent.Type.WindowActivate)
+
+    def __init__(self, widget):
+        super().__init__(widget)
+        self.setObjectName(_EDGE_HOOK)
+        self.pending = False
+        self._widget = widget
+        widget.installEventFilter(self)
+
+    def eventFilter(self, obj, e) -> bool:
+        try:
+            if self.pending and obj is self._widget and e.type() in self._EVENTS:
+                hwnd = _hwnd(obj)
+                if hwnd and native_visible(hwnd):
+                    self.pending = False
+                    set_border_color(hwnd)
+        except Exception:  # noqa: BLE001 - a frame must never break the window
+            pass
+        return False
+
+
+def border_color_when_shown(widget) -> None:
+    """The accent edge for `widget`'s window: now if its native window is visible,
+    else right after it is shown (once per apply_dwm_frame). Never raises."""
+    try:
+        hwnd = _hwnd(widget)
+        if not hwnd:
+            return
+        if native_visible(hwnd):
+            set_border_color(hwnd)
+            return
+        hook = widget.findChild(_EdgeWhenShown, _EDGE_HOOK,
+                                Qt.FindChildOption.FindDirectChildrenOnly)
+        if hook is None:
+            hook = _EdgeWhenShown(widget)
+        hook.pending = True
+    except Exception:  # noqa: BLE001 - a frame must never break the window
+        pass
 
 
 def stack_below(widget, above) -> bool:

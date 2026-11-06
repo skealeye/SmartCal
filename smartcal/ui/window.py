@@ -1236,8 +1236,10 @@ class EventDetails(QDialog):
 
     def prepare_show(self) -> None:
         """v0.11.1: before the first show(), after placing it. On the real display its
-        native window is made now, hidden, and gets the rounded accent edge, so its
-        first frame on screen is already the final one; with animations it starts fully
+        native window is made now, hidden, and gets the rounded corners (v0.11.2: the
+        accent edge color follows right after the native show, see
+        winframe.apply_dwm_frame), so its first frame on screen is already the final
+        one; with animations it starts fully
         transparent and fades in as a unit once its first frame is painted (as the big
         window does), its lines building in meanwhile."""
         self._stop_reveal()
