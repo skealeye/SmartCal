@@ -186,7 +186,10 @@ class SettingsDialog(TrayDialog):
         self.add_press_scale_all()
 
     def build_lines(self) -> list:
-        return [self.tabs, self.button_box]
+        # v0.12.1: small items only. The tab page is on screen, complete, from the first
+        # frame (v0.12.0 built in the whole tab widget from transparent: its area was
+        # empty for up to ~100 ms as the dialog appeared).
+        return [self.tabs.tabBar(), self.button_box]
 
     def add_press_scale_all(self) -> None:
         for b in self.findChildren(QPushButton):

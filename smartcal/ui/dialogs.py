@@ -26,6 +26,13 @@ from PyQt6.QtWidgets import QDialog, QWidget
 from . import cards, motion, nativebg, placement, theme, winframe
 
 
+# v0.12.1: the fade ends just short of 1.0. At exactly 1.0 Qt drops the window's layered
+# style and Windows repaints the whole window: one composed frame of plain background (no
+# tab page, no rows) about 110 ms into a cold open, recorded on the real display. At
+# alpha 254 of 255 the window stays layered: it looks the same, and is never blank.
+REVEAL_END_OPACITY = 254 / 255
+
+
 def _gone(obj) -> bool:
     try:
         return obj is None or sip.isdeleted(obj)
@@ -137,9 +144,10 @@ class TrayDialog(QDialog):
         lines = [w for w in self.build_lines() if w is not None and not _gone(w)]
         if not lines:
             return
-        self._build = cards.CardBuild(self, motion.PANEL_BUILD_OFFSET_PX, 1.0,
-                                      motion.WIN_DETAILS_START_MS,
-                                      motion.PANEL_BUILD_STAGGER_MS, motion.PANEL_BUILD_MS)
+        self._build = cards.CardBuild(self, motion.DIALOG_BUILD_OFFSET_PX, 1.0, 0,
+                                      motion.DIALOG_BUILD_STAGGER_MS, motion.DIALOG_BUILD_MS,
+                                      max_span_ms=motion.DIALOG_BUILD_SPAN_MS,
+                                      opacity_start=motion.DIALOG_BUILD_OPACITY)
         self._build.prepare(lines)
 
     def content_build(self) -> cards.CardBuild | None:
@@ -164,9 +172,10 @@ class TrayDialog(QDialog):
         self._reveal_pending = False
         self._reveal_timer.stop()
         self._uncloak()
+        self._start_build()             # v0.12.1: only now on screen (laid out, painted)
         motion.stop(self._reveal_anim)
         self._reveal_anim = motion.tween(
-            self, 0.0, 1.0, motion.duration(motion.WIN_REVEAL_MS),
+            self, 0.0, REVEAL_END_OPACITY, motion.duration(motion.WIN_REVEAL_MS),
             lambda v: None if _gone(self) else self.setWindowOpacity(float(v)),
             kind=motion.FADE)
 
@@ -228,9 +237,12 @@ class TrayDialog(QDialog):
                     self._framed = winframe.apply_dwm_frame(self)
             except Exception:  # noqa: BLE001
                 pass
-        if self._build is not None:
-            QTimer.singleShot(0, lambda: None if self._build is None or _gone(self)
-                              else self._build.start())
+        if self._build is not None and not self._reveal_pending:
+            QTimer.singleShot(0, self._start_build)     # (not revealed: at once)
+
+    def _start_build(self) -> None:
+        if not _gone(self) and self._build is not None:
+            self._build.start()
 
     def hideEvent(self, e):
         self.finish_build()

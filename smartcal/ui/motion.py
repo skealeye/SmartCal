@@ -362,6 +362,14 @@ WIN_SWITCH_SCALE = 0.98
 WIN_NOW_MS = 400
 WIN_REVEAL_MS = 120         # the window fading in once its first frame is painted
 WIN_DETAILS_START_MS = 60   # the details dialog's lines (PANEL_BUILD_* otherwise)
+# v0.12.1: the tray dialogs (Settings, Reminders) are utilities: only small items build in
+# (Settings: the tab bar and the buttons; never the tab page), from 60% opacity and 8 px
+# lower, all within about 150 ms, starting once the dialog is on screen.
+DIALOG_BUILD_OFFSET_PX = 8
+DIALOG_BUILD_OPACITY = 0.6
+DIALOG_BUILD_STAGGER_MS = 20
+DIALOG_BUILD_MS = 150
+DIALOG_BUILD_SPAN_MS = 60
 
 
 def spread_delays(count: int, start: int, stagger: int, max_span: int) -> list[int]:

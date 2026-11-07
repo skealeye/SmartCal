@@ -113,9 +113,13 @@ class CardBuild(QObject):
 
     def __init__(self, owner: QObject, offset: int, scale_start: float, start_ms: int,
                  stagger_ms: int, item_ms: int, cap: int = motion.BUILD_MAX_STAGGER,
-                 offset_x: int = 0, max_span_ms: int | None = None):
+                 offset_x: int = 0, max_span_ms: int | None = None,
+                 opacity_start: float = 0.0):
         super().__init__(owner)
         self.offset, self.scale_start = offset, scale_start
+        # v0.12.1 (the tray dialogs): items may start partly visible (never an empty
+        # area while they come in).
+        self.opacity_start = max(0.0, min(1.0, float(opacity_start)))
         self.start_ms, self.stagger_ms, self.item_ms, self.cap = (start_ms, stagger_ms,
                                                                   item_ms, cap)
         # v0.11.0 (the calendar window): items may also come in sideways (offset_x px,
@@ -225,6 +229,7 @@ class CardBuild(QObject):
             if done:
                 self._release(item)
             else:
+                op = self.opacity_start + (1.0 - self.opacity_start) * op
                 try:
                     item["fx"].set_state(op, self.offset * left, s, self.offset_x * left)
                 except RuntimeError:

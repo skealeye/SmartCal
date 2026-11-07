@@ -92,7 +92,7 @@ def test_placed_framed_and_transparent_before_show(qtbot, tmp_path, native, monk
         assert all(op == 0.0 for op, _g in order.moves_after_show)
         assert dlg.content_build() is not None          # its content builds in
         qtbot.waitUntil(lambda: not dlg.revealing() and not dlg.building(), timeout=3000)
-        assert dlg.windowOpacity() == 1.0
+        assert dlg.windowOpacity() == pytest.approx(dialogs.REVEAL_END_OPACITY, abs=0.002)
         dlg.close()
         assert dlg.windowOpacity() == 1.0 and not dlg.revealing()
 
@@ -107,7 +107,8 @@ def test_animations_off_still_hidden_until_painted_then_at_once(qtbot, tmp_path,
     dlg.open_near_tray(TRAY)
     assert order.at_show[0] == 0.0 and dlg.content_build() is None   # no build
     qtbot.waitUntil(lambda: not dlg.revealing(), timeout=1000)
-    assert dlg.windowOpacity() == 1.0 and dlg._reveal_anim is None   # no fade
+    assert dlg.windowOpacity() == pytest.approx(dialogs.REVEAL_END_OPACITY, abs=0.002)
+    assert dlg._reveal_anim is None                     # no fade
     dlg.close()
 
 
@@ -480,3 +481,212 @@ def test_real_display_settings_and_reminders_never_flash_white(tmp_path, scheme,
             continue
         hits = np.nonzero(st[:, 0] > 300)[0]
         assert len(hits) == 0, (name, [st[k].tolist() for k in hits[:5]])
+
+
+# -- v0.12.1: the content is there at the first visible frame ----------------------------
+# The owner on v0.12.0: "settings when first loading in, the main area of the UI starts
+# out all black". Per open (cold: the first in the process, then warm), every composed
+# frame of the dialog's content rect (Settings: the current tab page; Reminders: the rows)
+# for 400 ms after the content first shows on screen: how much of it is drawn (pixels not
+# of the area's background color), against the same area once settled. (A sparse page,
+# General, is mostly background even when complete: so relative to the settled frame.)
+RUN_CONTENT = textwrap.dedent(r"""
+    import faulthandler, json, os, subprocess, sys, time
+    faulthandler.enable()
+    from datetime import datetime, timedelta
+    from pathlib import Path
+    tmp = Path(sys.argv[1]); sys.path[:0] = [sys.argv[2], sys.argv[3]]
+    which, tab = sys.argv[4], int(sys.argv[5])
+    from PyQt6.QtCore import QElapsedTimer, QEvent, QPoint, QRect, Qt
+    from PyQt6.QtWidgets import QApplication, QWidget
+    app = QApplication([])
+    app.setQuitOnLastWindowClosed(False)
+    from smartcal.ui import motion, theme
+    theme.force_dark_scheme(app)
+    motion.animations_enabled = lambda: True
+    from smartcal.db import Cache
+    from smartcal.models import CalendarInfo
+    from smartcal.reminders import Reminders
+    from smartcal.settings import Settings
+    from smartcal.ui import placement
+    from smartcal.ui.reminders_dialog import RemindersDialog
+    from smartcal.ui.settings_dialog import SettingsDialog
+    cache = Cache(tmp / "c.db")
+    cache.upsert_calendars("me@gmail.com", [
+        CalendarInfo("p1", "me@gmail.com", "#4285f4", True),
+        CalendarInfo("h1", "Holidays in United States", "#0b8043", False),
+        CalendarInfo("f1", "Family", "#e67c73", False)])
+    cache.upsert_calendars("me@work.com", [CalendarInfo("p2", "me@work.com", "#7986cb", True),
+                                           CalendarInfo("t2", "Team", "#f6bf26", False)])
+    settings = Settings(tmp / "s.json")
+    settings.hidden_events = {"e:p1:x": {"title": "Lunch", "scope": "event",
+                                         "when": "2026-11-09"}}
+    rem = Reminders(tmp / "r.json")
+    now = datetime.now().astimezone()
+    for k, text in enumerate(["Call the dentist", "Leave for the airport", "Water the plants"]):
+        rem.add(text, now + timedelta(minutes=20 + 60 * k))
+    def make():
+        if which == "reminders":
+            return RemindersDialog(rem)
+        d = SettingsDialog(settings, cache, lambda: ["me@gmail.com", "me@work.com"],
+                           lambda: None, lambda a: None)
+        d.tabs.setCurrentIndex(tab)
+        return d
+    def content(d):
+        w = d.tabs.currentWidget() if which == "settings" else d._rows
+        tl = w.mapToGlobal(QPoint(0, 0))
+        return [tl.x() + 4, tl.y() + 4, w.width() - 8, w.height() - 8]
+    def pump(ms):
+        t = QElapsedTimer(); t.start()
+        while t.elapsed() < ms:
+            app.processEvents(); app.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+    scr = app.primaryScreen(); sg = scr.geometry(); area = scr.availableGeometry()
+    tray = QRect(area.right() - 300, area.bottom() + 5, 24, 40)
+    d = make(); placement.place_near_tray(d, tray); g = d.geometry(); d.deleteLater(); pump(50)
+    region = [g.x() - 30, g.y() - 60, g.width() + 60, g.height() + 90]
+    back = QWidget()                # a black backdrop
+    back.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
+    back.setStyleSheet("background:#000;"); back.setGeometry(QRect(*region))
+    back.show(); pump(400)
+    secs = 6.0
+    spec = f"dialog:{region[0] - sg.x()}:{region[1] - sg.y()}:{region[2]}:{region[3]}:frames:1"
+    p = subprocess.Popen([sys.executable, str(tmp / "grab_multi.py"), "0", str(secs), str(tmp),
+                          spec], stdout=subprocess.PIPE, text=True)
+    p.stdout.readline(); pump(600)
+    opens = []
+    for rep in range(2):            # cold (the first open in this process), then warm
+        d = make(); d.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        t0 = time.perf_counter(); d.open_near_tray(tray); pump(1300)
+        opens.append({"t": t0, "content": content(d)})
+        d.close(); pump(500)
+    p.wait()
+    (tmp / "info.json").write_text(json.dumps({"opens": opens, "region": region}))
+    print("survived", flush=True)
+""")
+
+
+def _drawn_fraction(img, top: int = 0) -> float:
+    """Share of pixels not of the area's background color (its most common color). With
+    `top`, a frame of the window still fading in is first brightened to that peak (a
+    dim but complete frame is not an empty one)."""
+    import numpy as np
+    img = img.astype(np.float32)
+    if top and img.max() > 0:
+        img = np.clip(img * (top / img.max()), 0, 255)
+    q = (img // 8).astype(np.int32)
+    keys = (q[..., 0] << 10) | (q[..., 1] << 5) | q[..., 2]
+    bg = np.bincount(keys.ravel()).argmax()
+    return float((keys != bg).mean())
+
+
+@pytest.mark.skipif(sys.platform != "win32" or os.environ.get("SMARTCAL_TESTS_REAL_DISPLAY") != "1",
+                    reason="opens real windows: SMARTCAL_TESTS_REAL_DISPLAY=1")
+@pytest.mark.parametrize("which,tab", [("settings", 0), ("settings", 1), ("settings", 2),
+                                       ("settings", 3), ("reminders", 0)])
+def test_real_display_content_is_never_an_empty_area(tmp_path, which, tab):
+    import importlib.util
+    import json
+    import numpy as np
+    if importlib.util.find_spec("dxcam") is None and not os.environ.get("SMARTCAL_TESTS_PYPATH"):
+        pytest.skip("needs dxcam (pip install dxcam, or its folder in SMARTCAL_TESTS_PYPATH)")
+    tests = Path(__file__).resolve().parent
+    env = dict(os.environ, QT_QPA_PLATFORM="windows", SMARTCAL_NO_SYSTEM_WRITES="1",
+               SMARTCAL_DATA_DIR=str(tmp_path / "data"))
+    env.pop("SMARTCAL_NO_ANIMATIONS", None)
+    env.pop(motion.ENV_LEVEL, None)
+    (tmp_path / "grab_multi.py").write_text(GRAB_MULTI, encoding="utf-8")
+    script = tmp_path / "run.py"
+    script.write_text(RUN_CONTENT, encoding="utf-8")
+    r = subprocess.run([sys.executable, str(script), str(tmp_path), str(tests.parent),
+                        str(tests), which, str(tab)], env=env, stdin=subprocess.DEVNULL,
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0 and "survived" in r.stdout, (r.returncode, r.stderr[-3000:])
+    info = json.loads((tmp_path / "info.json").read_text())
+    z = np.load(tmp_path / "dialog.npz")
+    frames, times = z["frames"], z["times"]
+    z.close()
+    if os.environ.get("SMARTCAL_TESTS_KEEP_FRAMES"):
+        import shutil
+        shutil.copy(tmp_path / "info.json", os.environ["SMARTCAL_TESTS_KEEP_FRAMES"] + ".json")
+        np.save(os.environ["SMARTCAL_TESTS_KEEP_FRAMES"] + ".npy", frames)
+        np.save(os.environ["SMARTCAL_TESTS_KEEP_FRAMES"] + "_t.npy", times)
+    (tmp_path / "dialog.npz").unlink()              # (large: never left on disk)
+    rx, ry = info["region"][:2]
+    report = []
+    for k, op in enumerate(info["opens"]):
+        x, y, w, h = op["content"]
+        crop = frames[:, y - ry:y - ry + h, x - rx:x - rx + w]
+        i0 = int(np.searchsorted(times, op["t"]))
+        i_end = min(int(np.searchsorted(times, op["t"] + 1.2)), len(frames)) - 1
+        lit = [i for i in range(i0, i_end) if crop[i].max() > 24]    # off the backdrop
+        assert lit, ("never shown", k)
+        first = lit[0]
+        settled = _drawn_fraction(crop[i_end])
+        top = int(crop[i_end].max())
+        window = [i for i in range(first, i_end) if times[i] - times[first] <= 0.4]
+        empty = []
+        for i in window:
+            f = _drawn_fraction(crop[i], top)
+            if f < 0.5 * settled:
+                empty.append((round((times[i] - times[first]) * 1000), round(f, 4)))
+        report.append(("cold" if k == 0 else "warm", "settled", round(settled, 4),
+                       "empty frames", len(empty), "last empty at ms",
+                       empty[-1][0] if empty else None))
+    assert all(r[4] == 0 for r in report), str(report)
+
+
+# -- v0.12.1: content first ---------------------------------------------------------------
+@pytest.mark.parametrize("which", ["settings", "reminders"])
+def test_content_complete_at_show_and_build_starts_after_reveal(qtbot, tmp_path, native,
+                                                              monkeypatch, which):
+    """Everything is built and laid out before show(); only small items build in, from
+    60% opacity, and only once the dialog is revealed (on screen); the tab page itself
+    never takes part."""
+    from PyQt6.QtCore import QEvent, QObject
+    from smartcal.ui import cards
+    dlg = make_settings(qtbot, tmp_path) if which == "settings" \
+        else make_reminders(qtbot, tmp_path)[0]
+    seen = {}
+
+    class AtShow(QObject):
+        def eventFilter(self, obj, e):
+            if obj is dlg and e.type() == QEvent.Type.Show and "page" not in seen:
+                page = dlg.tabs.currentWidget() if which == "settings" else dlg._rows
+                seen["page"] = (page.isVisibleTo(dlg), page.width(), page.height())
+                seen["rows"] = len(dlg._rows) if which == "settings" else len(dlg.rows())
+                b = dlg.content_build()
+                seen["started_at_show"] = b is not None and b.started()
+            return False
+    f = AtShow()
+    dlg.installEventFilter(f)
+    starts = []
+    monkeypatch.setattr(cards.CardBuild, "start", (lambda orig: lambda self: (
+        starts.append(dlg.revealing() and dlg._reveal_pending), orig(self)))(
+        cards.CardBuild.start))
+    dlg.open_near_tray(TRAY)
+    visible, w, h = seen["page"]
+    assert visible and w > 50 and h > 30 and seen["rows"] >= 2     # complete, laid out
+    assert not seen["started_at_show"]
+    b = dlg.content_build()
+    assert b is not None and b.opacity_start >= 0.6
+    widgets = b.widgets()
+    if which == "settings":
+        assert widgets == [dlg.tabs.tabBar(), dlg.button_box]
+        assert dlg.tabs not in widgets and dlg.tabs.currentWidget() not in widgets
+    assert max(b.delays()) <= 150                       # the whole stagger
+    assert dlg._reveal_pending and not b.started()       # waits for the reveal
+    qtbot.waitUntil(lambda: not dlg.revealing() and not dlg.building(), timeout=3000)
+    assert starts == [False]                            # started once, at the reveal
+    dlg.close()
+
+
+def test_card_build_opacity_start(qtbot):
+    from PyQt6.QtWidgets import QLabel
+    from smartcal.ui import cards
+    w = QLabel("x")
+    qtbot.addWidget(w)
+    b = cards.CardBuild(w, 8, 1.0, 0, 20, 150, opacity_start=0.6)
+    b.prepare([w])
+    assert w.graphicsEffect().state()[0] == pytest.approx(0.6)
+    b.finish()
+    assert w.graphicsEffect() is None
