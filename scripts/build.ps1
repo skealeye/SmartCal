@@ -13,7 +13,14 @@ $out = Join-Path $env:LOCALAPPDATA "SmartCal-build"
 $dist = Join-Path $out "dist"
 $work = Join-Path $out "work"
 
+# v0.12.2: the .exe (and Start Menu shortcut) icon, drawn by smartcal\ui\appicon.py.
+$ico = Join-Path $root "build\SmartCal.ico"
+New-Item -ItemType Directory -Force (Split-Path $ico) | Out-Null
+python scripts\make_icon.py $ico
+if ($LASTEXITCODE -ne 0) { throw "make_icon failed ($LASTEXITCODE)" }
+
 python -m PyInstaller --noconfirm --clean --windowed --name SmartCal `
+    --icon $ico `
     --specpath build `
     --distpath $dist `
     --workpath $work `

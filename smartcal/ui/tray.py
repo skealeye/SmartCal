@@ -8,12 +8,12 @@ import time
 from datetime import date, datetime
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPixmap
+from PyQt6.QtGui import QAction, QActionGroup, QIcon
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from .. import agenda, google_auth
 from ..textutil import plain_line
-from . import meeting_menus, motion
+from . import appicon, meeting_menus, motion
 
 log = logging.getLogger(__name__)
 
@@ -75,26 +75,19 @@ def track_dialog(holder: list, dlg) -> None:
 
 
 def make_icon(day: int) -> QIcon:
-    """A small calendar-style icon showing the day number (drawn, no image files)."""
-    size = 64
-    pm = QPixmap(size, size)
-    pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QColor("#f1f3f4"))
-    p.drawRoundedRect(4, 6, 56, 54, 8, 8)
-    p.setBrush(QColor("#ea4335"))
-    p.drawRoundedRect(4, 6, 56, 18, 8, 8)
-    p.drawRect(4, 16, 56, 8)
-    p.setPen(QColor("#202124"))
-    font = QFont("Segoe UI")
-    font.setBold(True)
-    font.setPixelSize(30)
-    p.setFont(font)
-    p.drawText(4, 26, 56, 34, Qt.AlignmentFlag.AlignCenter, str(day))
-    p.end()
-    return QIcon(pm)
+    """v0.12.2: the app icon (appicon.ICON_VARIANT) for today, one pixmap per tray /
+    window size, drawn in the UI's colors. Never raises (falls back to the old icon)."""
+    return appicon.build_icon(day=day)
+
+
+def apply_icon(tray, day: int) -> None:
+    """The tray icon and every window's icon (taskbar button, dialogs) for `day`."""
+    icon = make_icon(day)
+    tray.setIcon(icon)
+    try:
+        QApplication.setWindowIcon(icon)
+    except Exception:  # noqa: BLE001
+        log.exception("setting the window icon failed")
 
 
 class TrayController(QSystemTrayIcon):
@@ -130,7 +123,7 @@ class TrayController(QSystemTrayIcon):
         self._attention = False
         self._icon_day = 0
         self.now = lambda: datetime.now().astimezone()   # injectable for tests
-        self.setIcon(make_icon(datetime.now().day))
+        apply_icon(self, datetime.now().day)
         menu = QMenu()
         self._add_action = QAction(ADD_TEXT, menu)
         self._add_action.triggered.connect(lambda _checked=False: self._on_add_triggered())
@@ -216,7 +209,7 @@ class TrayController(QSystemTrayIcon):
         now = self.now()
         if now.day != self._icon_day:
             self._icon_day = now.day
-            self.setIcon(make_icon(now.day))
+            apply_icon(self, now.day)
         nxt = agenda.next_event(self.cache, self.settings, now)
         tip = f"Next: {agenda.describe_next(nxt, now)}" if nxt else "SmartCal"
         if self._attention:

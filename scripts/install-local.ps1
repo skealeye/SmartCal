@@ -24,5 +24,6 @@ $sh = New-Object -ComObject WScript.Shell
 $s = $sh.CreateShortcut($lnk)
 $s.TargetPath = Join-Path $dest "SmartCal.exe"
 $s.WorkingDirectory = $dest
+$s.IconLocation = (Join-Path $dest "SmartCal.exe") + ",0"   # v0.12.2: the app icon
 $s.Save()
 Write-Host "Installed to $dest; shortcut: $lnk"
