@@ -7,11 +7,10 @@ pixels so it stays sharp at 16 px.
 
 Variants (ICON_VARIANT picks the one in use; switching is that one line):
   "ring"  - dark tile, ACCENT ring, light calendar page with an ACCENT top band
-  "solid" - solid ACCENT tile, dark calendar page outline with a dark top band and dots
+  "solid" - solid ACCENT tile, dark calendar page outline with a dark top band and dots.
+            The default (owner's pick): the strongest silhouette on a dark taskbar.
   "day"   - dark card with an ACCENT edge and top band, today's day number (a dot
-            grid when there is no day, e.g. the .exe icon). The default: the day stays
-            legible at 16 px on dark and light taskbars, and it keeps the tray's
-            day-number behavior from before 0.12.2.
+            grid when there is no day, e.g. the .exe icon). Legible at 16 px.
   "legacy"- the pre-0.12.2 icon (white page, red band, day number): also the fallback
 
 Nothing here raises: a failed paint falls back to the legacy icon, then to an empty
@@ -30,7 +29,7 @@ from . import theme
 
 log = logging.getLogger(__name__)
 
-ICON_VARIANT = "day"
+ICON_VARIANT = "solid"
 VARIANTS = ("ring", "solid", "day")
 SIZES = (16, 20, 24, 32, 40, 48, 64, 256)
 ICO_SIZES = (16, 20, 24, 32, 40, 48, 64, 256)
