@@ -2,7 +2,7 @@
 
 Three sounds: "chime" (a reminder toast arrived), "open" (the calendar popup opens) and
 "details" (a meeting's details open). Off with the tray menu's "Play sounds", or with
-SMARTCAL_NO_SOUND=1 (the tests set it). Playing never blocks and never raises.
+SMARTCAL_NO_SOUND=1 (the tests set it). Playing never blocks the caller and never raises.
 """
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import struct
+import threading
 import wave
 
 log = logging.getLogger(__name__)
@@ -63,13 +64,20 @@ def wav_bytes(name: str) -> bytes:
     return _cache[name]
 
 
-def play(name: str) -> None:
-    """Start `name` and return at once. Silent when sounds are off or winsound fails."""
-    if not is_enabled():
-        return
+def _play_now(name: str) -> None:
     try:
         import winsound
-        winsound.PlaySound(wav_bytes(name),
-                           winsound.SND_MEMORY | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+        # Windows refuses SND_MEMORY together with SND_ASYNC, so this call blocks for the
+        # sound's length (under a second) and runs on its own thread.
+        winsound.PlaySound(wav_bytes(name), winsound.SND_MEMORY | winsound.SND_NODEFAULT)
     except Exception as exc:  # noqa: BLE001 - a sound must never break the app
         log.info("sound %s failed: %s", name, exc)
+
+
+def play(name: str) -> threading.Thread | None:
+    """Start `name` and return at once (the thread, or None when sounds are off)."""
+    if not is_enabled():
+        return None
+    t = threading.Thread(target=_play_now, args=(name,), daemon=True, name="sound")
+    t.start()
+    return t

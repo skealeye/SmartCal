@@ -16,15 +16,18 @@ def test_every_sound_is_a_short_valid_wav():
 def test_play_is_silent_when_disabled(monkeypatch):
     calls = []
     monkeypatch.setattr("winsound.PlaySound", lambda *a: calls.append(a))
-    sounds.play("chime")                      # SMARTCAL_NO_SOUND=1 in the tests
+    assert sounds.play("chime") is None       # SMARTCAL_NO_SOUND=1 in the tests
     assert calls == []
     monkeypatch.delenv("SMARTCAL_NO_SOUND")
     sounds.set_enabled(False)
-    sounds.play("chime")
+    assert sounds.play("chime") is None
     assert calls == []
     sounds.set_enabled(True)
-    sounds.play("chime")
+    sounds.play("chime").join(2)
     assert len(calls) == 1
+    flags = calls[0][1]
+    import winsound
+    assert flags & winsound.SND_MEMORY and not flags & winsound.SND_ASYNC   # Windows refuses both
 
 
 def test_play_never_raises(monkeypatch):
@@ -32,7 +35,7 @@ def test_play_never_raises(monkeypatch):
     def boom(*a):
         raise RuntimeError("no audio device")
     monkeypatch.setattr("winsound.PlaySound", boom)
-    sounds.play("open")
+    sounds.play("open").join(2)
 
 
 def test_toast_plays_the_chime(monkeypatch):
