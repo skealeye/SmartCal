@@ -66,11 +66,28 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+BUNDLED_CLIENT = "bundled_client_secret.json"
+
+
+def client_secret_path() -> Path | None:
+    r"""The OAuth client file: the user's own %APPDATA%\SmartCal\client_secret.json
+    wins; otherwise the client bundled into the release build (or, running from
+    source, one in the repo root). None if neither exists."""
+    import sys
+    own = data_dir() / "client_secret.json"
+    if own.exists():
+        return own
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+    bundled = base / BUNDLED_CLIENT
+    return bundled if bundled.exists() else None
+
+
 def _make_flow():
     from google_auth_oauthlib.flow import InstalledAppFlow
-    secret = data_dir() / "client_secret.json"
-    if not secret.exists():
-        raise FileNotFoundError(f"Missing {secret}. See README.md for setup steps.")
+    secret = client_secret_path()
+    if secret is None:
+        raise FileNotFoundError(
+            f"Missing {data_dir() / 'client_secret.json'}. See README.md for setup steps.")
     return InstalledAppFlow.from_client_secrets_file(str(secret), SCOPES)
 
 

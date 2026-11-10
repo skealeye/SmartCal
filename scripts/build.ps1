@@ -19,7 +19,16 @@ New-Item -ItemType Directory -Force (Split-Path $ico) | Out-Null
 python scripts\make_icon.py $ico
 if ($LASTEXITCODE -ne 0) { throw "make_icon failed ($LASTEXITCODE)" }
 
+# v0.12.3: bundle the maintainer's OAuth client so end users need no Google Cloud project.
+# The file is gitignored (never committed); a build without it still works, but users
+# then need their own client_secret.json (see README).
+$bundle = @()
+$client = Join-Path $root "bundled_client_secret.json"
+if (Test-Path $client) { $bundle = @("--add-data", "$client;.") }
+else { Write-Warning "bundled_client_secret.json not found: this build has no bundled Google client." }
+
 python -m PyInstaller --noconfirm --clean --windowed --name SmartCal `
+    @bundle `
     --icon $ico `
     --specpath build `
     --distpath $dist `

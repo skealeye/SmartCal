@@ -36,7 +36,13 @@ SmartCal is a Windows tray calendar app. It merges your personal and work Google
 
 ## One-time setup
 
-### Google Cloud project
+### Google sign-in
+
+**Using a release build:** nothing to set up. Open **Settings**, click sign in, and approve in the browser. Google shows "this app isn't verified" (SmartCal is a free hobby app that has not paid for Google's review): click **Advanced > Go to SmartCal (unsafe)**. It only talks to your own calendars.
+
+**Maintainer: publishing a build with a bundled client.** Do the Google Cloud steps below once, then save the downloaded client JSON as `bundled_client_secret.json` in the repo root (gitignored, never commit it) and run `scripts\build.ps1`; it is added to the app. Set the consent screen to **In production** (Audience > Publish app) so any Google user can sign in and tokens do not expire weekly. Unverified apps are limited to 100 users in total.
+
+### Google Cloud project (your own client, or the maintainer's one-time setup)
 
 1. Go to <https://console.cloud.google.com/> and sign in with your personal account.
 2. Create a project: top bar project picker > **New Project** > name it `SmartCal` > **Create**. Make sure it is selected.

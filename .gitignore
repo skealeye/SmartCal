@@ -2,6 +2,7 @@
 *.token.json
 token*.json
 client_secret*.json
+bundled_client_secret.json
 __pycache__/
 *.pyc
 .pytest_cache/
