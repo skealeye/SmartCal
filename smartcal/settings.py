@@ -116,6 +116,7 @@ class Settings:
         self.autostart: bool = True
         # Ask GitHub once a day whether a newer SmartCal release exists (v0.13.0).
         self.check_updates: bool = True
+        self.sounds: bool = True   # v0.14.0: chime on reminders, soft sounds on open
         self.notified_update: str = ""   # the version already announced by a balloon
         # How a meeting's color shows in the popup list: "stripe" (a bar on the left) or
         # "fill" (the whole row in that color).
@@ -161,6 +162,8 @@ class Settings:
             self.autostart = data["autostart"]
         if isinstance(data.get("check_updates"), bool):
             self.check_updates = data["check_updates"]
+        if isinstance(data.get("sounds"), bool):
+            self.sounds = data["sounds"]
         nu = data.get("notified_update")
         self.notified_update = nu if isinstance(nu, str) else ""
         self.first_run_done = data.get("first_run_done") is True
@@ -225,6 +228,7 @@ class Settings:
                 "hidden_accounts": sorted(self.hidden_accounts),
                 "autostart": self.autostart,
                 "check_updates": self.check_updates,
+                "sounds": self.sounds,
                 "notified_update": self.notified_update,
                 "tile_style": self.tile_style,
                 "animations": self.animations,
@@ -338,6 +342,10 @@ class Settings:
 
     def set_autostart(self, enabled: bool) -> None:
         self.autostart = bool(enabled)
+        self.save()
+
+    def set_sounds(self, enabled: bool) -> None:
+        self.sounds = bool(enabled)
         self.save()
 
     def set_check_updates(self, enabled: bool) -> None:

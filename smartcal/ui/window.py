@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (QButtonGroup, QDialog, QFrame, QGridLayout, QHBoxLa
                              QLabel, QMainWindow, QPushButton, QScrollArea, QSizePolicy,
                              QStackedWidget, QVBoxLayout, QWidget)
 
-from .. import agenda
+from .. import agenda, sounds
 from ..config import data_dir
 from ..settings import color_key
 from ..sync import synced_days
@@ -1835,6 +1835,7 @@ class CalendarWindow(QMainWindow):
         if self.details is not None:
             self.details.close()
             self.details.deleteLater()
+        sounds.play("details")
         self.details = EventDetails(event, self.now(), self, settings=self.settings)
         placement.center_over(self.details, self)   # opened from the window: over it
         self.details.prepare_build()

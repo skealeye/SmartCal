@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (QApplication, QFrame, QGraphicsOpacityEffect, QHBox
                              QLabel, QLayout, QPushButton, QScrollArea, QVBoxLayout,
                              QWidget)
 
-from .. import __version__, agenda
+from .. import __version__, agenda, sounds
 from ..textutil import meeting_label, plain_line, safe_http_url
 from . import cards, meeting_menus, motion, nativebg, placement, theme, uitrace, winframe
 from .widgets import HoverButton
@@ -1127,6 +1127,8 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         fly = self._ensure_flyout()
         fly.set_event(row.event)        # one instance; the content swaps in place
         opening = not self.flyout_open()    # hidden, or sliding back (turns around)
+        if opening:
+            sounds.play("details")
         self._place_flyout(force=True)
         if opening and fly.isHidden() and self.windowOpacity() < 1.0:
             # Still fading in: the panel slides out from under the popup, which must
@@ -1510,6 +1512,8 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         self.ensurePolished()
         self._resize(animate=False)  # right screen; places only when visible
         self._place()
+        if not was_visible:
+            sounds.play("open")
         ms = 0 if was_visible else motion.duration(motion.POPUP_MS)
         if ms:
             # Slides in from the tray side (away from the taskbar) while fading in. The

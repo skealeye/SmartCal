@@ -15,6 +15,8 @@ import logging
 import re
 from urllib.parse import quote, urlsplit
 
+from smartcal import sounds
+
 log = logging.getLogger(__name__)
 
 APP_ID = "SmartCal"
@@ -91,6 +93,8 @@ class ToastSender:
         return self._cls
 
     def __call__(self, title: str, body: str, url: str | None = None) -> None:
+        log.info("toast: %s", clean_text(title, 60))
+        sounds.play("chime")   # ours, so it is heard even if Windows hides the banner
         try:
             self._show_native(title, body, url)
         except Exception as exc:  # noqa: BLE001 - fall back to the tray balloon
@@ -105,6 +109,12 @@ class ToastSender:
         note = self._notification_cls()(app_id=APP_ID, title=title, msg=body)
         # winotify defaults tag to the title and puts it in a PowerShell string.
         note.tag = hashlib.sha1((title + body).encode("utf-8")).hexdigest()[:16]
+        if sounds.is_enabled():     # the chime above replaces Windows' own sound
+            try:
+                from winotify import audio
+                note.set_audio(audio.Silent, loop=False)
+            except Exception:  # noqa: BLE001 - a fake/old winotify: keep its default
+                pass
         link = join_url(url)
         if link:
             note.add_actions(label="Join", launch=link)

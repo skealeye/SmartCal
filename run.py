@@ -6,7 +6,7 @@ from datetime import datetime
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QApplication
 
-from smartcal import __version__, autostart, updates
+from smartcal import __version__, autostart, sounds, updates
 from smartcal.actions import Actions
 from smartcal.assistant import Assistant, make_client
 from smartcal.clients import ClientPool
@@ -189,8 +189,10 @@ def main() -> int:
                           on_before_exit=window.save_state, instance=instance,
                           accounts_fn=list_accounts,
                           on_visibility_changed=on_visibility_changed,
-                          update_check_fn=None if no_updates else updates.check)
+                          update_check_fn=None if no_updates else updates.check,
+                          send_test_fn=toast)
     toast.tray = tray
+    sounds.set_enabled(settings.sounds)
     window.tray_geometry = tray.tray_geometry   # first open: next to the tray icon
     popup.chat_attention.connect(guarded(tray.notify_attention))
     instance.activated.connect(guarded(tray.show_popup))   # a second launch was refused

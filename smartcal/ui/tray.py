@@ -11,7 +11,7 @@ from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QAction, QActionGroup, QDesktopServices, QIcon
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-from .. import agenda, google_auth, updates
+from .. import agenda, google_auth, sounds, updates
 from ..textutil import plain_line
 from . import appicon, meeting_menus, motion
 
@@ -28,6 +28,8 @@ RESTORE_ALL_TEXT = "Restore all hidden"
 RESTORE_TITLE_MAX = 40
 ANIMATIONS_TEXT = "Animations"
 CHECK_UPDATES_TEXT = "Check for updates daily"
+SOUNDS_TEXT = "Play sounds"
+TEST_TOAST_TEXT = "Send test notification"
 ANIMATION_CHOICES = (("on", "On"), ("auto", "Follow Windows"), ("off", "Off"))
 
 
@@ -100,7 +102,7 @@ class TrayController(QSystemTrayIcon):
                  on_accounts_changed=None, add_account_fn=None, on_open_settings=None, reminders=None,
                  on_before_exit=None, exit_fn=os._exit, cancel_signin_fn=None,
                  clock=time.monotonic, instance=None, accounts_fn=None,
-                 on_visibility_changed=None, update_check_fn=None):
+                 on_visibility_changed=None, update_check_fn=None, send_test_fn=None):
         super().__init__(parent)
         self.popup, self.worker = popup, worker
         self._instance = instance   # SingleInstance: released first thing on Quit
@@ -163,6 +165,14 @@ class TrayController(QSystemTrayIcon):
         self._check_updates_action.setChecked(getattr(settings, "check_updates", True))
         self._check_updates_action.triggered.connect(self.set_check_updates)
         self._update_check_fn = update_check_fn
+        # v0.14.0: "Play sounds" switch and "Send test notification".
+        self._sounds_action = QAction(SOUNDS_TEXT, menu)
+        self._sounds_action.setCheckable(True)
+        self._sounds_action.setChecked(getattr(settings, "sounds", True))
+        self._sounds_action.triggered.connect(self.set_sounds)
+        self._test_action = QAction(TEST_TOAST_TEXT, menu)
+        self._test_action.triggered.connect(lambda _checked=False: self.send_test())
+        self._send_test_fn = send_test_fn
         self._update_version = ""
         self._update_found.connect(self._show_update)
         menu.addAction(self._update_action)
@@ -175,6 +185,8 @@ class TrayController(QSystemTrayIcon):
         menu.addSeparator()
         menu.addAction(self._reminders_action)
         menu.addAction(self._settings_action)
+        menu.addAction(self._sounds_action)
+        menu.addAction(self._test_action)
         menu.addAction(self._check_updates_action)
         menu.addSeparator()
         menu.addAction(quit_action)
@@ -255,6 +267,21 @@ class TrayController(QSystemTrayIcon):
             self.showMessage("SmartCal", f"SmartCal v{version} is available. "
                              "Right-click the tray icon to download it.",
                              QSystemTrayIcon.MessageIcon.Information, 10000)
+
+    def set_sounds(self, enabled: bool) -> None:
+        try:
+            self.settings.set_sounds(enabled)
+        except OSError:
+            self._save_failed()
+        sounds.set_enabled(self.settings.sounds)
+        self._sounds_action.setChecked(self.settings.sounds)
+        sounds.play("open")    # a preview when switched on (silent when off)
+
+    def send_test(self) -> None:
+        """A reminder-style toast on demand: check that Windows shows it."""
+        if self._send_test_fn is not None:
+            self._send_test_fn("SmartCal test notification",
+                               "If you can see and hear this, meeting reminders will too.", None)
 
     def set_check_updates(self, enabled: bool) -> None:
         try:
