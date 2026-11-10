@@ -19,10 +19,10 @@ from datetime import date
 from PyQt6.QtCore import QEvent, Qt, pyqtSignal
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialogButtonBox, QFormLayout,
                              QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-                             QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
-                             QTabWidget, QVBoxLayout, QWidget)
+                             QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSlider,
+                             QSpinBox, QTabWidget, QVBoxLayout, QWidget)
 
-from .. import agenda
+from .. import agenda, sounds
 from ..settings import DEFAULT_CLAUDE_MODEL, claude_model_choices
 from ..textutil import plain_tip
 from . import motion, theme
@@ -331,6 +331,30 @@ class SettingsDialog(TrayDialog):
         self.animations_box.setToolTip("On: always animate. Follow Windows setting: only "
                                        "when Windows Animation effects are on.")
         form.addRow("Animations", self.animations_box)
+        # v0.15.1: 100% is the loudness of v0.14; the default is 40% (60% quieter).
+        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setSingleStep(5)
+        self.volume_slider.setPageStep(10)
+        self.volume_slider.setValue(getattr(self.settings, "sound_volume", 40))
+        self.volume_slider.setStyleSheet(
+            f"QSlider::groove:horizontal {{ height:4px; background:{theme.BORDER};"
+            f" border-radius:2px; }}"
+            f" QSlider::sub-page:horizontal {{ background:{theme.ACCENT}; border-radius:2px; }}"
+            f" QSlider::handle:horizontal {{ background:{theme.TEXT}; width:14px;"
+            f" margin:-5px 0; border-radius:7px; }}")
+        self.volume_label = QLabel()
+        self.volume_label.setMinimumWidth(40)
+        self.volume_slider.valueChanged.connect(
+            lambda v: self.volume_label.setText(f"{v}%"))
+        self.volume_label.setText(f"{self.volume_slider.value()}%")
+        # Let go of the slider: a preview at that level (nothing is saved until OK).
+        self.volume_slider.sliderReleased.connect(
+            lambda: sounds.play("chime", self.volume_slider.value()))
+        vol_row = QHBoxLayout()
+        vol_row.addWidget(self.volume_slider, 1)
+        vol_row.addWidget(self.volume_label)
+        form.addRow("Sound volume", vol_row)
         return w
 
     # -- meetings tab (hidden meetings, meeting colors; local to SmartCal) ---
@@ -597,7 +621,8 @@ class SettingsDialog(TrayDialog):
     # -- apply -------------------------------------------------------------
     _FIELDS = ("hidden_calendars", "shown_calendars", "lead_minutes", "default_lead_minutes",
                "muted", "autostart", "claude_model", "hidden_events", "event_colors",
-               "event_color_titles", "hidden_accounts", "tile_style", "animations")
+               "event_color_titles", "hidden_accounts", "tile_style", "animations",
+               "sound_volume")
 
     def accept(self) -> None:
         s = self.settings
@@ -610,6 +635,7 @@ class SettingsDialog(TrayDialog):
             if cid in self._lead_touched and spin.value() != orig:
                 s.lead_minutes[cid] = spin.value()
         s.autostart = self.autostart_box.isChecked()
+        s.sound_volume = self.volume_slider.value()
         mode = self.animations_box.currentData()
         if mode != self._animations_orig:    # only if changed here (the tray menu may
             s.animations = mode              # have changed it meanwhile)
@@ -635,5 +661,6 @@ class SettingsDialog(TrayDialog):
             self._warn("Settings", f"Could not save settings: {exc}")
             return
         motion.set_user_preference(s.animations)   # takes effect at once
+        sounds.set_volume(s.sound_volume)
         self.applied.emit()
         super().accept()

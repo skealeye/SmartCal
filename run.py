@@ -195,6 +195,7 @@ def main() -> int:
     toast.tray = tray
     toast.alerts = AlertManager(tray.tray_geometry)   # v0.15.0: reminder cards
     sounds.set_enabled(settings.sounds)
+    sounds.set_volume(settings.sound_volume)
     window.tray_geometry = tray.tray_geometry   # first open: next to the tray icon
     popup.chat_attention.connect(guarded(tray.notify_attention))
     instance.activated.connect(guarded(tray.show_popup))   # a second launch was refused
