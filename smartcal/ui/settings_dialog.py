@@ -17,12 +17,12 @@ import logging
 from datetime import date
 
 from PyQt6.QtCore import QEvent, Qt, pyqtSignal
-from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialogButtonBox, QFormLayout,
+from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialogButtonBox, QFormLayout,
                              QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-                             QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSlider,
-                             QSpinBox, QTabWidget, QVBoxLayout, QWidget)
+                             QLineEdit, QMessageBox, QPushButton, QScrollArea, QSizePolicy,
+                             QSlider, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
 
-from .. import agenda, sounds
+from .. import agenda, assistant, sounds
 from ..settings import DEFAULT_CLAUDE_MODEL, claude_model_choices
 from ..textutil import plain_tip
 from . import motion, theme
@@ -355,7 +355,61 @@ class SettingsDialog(TrayDialog):
         vol_row.addWidget(self.volume_slider, 1)
         vol_row.addWidget(self.volume_label)
         form.addRow("Sound volume", vol_row)
+        # v0.16.0: the Claude API key (Ask Claude), and the command that connects Claude
+        # Code (or any MCP client) to SmartCal. The key is saved by its own button.
+        self.key_box = QLineEdit()
+        self.key_box.setEchoMode(QLineEdit.EchoMode.Password)
+        self.key_box.setPlaceholderText("sk-ant-...  (from console.anthropic.com)")
+        self.key_save = QPushButton("Save key")
+        self.key_save.clicked.connect(self._save_key)
+        self.key_status = QLabel()
+        self.key_status.setStyleSheet(f"color:{theme.MUTED};")
+        key_row = QHBoxLayout()
+        key_row.addWidget(self.key_box, 1)
+        key_row.addWidget(self.key_save)
+        form.addRow("Claude API key", key_row)
+        form.addRow("", self.key_status)
+        self._show_key_status()
+        self.mcp_button = QPushButton("Copy the Claude Code connect command")
+        self.mcp_button.setToolTip("Paste it in a terminal once: Claude Code can then make "
+                                   "reminders and read your agenda in SmartCal.")
+        self.mcp_button.clicked.connect(self._copy_mcp_command)
+        form.addRow("Claude Code", self.mcp_button)
         return w
+
+    def _show_key_status(self) -> None:
+        src = assistant.api_key_source()
+        self.key_status.setText({
+            "saved": "A key is saved. Paste a new one to replace it, or save an empty box "
+                     "to remove it.",
+            "environment": "Using the ANTHROPIC_API_KEY environment variable (it takes "
+                           "priority over a saved key).",
+            "none": "No key yet: Ask Claude needs one."}[src])
+
+    def _save_key(self) -> None:
+        try:
+            assistant.save_api_key(self.key_box.text())
+        except (ValueError, OSError) as exc:
+            self._warn("Claude API key", str(exc))
+            return
+        self.key_box.clear()
+        self._show_key_status()
+
+    @staticmethod
+    def mcp_command() -> str:
+        """The `claude mcp add` line for this install (the release exe, or the source)."""
+        import sys
+        from pathlib import Path
+        if getattr(sys, "frozen", False):
+            target = f'"{Path(sys.executable).with_name("SmartCal-mcp.exe")}"'
+        else:
+            root = Path(__file__).resolve().parents[2]
+            target = f'python "{root / "smartcal_mcp.py"}"'
+        return f"claude mcp add smartcal -- {target}"
+
+    def _copy_mcp_command(self) -> None:
+        QApplication.clipboard().setText(self.mcp_command())
+        self.mcp_button.setText("Copied: paste it in a terminal")
 
     # -- meetings tab (hidden meetings, meeting colors; local to SmartCal) ---
     def _build_meetings(self) -> QWidget:

@@ -76,6 +76,12 @@ ANTHROPIC_API_KEY=your-key-here
 
 An `ANTHROPIC_API_KEY` environment variable takes precedence. SmartCal does not read a `.env` from the current folder. Never commit or share the key.
 
+### Claude API key and talking to SmartCal from Claude
+
+**Ask Claude (inside SmartCal)** needs an Anthropic API key from <https://console.anthropic.com/> (billed to your API account; a Claude.ai subscription login cannot be used). Paste it in **Settings > General > Claude API key** and click **Save key**; it is stored in `%APPDATA%\SmartCal\.env` and used by the next chat. An `ANTHROPIC_API_KEY` environment variable takes priority.
+
+**Claude Code / Claude Desktop to SmartCal (MCP).** The release folder has `SmartCal-mcp.exe`, a small MCP server. Connect Claude Code once: **Settings > General > Claude Code > Copy the Claude Code connect command**, paste it in a terminal (it looks like `claude mcp add smartcal -- "C:\...\SmartCal-mcp.exe"`). Then, in any Claude Code session, say things like *"tell SmartCal to remind me to check in on the Acme deal tomorrow at 10am"*, *"what is on my calendar Thursday?"*, *"list my SmartCal reminders"* or *"cancel reminder 12"*. Tools: `smartcal_now`, `smartcal_add_reminder`, `smartcal_list_reminders`, `smartcal_cancel_reminder`, `smartcal_agenda`. Reminders are handed to the running SmartCal through `%APPDATA%\SmartCal\inbox` (it checks every 5 seconds; if SmartCal is not running they are added at its next start), and the popup card and chime appear at the time you set. The server only touches reminders and reads your agenda; it cannot create or change Google events. From source, use `claude mcp add smartcal -- python smartcal_mcp.py` in the repo folder.
+
 ### Updates
 
 The release build asks GitHub once a day (and shortly after start-up) whether a newer release of `skealeye/SmartCal` exists. If so, the tray menu shows **Update available: vX.Y.Z (download)**, which opens the release page, and one tray balloon announces it. SmartCal never downloads or installs anything itself: unzip the new release over the old folder (your settings and sign-ins live in `%APPDATA%\SmartCal` and are kept). Turn the check off with the tray menu's **Check for updates daily**, or set `SMARTCAL_NO_UPDATE_CHECK=1`. Running from source never checks.

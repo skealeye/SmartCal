@@ -41,3 +41,16 @@ if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed ($LASTEXITCODE)" }
 $exe = Join-Path $dist "SmartCal\SmartCal.exe"
 if (-not (Test-Path $exe)) { throw "PyInstaller finished but $exe is missing" }
 Write-Host "Built: $exe"
+
+# v0.16.0: SmartCal-mcp.exe, the console program Claude Code / Claude Desktop starts to
+# talk to SmartCal (a windowed exe has no stdin/stdout). One file, placed next to SmartCal.exe.
+python -m PyInstaller --noconfirm --clean --console --onefile --name SmartCal-mcp `
+    --specpath build `
+    --distpath (Join-Path $dist "SmartCal") `
+    --workpath (Join-Path $work "mcp") `
+    --exclude-module PyQt6 --exclude-module anthropic `
+    smartcal_mcp.py
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller (mcp) failed ($LASTEXITCODE)" }
+$mcp = Join-Path $dist "SmartCal\SmartCal-mcp.exe"
+if (-not (Test-Path $mcp)) { throw "PyInstaller finished but $mcp is missing" }
+Write-Host "Built: $mcp"

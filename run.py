@@ -6,7 +6,7 @@ from datetime import datetime
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QApplication
 
-from smartcal import __version__, autostart, sounds, updates
+from smartcal import __version__, autostart, inbox, sounds, updates
 from smartcal.actions import Actions
 from smartcal.assistant import Assistant, make_client
 from smartcal.clients import ClientPool
@@ -245,6 +245,19 @@ def main() -> int:
             wake_timer.stop()
         else:
             wake_timer.start(ms)
+
+    # v0.16.0: commands other programs left in the inbox (the MCP server: "remind me to...")
+    @guarded
+    def read_inbox() -> None:
+        if inbox.process(reminders):
+            tray.refresh_reminders()
+            arm_wake()
+
+    inbox_timer = QTimer()
+    inbox_timer.setInterval(5_000)
+    inbox_timer.timeout.connect(read_inbox)
+    inbox_timer.start()
+    QTimer.singleShot(1000, read_inbox)
 
     notify_timer = QTimer()
     notify_timer.setInterval(30_000)

@@ -25,6 +25,7 @@ import os
 import re
 import threading
 import unicodedata
+import weakref
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -397,12 +398,49 @@ def load_api_key() -> str:
     raise AssistantError(f"No Claude API key found. Add ANTHROPIC_API_KEY to {app_env}")
 
 
+_clients: "weakref.WeakSet" = weakref.WeakSet()
+
+
+def reset_clients() -> None:
+    """Forget every built client: the next chat uses the key as it is now."""
+    for c in list(_clients):
+        c._client = None
+
+
+def api_key_source() -> str:
+    """Where the key comes from: environment, saved (the .env file) or none."""
+    if (os.environ.get("ANTHROPIC_API_KEY") or "").strip():
+        return "environment"
+    if _read_env_file(data_dir() / ".env").get("ANTHROPIC_API_KEY", "").strip():
+        return "saved"
+    return "none"
+
+
+def save_api_key(key: str) -> None:
+    """Store (or, if empty, remove) the key in the .env file in SmartCal's data folder,
+    keeping its other lines."""
+    key = (key or "").strip()
+    if key and (len(key) < 20 or re.search(r"\s", key) or key[:1] in "\"'"):
+        raise ValueError("That does not look like an API key.")
+    path = data_dir() / ".env"
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except (OSError, UnicodeDecodeError):
+        lines = []
+    lines = [ln for ln in lines if not re.match(r"\s*(export\s+)?ANTHROPIC_API_KEY\s*=", ln)]
+    if key:
+        lines.append(f"ANTHROPIC_API_KEY={key}")
+    path.write_text(chr(10).join(lines) + (chr(10) if lines else ""), encoding="utf-8")
+    reset_clients()
+
+
 class _LazyClient:
     """Builds the real `anthropic.Anthropic` on first use, so a missing key or the
     SDK import only matters when the owner actually chats."""
 
     def __init__(self):
         self._client = None
+        _clients.add(self)
 
     def real(self):
         if self._client is None:
