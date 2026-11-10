@@ -82,8 +82,9 @@ def join_url(url: str | None) -> str | None:
 class ToastSender:
     """Callable `(title, body, url) -> None`; never raises for display problems."""
 
-    def __init__(self, tray=None, notification_cls=None):
+    def __init__(self, tray=None, notification_cls=None, alerts=None):
         self.tray = tray
+        self.alerts = alerts   # v0.15.0: SmartCal's own card (never hidden by Do Not Disturb)
         self._cls = notification_cls
 
     def _notification_cls(self):
@@ -95,6 +96,12 @@ class ToastSender:
     def __call__(self, title: str, body: str, url: str | None = None) -> None:
         log.info("toast: %s", clean_text(title, 60))
         sounds.play("chime")   # ours, so it is heard even if Windows hides the banner
+        if self.alerts is not None:
+            try:
+                self.alerts.show(title, body, url)
+                return
+            except Exception:  # noqa: BLE001 - fall back to the Windows toast
+                log.exception("alert card failed; using the Windows toast")
         try:
             self._show_native(title, body, url)
         except Exception as exc:  # noqa: BLE001 - fall back to the tray balloon

@@ -24,6 +24,7 @@ from smartcal.single_instance import SingleInstance
 from smartcal.undo import UndoStore
 from smartcal.toast import ToastSender, register_app_id
 from smartcal.ui import motion, theme, wintrace
+from smartcal.ui.alerts import AlertManager
 from smartcal.ui.popup import AgendaPopup
 from smartcal.ui.settings_dialog import SettingsDialog
 from smartcal.ui.tray import TrayController, dialog_visible, track_dialog
@@ -192,6 +193,7 @@ def main() -> int:
                           update_check_fn=None if no_updates else updates.check,
                           send_test_fn=toast)
     toast.tray = tray
+    toast.alerts = AlertManager(tray.tray_geometry)   # v0.15.0: reminder cards
     sounds.set_enabled(settings.sounds)
     window.tray_geometry = tray.tray_geometry   # first open: next to the tray icon
     popup.chat_attention.connect(guarded(tray.notify_attention))

@@ -485,12 +485,17 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
                     and r.rect().contains(r.mapFromGlobal(pos))
                 r.set_hovered(inside, animate=False)
 
-    def _row_signature(self, ev, time_text: str, is_next: bool) -> tuple:
+    @staticmethod
+    def _is_past(ev, now) -> bool:
+        """v0.15.0: a timed meeting that has ended (its text is greyed out)."""
+        return (not ev.all_day) and ev.end <= now
+
+    def _row_signature(self, ev, time_text: str, is_next: bool, past: bool = False) -> tuple:
         """Everything a row shows (v0.10.0): same signature, the row widget stays."""
         url = getattr(ev, "meeting_url", None)
         url = url if safe_http_url(url) is not None else None
         return (ev.title, time_text, is_next, theme.effective_color(ev, self.settings),
-                self.tile_style(), url, meeting_label(url) if url else "")
+                self.tile_style(), url, meeting_label(url) if url else "", past)
 
     def _empty_line(self) -> str:
         if self._no_accounts:
@@ -519,7 +524,7 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
             is_next = nxt is not None and ev.id == nxt.id and ev.account == nxt.account
             time_text = "All day" if ev.all_day else f"{ev.start:%I:%M %p}".lstrip("0")
             specs.append((_row_key(ev), ev, time_text, is_next,
-                          self._row_signature(ev, time_text, is_next)))
+                          self._row_signature(ev, time_text, is_next, self._is_past(ev, now))))
         old = [r for r in self.row_widgets() if isinstance(r, AgendaRow)]
         by_key = {_row_key(r.event): r for r in old}
         keep = {k: by_key[k] for k, _ev, _t, _n, sig in specs
@@ -564,7 +569,8 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
                     # Built in their final look (selected, under the mouse): no fade.
                     row = self._make_row(ev, time_text, is_next,
                                          selected=self._selected_key == k,
-                                         hovered=k == hovered_key)
+                                         hovered=k == hovered_key,
+                                         past=self._is_past(ev, now))
                     row.signature = sig
                     created += 1
                 self._rows_box.addWidget(row)
@@ -1050,9 +1056,10 @@ class AgendaPopup(winframe.FramedWindow, QWidget):
         return style if style in theme.TILE_STYLES else "stripe"
 
     def _make_row(self, ev, time_text: str, is_next: bool, selected: bool = False,
-                  hovered: bool = False) -> "AgendaRow":
+                  hovered: bool = False, past: bool = False) -> "AgendaRow":
         row = AgendaRow(ev, time_text, is_next, theme.effective_color(ev, self.settings),
-                        style=self.tile_style(), selected=selected, hovered=hovered)
+                        style=self.tile_style(), selected=selected, hovered=hovered,
+                        past=past)
         url = getattr(ev, "meeting_url", None)
         if safe_http_url(url) is not None:     # same check as the click handler
             if row.style == "fill":
@@ -2110,16 +2117,23 @@ class AgendaRow(QFrame):
     touched = pyqtSignal(object)    # pressed (v0.9.0: a row still building in lands)
 
     def __init__(self, ev, time_text: str, is_next: bool, color: str, parent=None,
-                 style: str = "stripe", selected: bool = False, hovered: bool = False):
+                 style: str = "stripe", selected: bool = False, hovered: bool = False,
+                 past: bool = False):
         super().__init__(parent)
         self.event = ev
+        self.past = bool(past)   # v0.15.0: the meeting has ended: greyed out
         self.join_button: QPushButton | None = None
         # v0.9.0: shrinks a little while held, springs back on release.
         self.press_feedback = cards.PressFeedback(self)
         self.is_next = is_next
         self.color = color
         self.style = style if style in theme.TILE_STYLES else "stripe"
-        self.fg = theme.text_on(color) if self.style == "fill" else theme.TEXT
+        if self.past and self.style == "fill":      # a dimmed tile, grey text
+            self.color = theme.mix(color, theme.BG, 0.6)
+            self.fg = theme.muted_on(self.color)
+        else:
+            self.fg = theme.text_on(color) if self.style == "fill" else (
+                theme.MUTED if self.past else theme.TEXT)
         # Built in its final state: no fade when a refresh re-creates a selected row or
         # the row under the mouse.
         self._selected, self._hovered, self._pressed = bool(selected), bool(hovered), False
@@ -2159,7 +2173,7 @@ class AgendaRow(QFrame):
         top.setObjectName("title")
         top.setTextFormat(Qt.TextFormat.RichText)
         top.setWordWrap(True)
-        if self.style == "fill":
+        if self.style == "fill" or self.past:
             top.setStyleSheet(f"color:{self.fg};")
         col.addWidget(top)
         self.head_layout.addLayout(col, 1)
