@@ -76,6 +76,12 @@ ANTHROPIC_API_KEY=your-key-here
 
 An `ANTHROPIC_API_KEY` environment variable takes precedence. SmartCal does not read a `.env` from the current folder. Never commit or share the key.
 
+### Updates
+
+The release build asks GitHub once a day (and shortly after start-up) whether a newer release of `skealeye/SmartCal` exists. If so, the tray menu shows **Update available: vX.Y.Z (download)**, which opens the release page, and one tray balloon announces it. SmartCal never downloads or installs anything itself: unzip the new release over the old folder (your settings and sign-ins live in `%APPDATA%\SmartCal` and are kept). Turn the check off with the tray menu's **Check for updates daily**, or set `SMARTCAL_NO_UPDATE_CHECK=1`. Running from source never checks.
+
+**Maintainer:** to publish an update, bump `__version__`, run `scripts\build.ps1`, zip the `SmartCal` output folder, and create a GitHub Release whose tag is the version (e.g. `v0.13.1`) with the zip attached.
+
 ## Run from source
 
 ```

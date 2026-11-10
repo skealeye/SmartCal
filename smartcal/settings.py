@@ -114,6 +114,9 @@ class Settings:
         # Still synced, and still busy time for the assistant and free-slot search.
         self.hidden_accounts: set[str] = set()
         self.autostart: bool = True
+        # Ask GitHub once a day whether a newer SmartCal release exists (v0.13.0).
+        self.check_updates: bool = True
+        self.notified_update: str = ""   # the version already announced by a balloon
         # How a meeting's color shows in the popup list: "stripe" (a bar on the left) or
         # "fill" (the whole row in that color).
         self.tile_style: str = "stripe"
@@ -156,6 +159,10 @@ class Settings:
             else "stripe"
         if isinstance(data.get("autostart"), bool):
             self.autostart = data["autostart"]
+        if isinstance(data.get("check_updates"), bool):
+            self.check_updates = data["check_updates"]
+        nu = data.get("notified_update")
+        self.notified_update = nu if isinstance(nu, str) else ""
         self.first_run_done = data.get("first_run_done") is True
         model = data.get("claude_model")
         if isinstance(model, str) and model.strip():
@@ -217,6 +224,8 @@ class Settings:
                 "muted": sorted(self.muted),
                 "hidden_accounts": sorted(self.hidden_accounts),
                 "autostart": self.autostart,
+                "check_updates": self.check_updates,
+                "notified_update": self.notified_update,
                 "tile_style": self.tile_style,
                 "animations": self.animations,
                 "first_run_done": self.first_run_done,
@@ -329,6 +338,14 @@ class Settings:
 
     def set_autostart(self, enabled: bool) -> None:
         self.autostart = bool(enabled)
+        self.save()
+
+    def set_check_updates(self, enabled: bool) -> None:
+        self.check_updates = bool(enabled)
+        self.save()
+
+    def set_notified_update(self, version: str) -> None:
+        self.notified_update = str(version)
         self.save()
 
     def set_claude_model(self, model: str) -> None:

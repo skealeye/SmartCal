@@ -7,11 +7,11 @@ import threading
 import time
 from datetime import date, datetime
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QAction, QActionGroup, QIcon
+from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QAction, QActionGroup, QDesktopServices, QIcon
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-from .. import agenda, google_auth
+from .. import agenda, google_auth, updates
 from ..textutil import plain_line
 from . import appicon, meeting_menus, motion
 
@@ -27,6 +27,7 @@ NOTHING_HIDDEN_TEXT = "Nothing hidden"
 RESTORE_ALL_TEXT = "Restore all hidden"
 RESTORE_TITLE_MAX = 40
 ANIMATIONS_TEXT = "Animations"
+CHECK_UPDATES_TEXT = "Check for updates daily"
 ANIMATION_CHOICES = (("on", "On"), ("auto", "Follow Windows"), ("off", "Off"))
 
 
@@ -93,12 +94,13 @@ def apply_icon(tray, day: int) -> None:
 class TrayController(QSystemTrayIcon):
     _add_done = pyqtSignal(int, str, str)   # generation, status, message
     signin_changed = pyqtSignal(bool)       # a Google sign-in started (True) / ended
+    _update_found = pyqtSignal(str)         # a newer release exists (from a worker thread)
 
     def __init__(self, popup, worker, cache, settings, parent=None,
                  on_accounts_changed=None, add_account_fn=None, on_open_settings=None, reminders=None,
                  on_before_exit=None, exit_fn=os._exit, cancel_signin_fn=None,
                  clock=time.monotonic, instance=None, accounts_fn=None,
-                 on_visibility_changed=None):
+                 on_visibility_changed=None, update_check_fn=None):
         super().__init__(parent)
         self.popup, self.worker = popup, worker
         self._instance = instance   # SingleInstance: released first thing on Quit
@@ -150,6 +152,20 @@ class TrayController(QSystemTrayIcon):
             act.triggered.connect(lambda _c=False, m=mode: self.set_animations(m))
             self._animations_group.addAction(act)
             self.animations_menu.addAction(act)
+        # v0.13.0: "Update available" (visible only when a newer release exists) and the
+        # switch for the daily check.
+        self._update_action = QAction("", menu)
+        self._update_action.setVisible(False)
+        self._update_action.triggered.connect(
+            lambda _checked=False: QDesktopServices.openUrl(QUrl(updates.RELEASES_URL)))
+        self._check_updates_action = QAction(CHECK_UPDATES_TEXT, menu)
+        self._check_updates_action.setCheckable(True)
+        self._check_updates_action.setChecked(getattr(settings, "check_updates", True))
+        self._check_updates_action.triggered.connect(self.set_check_updates)
+        self._update_check_fn = update_check_fn
+        self._update_version = ""
+        self._update_found.connect(self._show_update)
+        menu.addAction(self._update_action)
         menu.addAction(self._add_action)
         menu.addAction(self._sync_action)
         menu.addSeparator()
@@ -159,6 +175,7 @@ class TrayController(QSystemTrayIcon):
         menu.addSeparator()
         menu.addAction(self._reminders_action)
         menu.addAction(self._settings_action)
+        menu.addAction(self._check_updates_action)
         menu.addSeparator()
         menu.addAction(quit_action)
         self._menu = menu  # keep a reference
@@ -167,6 +184,11 @@ class TrayController(QSystemTrayIcon):
         self.setContextMenu(menu)
         self.activated.connect(self._on_activated)
         self._add_done.connect(self._finish_add)
+        self._update_timer = QTimer(self)
+        self._update_timer.timeout.connect(self.check_for_update)
+        if update_check_fn is not None:
+            self._update_timer.start(updates.CHECK_EVERY_MS)
+            QTimer.singleShot(15000, self.check_for_update)   # soon after start-up
         self.update_tooltip()
 
     def _tray_rect(self):
@@ -204,6 +226,46 @@ class TrayController(QSystemTrayIcon):
         self.update_tooltip()
         self.popup.refresh()
         self.popup.show_near_tray(self._tray_rect())
+
+    # -- update check (v0.13.0) -------------------------------------------------
+    def check_for_update(self) -> None:
+        """Ask for a newer release on a worker thread (never blocks the UI)."""
+        if self._update_check_fn is None or not self.settings.check_updates:
+            return
+
+        def work() -> None:
+            try:
+                found = self._update_check_fn()
+            except Exception:  # noqa: BLE001
+                log.exception("update check failed")
+                return
+            if found:
+                self._update_found.emit(found)
+        threading.Thread(target=work, daemon=True, name="update-check").start()
+
+    def _show_update(self, version: str) -> None:
+        self._update_version = version
+        self._update_action.setText(f"Update available: v{version} (download)")
+        self._update_action.setVisible(True)
+        if self.settings.notified_update != version:   # tell the owner once per version
+            try:
+                self.settings.set_notified_update(version)
+            except OSError:
+                pass
+            self.showMessage("SmartCal", f"SmartCal v{version} is available. "
+                             "Right-click the tray icon to download it.",
+                             QSystemTrayIcon.MessageIcon.Information, 10000)
+
+    def set_check_updates(self, enabled: bool) -> None:
+        try:
+            self.settings.set_check_updates(enabled)
+        except OSError:
+            self._save_failed()
+        self._check_updates_action.setChecked(self.settings.check_updates)
+        if self.settings.check_updates:
+            self.check_for_update()
+        else:
+            self._update_action.setVisible(False)
 
     def update_tooltip(self) -> None:
         now = self.now()

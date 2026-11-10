@@ -6,7 +6,7 @@ from datetime import datetime
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QApplication
 
-from smartcal import __version__, autostart
+from smartcal import __version__, autostart, updates
 from smartcal.actions import Actions
 from smartcal.assistant import Assistant, make_client
 from smartcal.clients import ClientPool
@@ -181,11 +181,15 @@ def main() -> int:
         if dialog_ref and dialog_visible(dialog_ref[0]):
             dialog_ref[0].sync_from_settings()
 
+    # Release builds only: running from source (or SMARTCAL_NO_UPDATE_CHECK=1) never checks.
+    no_updates = (not getattr(sys, "frozen", False)
+                  or os.environ.get("SMARTCAL_NO_UPDATE_CHECK") == "1")
     tray = TrayController(popup, worker, cache, settings, on_accounts_changed=drop_clients,
                           on_open_settings=open_settings, reminders=reminders,
                           on_before_exit=window.save_state, instance=instance,
                           accounts_fn=list_accounts,
-                          on_visibility_changed=on_visibility_changed)
+                          on_visibility_changed=on_visibility_changed,
+                          update_check_fn=None if no_updates else updates.check)
     toast.tray = tray
     window.tray_geometry = tray.tray_geometry   # first open: next to the tray icon
     popup.chat_attention.connect(guarded(tray.notify_attention))
