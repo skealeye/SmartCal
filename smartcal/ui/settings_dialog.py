@@ -363,6 +363,7 @@ class SettingsDialog(TrayDialog):
         self.key_save = QPushButton("Save key")
         self.key_save.clicked.connect(self._save_key)
         self.key_status = QLabel()
+        self.key_status.setWordWrap(True)   # v0.16.1: a long line made the dialog 1200 px wide
         self.key_status.setStyleSheet(f"color:{theme.MUTED};")
         key_row = QHBoxLayout()
         key_row.addWidget(self.key_box, 1)

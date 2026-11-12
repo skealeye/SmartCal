@@ -185,8 +185,12 @@ def handle(msg: dict) -> dict | None:
 
 
 def main() -> int:
+    try:      # v0.16.1: read UTF-8 whatever the console code page; a BOM is dropped
+        sys.stdin.reconfigure(encoding="utf-8-sig")
+    except (AttributeError, ValueError):
+        pass
     for raw in sys.stdin:
-        raw = raw.strip()
+        raw = raw.strip().lstrip("\ufeff")
         if not raw:
             continue
         try:

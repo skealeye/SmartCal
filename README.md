@@ -158,3 +158,7 @@ pytest
 ```
 
 Tests run offscreen by default (`tests/conftest.py` forces `QT_QPA_PLATFORM=offscreen`, even if your shell sets another platform), so no windows appear on your screen. To run them on the real display on purpose, set `SMARTCAL_TESTS_REAL_DISPLAY=1`.
+
+## Privacy and terms
+
+See [PRIVACY.md](PRIVACY.md) and [TERMS.md](TERMS.md).

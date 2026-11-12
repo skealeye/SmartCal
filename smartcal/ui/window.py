@@ -42,6 +42,7 @@ SCROLL_HEADROOM = 10        # px above the hour scrolled to: its label shows who
 DEFAULT_SIZE = QSize(1000, 700)
 
 DECLINED_OPACITY = 0.45
+PAST_OPACITY = 0.5      # v0.16.1: a meeting that has ended is dimmed
 GRID = "#2e3033"            # hour lines, column edges
 GRID_HALF = "#25272a"       # half-hour lines (fainter)
 TODAY_BG = "#262d3a"
@@ -213,6 +214,11 @@ class EventChip(QLabel):
     def hover_level(self) -> float:
         return self._hover
 
+    def is_past(self) -> bool:
+        """v0.16.1: a timed meeting that has ended (dimmed, like the popup's greyed rows)."""
+        ev = self.event
+        return (not getattr(ev, "all_day", False)) and ev.end <= datetime.now().astimezone()
+
     def colors(self):
         return tile_colors(self.color, self.style, self.kind, self._hover)
 
@@ -246,7 +252,7 @@ class EventChip(QLabel):
         p = QPainter(self)
         try:
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            p.setOpacity(self._opacity)
+            p.setOpacity(min(self._opacity, PAST_OPACITY) if self.is_past() else self._opacity)
             bg, fg, meta, bar = self.colors()
             radius = TILE_RADIUS if self.kind == BLOCK else 4
             shape = QPainterPath()
