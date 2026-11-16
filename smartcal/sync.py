@@ -21,6 +21,10 @@ SYNC_FUTURE_DAYS = 60
 # An account whose last successful sync is older than this is not trusted for
 # availability: its token may be revoked or the PC was offline.
 STALE_AFTER = timedelta(hours=2)
+# v0.16.2: after an "offline" pass (dropped TLS connection, VPN/Wi-Fi blip, Google 5xx) the
+# next pass comes after these delays (seconds) instead of the full interval; the last
+# one repeats. Capped at the interval. A healthy pass returns to the normal interval.
+OFFLINE_RETRY_DELAYS = (15, 30, 60, 120)
 
 
 def ago_text(delta: timedelta) -> str:
@@ -71,6 +75,7 @@ class SyncWorker(QThread):
         self.cache = cache
         self._client_for = client_for   # account -> GoogleClient
         self.interval_seconds = interval_seconds
+        self.retry_delays = OFFLINE_RETRY_DELAYS
         self._wake = threading.Event()
         self._stop = threading.Event()
         self.clock = lambda: datetime.now().astimezone()
@@ -107,18 +112,29 @@ class SyncWorker(QThread):
         self.cache.record_sync(account, start, end, now)   # only after a full success
         return "ok"
 
-    def sync_all(self) -> None:
+    def next_wait(self, offline_streak: int) -> float:
+        """Seconds until the next pass after `offline_streak` offline passes in a row."""
+        if offline_streak <= 0:
+            return self.interval_seconds
+        delay = self.retry_delays[min(offline_streak, len(self.retry_delays)) - 1]
+        return min(delay, self.interval_seconds)
+
+    def sync_all(self) -> bool:
+        """One pass over every account; True when any account was offline."""
+        offline = False
         for account in self._accounts():
             if self._stop.is_set():
-                return
+                return offline
             try:
                 result = self.sync_account(account)
             except Exception:  # noqa: BLE001 - never kill the worker thread
                 log.exception("sync of %s crashed", account)
                 result = "error"
             self.status.emit(account, result)
+            offline = offline or result == "offline"
             if result == "ok":
                 self.synced.emit(account)
+        return offline
 
     def start(self, *args, **kwargs) -> None:
         self._stop.clear()
@@ -132,7 +148,13 @@ class SyncWorker(QThread):
         self._wake.set()
 
     def run(self) -> None:
+        streak = 0
         while not self._stop.is_set():
             self._wake.clear()
-            self.sync_all()
-            self._wake.wait(self.interval_seconds)
+            offline = self.sync_all()
+            if streak and not offline:
+                log.info("sync back online after %d offline pass(es)", streak)
+            streak = streak + 1 if offline else 0
+            if offline:
+                log.info("retrying sync in %ss", self.next_wait(streak))
+            self._wake.wait(self.next_wait(streak))

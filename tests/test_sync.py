@@ -168,3 +168,39 @@ def test_stop_immediately_after_start_exits(qtbot, cache, tmp_path):
     w.stop()
     assert w.wait(5000) is True
     assert not w.isRunning()
+
+
+class FlakyClient(FakeClient):
+    """Fails with a dropped TLS connection `fails` times, then works."""
+    def __init__(self, events, fails):
+        super().__init__(events)
+        self.fails = fails
+
+    def list_calendars(self):
+        if self.fails:
+            self.fails -= 1
+            raise OSError("EOF occurred in violation of protocol (_ssl.c:2427)")
+        return super().list_calendars()
+
+
+def test_offline_retry_backs_off_and_never_exceeds_interval(cache, tmp_path):
+    w = worker(cache, FakeClient(), tmp_path)
+    w.interval_seconds = 300
+    assert w.next_wait(0) == 300                       # healthy: normal interval
+    assert [w.next_wait(n) for n in (1, 2, 3, 4, 9)] == [15, 30, 60, 120, 120]
+    w.interval_seconds = 20
+    assert w.next_wait(2) == 20                        # never longer than the interval
+
+
+def test_worker_retries_soon_after_offline_instead_of_full_interval(qtbot, cache, tmp_path):
+    w = worker(cache, FlakyClient([_ev("1")], fails=1), tmp_path)
+    w.interval_seconds = 3600                          # a full wait would time the test out
+    w.retry_delays = (0.05,)
+    seen = []
+    w.status.connect(lambda a, s: seen.append(s))
+    with qtbot.waitSignal(w.synced, timeout=5000):
+        w.start()
+    w.stop()
+    w.wait(5000)
+    assert seen[:2] == ["offline", "ok"]
+    assert _cached(cache) == ["1"]
