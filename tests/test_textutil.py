@@ -113,3 +113,12 @@ def test_meeting_label_rejects_spoofed_urls():
                 "https://zoom.us\evil.com/", "https://zoom.us/j/1 2", "https://zoom.us/j/1\n",
                 "ftp://zoom.us/j/1", "javascript://zoom.us/%0aalert(1)"):
         assert meeting_label(bad) == "Join meeting", bad
+
+
+def test_unterminated_markup_at_end_is_dropped_and_rest_kept():
+    # v0.16.3: newer html.parser passes an unfinished tag/comment through as text,
+    # and re-scanning it made "<a <a <a ..." quadratic. It is now cut before parsing.
+    assert html_to_text("<b>ok</b> tail <a href='http://x.com").strip() == "ok tail"
+    assert html_to_text("a < b and c > d") == "a < b and c > d"
+    assert html_to_text("keep <!-- note --> this <!-- open").strip() == "keep  this"
+    assert html_to_text("x <br> y <i").strip() == "x\n y"

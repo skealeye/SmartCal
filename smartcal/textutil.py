@@ -19,6 +19,22 @@ _BAD_CHARS = re.compile("[\x00-\x08\x0e-\x1f\x7f-\x9f​-‏  "
 _UNSAFE_URL = re.compile(r"[\\\s\x00-\x1f\x7f-\x9f]")
 
 
+def _drop_unterminated_tail(s: str) -> str:
+    """Cut a comment or tag that is still open at the end of the input (as browsers do).
+
+    v0.16.3: newer html.parser versions pass such a tail through as text, and
+    re-scanning it on every feed made input like "<a <a <a ..." quadratic. Linear."""
+    i = s.find("<!--")
+    while i != -1:
+        j = s.find("-->", i + 4)
+        if j == -1:
+            return s[:i]
+        i = s.find("<!--", j + 3)
+    last_gt = s.rfind(">")
+    m = _TAG_START.search(s, last_gt + 1)
+    return s[:m.start()] if m else s
+
+
 class _Converter(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -100,6 +116,7 @@ def html_to_text(s: str, limit: int = DESCRIPTION_LIMIT) -> str:
         return ""
     s = s[:_INPUT_CAP]
     if _TAG_START.search(s):
+        s = _drop_unterminated_tail(s)
         p = _Converter()
         try:
             p.feed(s)
